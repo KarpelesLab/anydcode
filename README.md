@@ -28,7 +28,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 |-----------|:------:|:------:|:------:|
 | QR Code (v1–40, all EC levels & masks) | ✅ | ✅ | ✅¹ |
 | Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ⬜ |
-| Aztec · Aztec Runes | 🚧 | 🚧 | ⬜ |
+| Aztec (compact + full range, all modes) | ✅ | ✅ | ⬜ |
+| Aztec Runes | ⬜ | ⬜ | ⬜ |
 | Micro QR Code · Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
 | MaxiCode · Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
 

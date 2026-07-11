@@ -242,6 +242,7 @@ impl Symbology {
         matches!(
             self,
             QrCode
+                | Aztec
                 | DataMatrix
                 | Pdf417
                 | Code128

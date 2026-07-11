@@ -53,10 +53,10 @@ pub fn char_for_code(mode: usize, code: u16) -> Option<u8> {
 /// The two-byte string produced by the multi-byte Punct codes (indices 2–5), if any.
 pub fn punct_pair_for_code(code: u16) -> Option<[u8; 2]> {
     match code {
-        2 => Some([b'\r', b'\n']),
-        3 => Some([b'.', b' ']),
-        4 => Some([b',', b' ']),
-        5 => Some([b':', b' ']),
+        2 => Some(*b"\r\n"),
+        3 => Some(*b". "),
+        4 => Some(*b", "),
+        5 => Some(*b": "),
         _ => None,
     }
 }

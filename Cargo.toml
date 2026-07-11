@@ -30,3 +30,8 @@ missing_debug_implementations = "warn"
 all = "warn"
 
 [dev-dependencies]
+
+# Dependency-free frame-detector benchmark (std::time only; no criterion).
+[[bench]]
+name = "detect"
+harness = false

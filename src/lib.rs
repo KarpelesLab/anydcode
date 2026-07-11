@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 
 pub mod codes;
+pub mod detect;
 pub mod error;
 pub mod geometry;
 pub mod image;

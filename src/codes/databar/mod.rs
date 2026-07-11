@@ -13,25 +13,34 @@
 //!   module output does not carry).
 //! - **GS1 DataBar Limited** ([`Symbology::DataBarLimited`]): a GTIN with
 //!   indicator digit 0 or 1, 79 modules wide.
+//! - **GS1 DataBar Expanded** ([`Symbology::DataBarExpanded`], RSS Expanded): a GS1
+//!   element string of Application Identifier data, encoded with the general-purpose
+//!   compaction (§7.2.5) into a variable number of finder patterns and symbol
+//!   characters. Encoding methods 1 and 2 are produced; the weight/date/price
+//!   shortcut methods 3–14 are not (a spec-valid choice; see the `expanded` module).
 //!
 //! ## Not yet implemented
-//! - GS1 DataBar Expanded and all stacked variants (Stacked, Stacked
-//!   Omnidirectional, Expanded Stacked) return [`Error::Unsupported`].
+//! - All stacked variants (Stacked, Stacked Omnidirectional, Expanded Stacked)
+//!   return [`Error::Unsupported`].
 //!
 //! ## Lossless model
-//! Both implemented variants encode a canonical 14-digit GTIN (13-digit body plus
-//! its GS1 mod-10 check digit) as a single [`Segment::numeric`]. Decoding recovers
-//! that exact 14-digit segment, so `encode(decode(x)) == x` byte-for-byte.
+//! Omnidirectional and Limited encode a canonical 14-digit GTIN (13-digit body plus
+//! its GS1 mod-10 check digit) as a single [`Segment::numeric`]. Expanded stores its
+//! reduced element string as a single [`Segment::byte`]. In every case decoding
+//! recovers the exact segment(s), so `encode(decode(x)) == x` byte-for-byte.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`Segment::numeric`]: crate::segment::Segment::numeric
+//! [`Segment::byte`]: crate::segment::Segment::byte
 //! [`LinearPattern`]: crate::output::LinearPattern
 //! [`Error::Unsupported`]: crate::error::Error::Unsupported
 //! [`Symbology::DataBarOmni`]: crate::symbology::Symbology::DataBarOmni
 //! [`Symbology::DataBarLimited`]: crate::symbology::Symbology::DataBarLimited
+//! [`Symbology::DataBarExpanded`]: crate::symbology::Symbology::DataBarExpanded
 
 mod decode;
 mod encode;
+mod expanded;
 mod tables;
 mod widths;
 
@@ -46,6 +55,8 @@ pub enum DataBarVariant {
     Omni,
     /// GS1 DataBar Limited, 79 modules.
     Limited,
+    /// GS1 DataBar Expanded (RSS Expanded), variable length.
+    Expanded,
 }
 
 /// Parameters required to re-encode a GS1 DataBar symbol identically.

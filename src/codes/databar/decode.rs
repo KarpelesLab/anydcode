@@ -42,10 +42,14 @@ impl Decode for DataBarDecoder {
         };
         let widths = run_lengths(&pattern.modules)?;
         match widths.len() {
-            46 => decode_omni(&widths),
+            // 46 elements is Omnidirectional or a minimal Expanded symbol; their
+            // finder-pattern tables are disjoint, so Omni decoding fails cleanly on
+            // an Expanded symbol and we fall through.
+            46 => decode_omni(&widths).or_else(|_| super::expanded::decode(&widths)),
             47 => decode_limited(&widths),
+            n if super::expanded::is_expanded_width(n) => super::expanded::decode(&widths),
             n => Err(Error::undecodable(format!(
-                "unexpected DataBar element count {n} (expected 46 or 47)"
+                "unexpected DataBar element count {n} (expected 46, 47, or an Expanded width)"
             ))),
         }
     }

@@ -10,8 +10,9 @@
 //!
 //! Coverage: compact symbols (1–4 layers) and full-range symbols (1–22 layers) are
 //! encoded and structurally decoded. The payload round-trips losslessly (as a single
-//! byte segment) and re-encodes byte-for-byte identically. Aztec Runes and ECI/FLG
-//! escapes are not implemented.
+//! byte segment) and re-encodes byte-for-byte identically. Aztec Runes (the fixed
+//! 11×11 single-byte symbol, ISO/IEC 24778 Annex A) are also supported via the same
+//! encoder/decoder. ECI/FLG escapes are not implemented.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
@@ -21,6 +22,7 @@ mod encode;
 pub mod gf;
 mod highlevel;
 mod layout;
+mod rune;
 mod tables;
 
 pub use decode::AztecDecoder;
@@ -38,11 +40,15 @@ pub(crate) fn full_size(layers: usize) -> usize {
 
 /// Parameters required to re-encode an Aztec symbol identically (lossless
 /// round-trip): the symbol type and its layer count. The high-level encodation is
-/// deterministic, so these two fields plus the payload fully pin the matrix.
+/// deterministic, so these fields plus the payload fully pin the matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AztecMeta {
-    /// `true` for a compact symbol, `false` for a full-range symbol.
+    /// `true` for a compact symbol, `false` for a full-range symbol. Runes are
+    /// compact.
     pub compact: bool,
-    /// Number of data layers (1–4 compact, 1–22 full).
+    /// Number of data layers (1–4 compact, 1–22 full; `0` for an Aztec Rune).
     pub layers: u8,
+    /// `true` for an Aztec Rune (the fixed 11×11 single-byte symbol, ISO/IEC 24778
+    /// Annex A), which has no data layers.
+    pub rune: bool,
 }

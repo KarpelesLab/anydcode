@@ -33,10 +33,12 @@ mod compaction;
 mod decode;
 pub mod ec;
 mod encode;
+mod sample;
 mod tables;
 
 pub use decode::Pdf417Decoder;
 pub use encode::Pdf417Encoder;
+pub use sample::{Pdf417Scanner, sample_grid, scan};
 
 use crate::error::Error;
 

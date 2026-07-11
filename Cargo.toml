@@ -42,3 +42,7 @@ all = "warn"
 [[bench]]
 name = "detect"
 harness = false
+
+[[example]]
+name = "qrdebug"
+required-features = ["cli"]

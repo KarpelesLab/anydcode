@@ -20,7 +20,7 @@
 //! structure (transcribed from zint). Data encodation covers **Numeric**, **Upper**,
 //! **Lower** and **Byte** modes; **Mixed** and **GB2312 Chinese** modes are modelled
 //! but not produced by the encoder (the decoder reports them as unsupported). See
-//! [`data`] for the exact per-mode bit formats and the small, documented deviations in
+//! `data` for the exact per-mode bit formats and the small, documented deviations in
 //! byte mode.
 //!
 //! # Losslessness and metadata

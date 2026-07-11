@@ -7,8 +7,8 @@
 //! the prime field GF(113), then folded onto a checkerboard of dots.
 //!
 //! Layout:
-//! - [`tables`] — the 9-bit Annex C dot patterns and their reverse lookup.
-//! - [`rs`]     — GF(113) prime-field arithmetic and Reed–Solomon encoding.
+//! - `tables` — the 9-bit Annex C dot patterns and their reverse lookup.
+//! - `rs`     — GF(113) prime-field arithmetic and Reed–Solomon encoding.
 //! - [`encode`] — the A/B/C/binary encodation, sizing, padding, masking and fold.
 //! - [`decode`] — the inverse: unfold, un-mask, RS-verify and segment reconstruction.
 //!

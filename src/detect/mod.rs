@@ -11,14 +11,14 @@
 //!
 //! [`locate`] makes a single reduced-resolution pass:
 //!
-//! 1. **Downscale + binarize** ([`grid`]): box-average the frame down by
+//! 1. **Downscale + binarize** (`grid`): box-average the frame down by
 //!    [`LocateOptions::downscale`] and Otsu-threshold the result once. Everything after
 //!    this works on the small image, which is what makes the locator fast enough to run
 //!    on every frame.
-//! 2. **Concentric finders** ([`finder`]): a run-length row scan with a vertical
+//! 2. **Concentric finders** (`finder`): a run-length row scan with a vertical
 //!    cross-check flags QR/Aztec `1:1:3:1:1` fiducials. These give a high-confidence
 //!    matrix classification and a module-size estimate.
-//! 3. **Texture tiles** ([`tiles`]): tiles dense with dark/light edges are clustered
+//! 3. **Texture tiles** (`tiles`): tiles dense with dark/light edges are clustered
 //!    into regions; the horizontal-vs-vertical edge balance separates 1D barcode
 //!    regions from 2D matrix regions, catching every finder-less symbology.
 //! 4. **Merge + map back**: finder hits upgrade the region they fall in to a matrix

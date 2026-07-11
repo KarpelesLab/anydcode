@@ -61,9 +61,9 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| POSTNET · PLANET · Intelligent Mail | ⬜ | ⬜ | ⬜ |
-| Royal Mail (RM4SCC) · Mailmark · Dutch KIX | ⬜ | ⬜ | ⬜ |
-| Australia Post · Japan Post | ⬜ | ⬜ | ⬜ |
+| POSTNET · PLANET · Intelligent Mail (IMb) | ✅ | ✅ | ⬜ |
+| Royal Mail (RM4SCC) · Dutch KIX | ✅ | ✅ | ⬜ |
+| Mailmark · Australia Post · Japan Post | ⬜ | ⬜ | ⬜ |
 
 ¹ QR ships a full image sampler: Otsu binarization → finder-pattern detection →
 perspective recovery (via the bottom-right alignment pattern) → sub-pixel grid

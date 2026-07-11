@@ -268,6 +268,11 @@ impl Symbology {
                 | PharmacodeTwoTrack
                 | DataBarOmni
                 | DataBarLimited
+                | Postnet
+                | Planet
+                | IntelligentMail
+                | RoyalMail
+                | KixCode
         )
     }
 

@@ -8,6 +8,10 @@
 A from-scratch Rust library for **decoding and encoding 1D and 2D barcodes**, aiming
 for the widest possible symbology coverage while preserving every variation of a code.
 
+**▶ [Live WASM demo](https://karpeleslab.github.io/anydcode/)** — encode to a canvas,
+decode an image, and run live-camera detection, all in the browser (the library
+compiled to WebAssembly, no wasm-bindgen).
+
 ## Goals
 
 - **Lossless round-trip.** A decoded [`Symbol`] carries not just its payload but the

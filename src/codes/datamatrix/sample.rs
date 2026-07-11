@@ -40,6 +40,10 @@
 //! symbol size (≈ 0.20 at dim 10–12, ≈ 0.10 at dim 22, ≈ 0.05 at the multi-region
 //! sizes). Because the background is assumed to contain a single symbol on a clean quiet
 //! zone, every dark pixel is taken to belong to the code.
+//!
+//! Binarization is tried global-Otsu first, then — only if that fails to decode — an
+//! adaptive (Bradley local-mean) fallback, so a symbol under a lighting gradient or glare
+//! that a single global threshold cannot separate from its background still decodes.
 
 use super::DataMatrixDecoder;
 use super::placement::QUIET_ZONE;
@@ -52,7 +56,7 @@ use crate::imgproc::components::{Connectivity, connected_components};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::line::{Line, fit_line_least_squares};
 use crate::imgproc::sample::sample_bilinear;
-use crate::imgproc::threshold::{otsu_binarize, otsu_threshold};
+use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::output::BitMatrix;
 use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
@@ -153,9 +157,35 @@ struct Geometry {
 /// Minimum frame side (pixels) worth attempting.
 const MIN_FRAME: usize = 10;
 
+/// The binarizations tried, in order: global Otsu first (exact on clean renders), then
+/// an adaptive local one as a fallback for unevenly-lit real captures. The sampling
+/// threshold stays the global Otsu value; only the blob-isolation bitmap changes.
+fn binarizations(frame: &GrayFrame<'_>) -> [BinaryImage; 2] {
+    let radius = (frame.width().min(frame.height()) / 8).clamp(8, 50);
+    [
+        otsu_binarize(frame),
+        adaptive_binarize_bradley(frame, radius, 0.10),
+    ]
+}
+
 /// Full detect + geometry + size/chirality search + structural decode.
 fn solve(frame: &GrayFrame<'_>) -> Result<(Located, Symbol)> {
-    let geom = extract_geometry(frame)?;
+    let threshold = otsu_threshold(frame);
+    for bin in binarizations(frame) {
+        if let Ok(result) = solve_with(frame, &bin, threshold) {
+            return Ok(result);
+        }
+    }
+    Err(Error::undecodable("no candidate Data Matrix grid decoded"))
+}
+
+/// Full solve under one already-built binarization.
+fn solve_with(
+    frame: &GrayFrame<'_>,
+    bin: &BinaryImage,
+    threshold: u8,
+) -> Result<(Located, Symbol)> {
+    let geom = extract_geometry(frame, bin, threshold)?;
     let decoder = DataMatrixDecoder::new();
 
     // Try the nearest valid square sizes, and both grid handednesses, returning the
@@ -187,7 +217,24 @@ fn solve(frame: &GrayFrame<'_>) -> Result<(Located, Symbol)> {
 /// size estimate and the un-swapped chirality; the reported outline is orientation
 /// independent.
 fn locate_geometry(frame: &GrayFrame<'_>) -> Result<Located> {
-    let geom = extract_geometry(frame)?;
+    let threshold = otsu_threshold(frame);
+    let mut last = Error::undecodable("no Data Matrix geometry recovered");
+    for bin in binarizations(frame) {
+        match locate_geometry_with(frame, &bin, threshold) {
+            Ok(loc) => return Ok(loc),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Geometry-only location under one already-built binarization.
+fn locate_geometry_with(
+    frame: &GrayFrame<'_>,
+    bin: &BinaryImage,
+    threshold: u8,
+) -> Result<Located> {
+    let geom = extract_geometry(frame, bin, threshold)?;
     let dim = candidate_sizes(geom.n_est)[0];
     let dst = corner_targets(&geom, false);
     let src = grid_corners(dim);
@@ -224,20 +271,19 @@ fn corner_targets(geom: &Geometry, swap: bool) -> [Point; 4] {
     }
 }
 
-/// Extract corners, the L orientation, a size estimate and the binarization threshold.
-fn extract_geometry(frame: &GrayFrame<'_>) -> Result<Geometry> {
+/// Extract corners, the L orientation, a size estimate and the binarization threshold
+/// from a supplied binarization `bin` (and its global sampling `threshold`).
+fn extract_geometry(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<Geometry> {
     if frame.width() < MIN_FRAME || frame.height() < MIN_FRAME {
         return Err(Error::undecodable(
             "frame too small for a Data Matrix symbol",
         ));
     }
-    let threshold = otsu_threshold(frame);
-    let bin = otsu_binarize(frame);
 
     // The solid L finder forms the largest dark component; its bounding box covers the
     // whole symbol (the L spans a full column and a full row), so restrict the corner
     // search to it and drop any stray noise elsewhere.
-    let comps = connected_components(&bin, Connectivity::Eight);
+    let comps = connected_components(bin, Connectivity::Eight);
     let symbol = comps
         .iter()
         .max_by_key(|c| c.area)
@@ -252,15 +298,15 @@ fn extract_geometry(frame: &GrayFrame<'_>) -> Result<Geometry> {
     let x1 = (b.max_x + pad).min(bin.width() - 1);
     let y1 = (b.max_y + pad).min(bin.height() - 1);
 
-    let corners = find_corners(&bin, x0, y0, x1, y1)?;
+    let corners = find_corners(bin, x0, y0, x1, y1)?;
     let centroid = centroid_of(&corners);
 
     // Identify the solid L: the vertex whose two incident edges are the darkest.
     let dark: [f32; 4] = [
-        edge_darkness(&bin, corners[0], corners[1], centroid),
-        edge_darkness(&bin, corners[1], corners[2], centroid),
-        edge_darkness(&bin, corners[2], corners[3], centroid),
-        edge_darkness(&bin, corners[3], corners[0], centroid),
+        edge_darkness(bin, corners[0], corners[1], centroid),
+        edge_darkness(bin, corners[1], corners[2], centroid),
+        edge_darkness(bin, corners[2], corners[3], centroid),
+        edge_darkness(bin, corners[3], corners[0], centroid),
     ];
     // Vertex i is shared by edge (i-1) and edge i.
     let mut l_vertex = 0usize;
@@ -294,7 +340,7 @@ fn extract_geometry(frame: &GrayFrame<'_>) -> Result<Geometry> {
     // which would skew the two timing edges' boundary search.
     let mut init = corners;
     init[(l_vertex + 2) % 4] = tr0;
-    let refined = refine_corners(&bin, &init, centroid, module_px);
+    let refined = refine_corners(bin, &init, centroid, module_px);
 
     let bl = refined[l_vertex];
     let tl = refined[(l_vertex + 3) % 4];

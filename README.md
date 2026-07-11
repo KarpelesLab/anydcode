@@ -114,6 +114,37 @@ assert_eq!(decoded.text().as_deref(), Some("HELLO WORLD"));
 assert_eq!(encoder.encode(&decoded).unwrap(), encoding);
 ```
 
+## Live-video detection & performance
+
+For a camera feed you rarely want to fully decode every frame. The `detect` module
+provides a fast, symbology-agnostic **locator** that returns the *position* of every
+code (a bounding quad + coarse family guess) in a single downscaled pass, **without
+decoding** — the cheap stage of the two-stage `Detect` → `Analyze` pipeline:
+
+```rust
+use anyd::detect::{locate, LocateOptions};
+
+let candidates = locate(&frame, &LocateOptions::default());
+for c in &candidates {
+    // c.location — where the code is; c.symbology — family guess.
+    // Hand off to the matching sampler/decoder only for new regions.
+}
+```
+
+Benchmark (`cargo bench --bench detect`, dependency-free, `std::time::Instant`),
+locating **all** codes of all families per frame vs. a full QR decode:
+
+| resolution | locate median | locate FPS | full-decode FPS | detect speedup |
+|-----------:|--------------:|-----------:|----------------:|---------------:|
+| 640×480    | 0.30 ms | ~3350 | ~1725 | 1.9× |
+| 1280×720   | 0.83 ms | ~1200 | ~635  | 1.9× |
+| 1920×1080  | 1.85 ms | ~545  | ~310  | 1.8× |
+
+Recall 100% and false-positive rate 0% on the benchmark's planted-code frames.
+Locating is comfortably real-time at every resolution; decoding then runs only on the
+regions the locator hands off (and `Hints` lets already-decoded codes be skipped
+across frames).
+
 ## Command-line tool (`anyd`)
 
 An optional binary is bundled behind the **`cli`** feature, so the library itself

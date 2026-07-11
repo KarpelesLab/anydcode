@@ -24,8 +24,8 @@ fn assert_lossless(start: u8, data: &[u8], stop: u8) {
 
 #[test]
 fn start_stop_pairs() {
-    for start in [b'A', b'B', b'C', b'D'] {
-        for stop in [b'A', b'B', b'C', b'D'] {
+    for start in *b"ABCD" {
+        for stop in *b"ABCD" {
             assert_lossless(start, b"1234", stop);
         }
     }

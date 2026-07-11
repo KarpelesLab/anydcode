@@ -109,6 +109,31 @@ assert_eq!(decoded.text().as_deref(), Some("HELLO WORLD"));
 assert_eq!(encoder.encode(&decoded).unwrap(), encoding);
 ```
 
+## Command-line tool (`anyd`)
+
+An optional binary is bundled behind the **`cli`** feature, so the library itself
+stays dependency-free. It reads/writes PNG via `oxideav-png` (with default features
+off — no codec-registry dependency) and can also emit Unicode (for the terminal) or
+SVG (raw XML).
+
+```console
+$ cargo build --release --features cli      # builds target/release/anyd
+
+# Encode → PNG / SVG / terminal
+$ anyd encode qr "https://example.com" --format png --out qr.png --scale 8
+$ anyd encode ean13 5901234123457 --format svg --out barcode.svg
+$ anyd encode qr "HELLO" --format unicode          # half-block art in the terminal
+
+# Decode a PNG (tries QR, Data Matrix, PDF417, and the 1D front-end)
+$ anyd decode qr.png
+QR Code: https://example.com
+
+$ anyd list                                        # encodable symbology names
+```
+
+Options: `--format png|unicode|svg`, `--out FILE`, `--scale N` (px/module),
+`--ec L|M|Q|H` (QR/Micro QR) or `--ec 0-8` (PDF417), `--invert` (terminal colours).
+
 ## Architecture
 
 ```

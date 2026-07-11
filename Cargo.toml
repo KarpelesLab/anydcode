@@ -10,6 +10,19 @@ authors = ["Karpelès Lab Inc."]
 keywords = ["barcode", "qrcode", "decode", "encode", "scanner"]
 categories = ["encoding", "multimedia::images"]
 
+[features]
+# The `anyd` command-line tool. Off by default so the library stays
+# dependency-free; enable with `cargo build --features cli`.
+cli = ["dep:oxideav-png"]
+
+[dependencies]
+oxideav-png = { version = "0.1.8", optional = true, default-features = false }
+
+[[bin]]
+name = "anyd"
+path = "src/bin/anyd.rs"
+required-features = ["cli"]
+
 [lints.rust]
 missing_debug_implementations = "warn"
 

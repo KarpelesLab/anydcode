@@ -245,6 +245,9 @@ impl Symbology {
                 | DataMatrix
                 | Code128
                 | Gs1_128
+                | Code39
+                | Code93
+                | Code11
                 | Ean13
                 | Ean8
                 | UpcA

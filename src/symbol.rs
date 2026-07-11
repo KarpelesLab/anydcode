@@ -20,6 +20,36 @@ use crate::symbology::Symbology;
 pub enum SymbolMeta {
     /// QR Code parameters (version, EC level, mask, structural flags).
     Qr(crate::codes::qr::QrMeta),
+    /// EAN/UPC family parameters (which variant, add-on).
+    Ean(crate::codes::ean::EanMeta),
+    /// Code 39 parameters.
+    Code39(crate::codes::code39::Code39Meta),
+    /// Code 93 parameters.
+    Code93(crate::codes::code93::Code93Meta),
+    /// Code 11 parameters.
+    Code11(crate::codes::code11::Code11Meta),
+    /// Code 128 / GS1-128 parameters (code-set sequence).
+    Code128(crate::codes::code128::Code128Meta),
+    /// Interleaved 2 of 5 parameters.
+    Itf(crate::codes::itf::ItfMeta),
+    /// 2-of-5 family (standard/IATA/matrix) parameters.
+    TwoOf5(crate::codes::twoof5::TwoOf5Meta),
+    /// Codabar parameters (start/stop characters).
+    Codabar(crate::codes::codabar::CodabarMeta),
+    /// MSI Plessey / Plessey parameters (check-digit scheme).
+    Msi(crate::codes::msi::MsiMeta),
+    /// Telepen parameters.
+    Telepen(crate::codes::telepen::TelepenMeta),
+    /// Pharmacode parameters.
+    Pharmacode(crate::codes::pharmacode::PharmacodeMeta),
+    /// GS1 DataBar family parameters.
+    DataBar(crate::codes::databar::DataBarMeta),
+    /// PDF417 / MicroPDF417 parameters.
+    Pdf417(crate::codes::pdf417::Pdf417Meta),
+    /// Data Matrix parameters.
+    DataMatrix(crate::codes::datamatrix::DataMatrixMeta),
+    /// Aztec / Aztec Runes parameters.
+    Aztec(crate::codes::aztec::AztecMeta),
     /// No symbology-specific metadata captured.
     Generic,
 }

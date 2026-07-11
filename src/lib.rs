@@ -37,10 +37,15 @@
 //! assert_eq!(encoder.encode(&decoded).unwrap(), encoding);
 //! ```
 
-#![forbid(unsafe_code)]
+// Unsafe is forbidden everywhere except the raw-wasm FFI shim (the `wasm` feature),
+// which needs it to hand buffers across the JS boundary. Library consumers never
+// enable `wasm`, so the guarantee holds for them.
+#![cfg_attr(not(feature = "wasm"), forbid(unsafe_code))]
 
 pub mod codes;
 pub mod detect;
+#[cfg(feature = "wasm")]
+mod wasm;
 pub mod error;
 pub mod geometry;
 pub mod image;

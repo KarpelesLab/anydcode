@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AnyDCode — WASM demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 15px/1.5 system-ui, sans-serif; background: #0d1117; color: #e6edf3;
+    padding: 2rem 1rem; max-width: 960px; margin-inline: auto;
+  }
+  h1 { font-size: 1.7rem; margin: 0 0 .2rem; }
+  h1 span { color: #58a6ff; }
+  .sub { color: #8b949e; margin: 0 0 1.5rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 1.2rem; margin-bottom: 1.2rem; }
+  h2 { font-size: 1.1rem; margin: 0 0 .8rem; }
+  label { display: block; font-size: .85rem; color: #8b949e; margin: .6rem 0 .2rem; }
+  input[type=text], select {
+    width: 100%; padding: .5rem .6rem; background: #0d1117; color: #e6edf3;
+    border: 1px solid #30363d; border-radius: 8px; font: inherit;
+  }
+  button {
+    padding: .5rem .9rem; background: #238636; color: #fff; border: 0; border-radius: 8px;
+    font: inherit; font-weight: 600; cursor: pointer; margin-top: .8rem;
+  }
+  button.secondary { background: #21262d; border: 1px solid #30363d; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: end; }
+  .row > * { flex: 1; min-width: 160px; }
+  canvas { max-width: 100%; image-rendering: pixelated; border-radius: 8px; background: #fff; margin-top: 1rem; }
+  .stage { position: relative; display: inline-block; margin-top: 1rem; }
+  .stage video { max-width: 100%; border-radius: 8px; display: block; }
+  .stage canvas { position: absolute; inset: 0; background: transparent; margin: 0; }
+  .result { font-family: ui-monospace, monospace; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 8px; padding: .6rem .8rem; margin-top: 1rem; white-space: pre-wrap; min-height: 1.2rem; }
+  .stat { color: #8b949e; font-size: .85rem; margin-top: .5rem; }
+  .stat b { color: #3fb950; }
+  a { color: #58a6ff; }
+</style>
+</head>
+<body>
+  <h1><span>AnyD</span>Code · WASM demo</h1>
+  <p class="sub">Pure-Rust barcode encode / decode / live-detection, compiled to WebAssembly. No wasm-bindgen, no runtime dependencies.</p>
+
+  <section class="card">
+    <h2>Encode</h2>
+    <div class="row">
+      <div style="flex:2">
+        <label for="enc-data">Data</label>
+        <input id="enc-data" type="text" value="https://github.com/KarpelesLab/anydcode">
+      </div>
+      <div>
+        <label for="enc-sym">Symbology</label>
+        <select id="enc-sym">
+          <option value="qr">QR Code</option>
+          <option value="microqr">Micro QR</option>
+          <option value="datamatrix">Data Matrix</option>
+          <option value="aztec">Aztec</option>
+          <option value="pdf417">PDF417</option>
+          <option value="maxicode">MaxiCode</option>
+          <option value="code128">Code 128</option>
+          <option value="code39">Code 39</option>
+          <option value="code93">Code 93</option>
+          <option value="ean13">EAN-13</option>
+          <option value="ean8">EAN-8</option>
+          <option value="upca">UPC-A</option>
+          <option value="itf">ITF</option>
+          <option value="codabar">Codabar</option>
+        </select>
+      </div>
+    </div>
+    <button id="enc-btn">Encode</button>
+    <div id="enc-err" class="stat"></div>
+    <div><canvas id="enc-canvas" width="0" height="0"></canvas></div>
+  </section>
+
+  <section class="card">
+    <h2>Live camera detection</h2>
+    <p class="sub" style="margin-bottom:.5rem">Locates every code's <em>position</em> each frame (no decode), then decodes periodically — the two-stage pipeline a live feed needs.</p>
+    <button id="cam-btn">Start camera</button>
+    <button id="cam-stop" class="secondary" disabled>Stop</button>
+    <div class="stat" id="cam-stat"></div>
+    <div class="stage" id="cam-stage" hidden>
+      <video id="cam-video" playsinline muted></video>
+      <canvas id="cam-overlay"></canvas>
+    </div>
+    <div class="result" id="cam-result"></div>
+  </section>
+
+  <section class="card">
+    <h2>Decode an image</h2>
+    <label for="file-input">PNG / JPEG containing a barcode</label>
+    <input id="file-input" type="file" accept="image/*">
+    <div class="result" id="file-result"></div>
+    <canvas id="file-canvas" width="0" height="0" hidden></canvas>
+  </section>
+
+  <p class="sub">Source: <a href="https://github.com/KarpelesLab/anydcode">KarpelesLab/anydcode</a></p>
+
+<script type="module">
+// ---- wasm loader + ABI wrapper (raw wasm32, no wasm-bindgen) ----
+let wasm;
+const mem = () => new Uint8Array(wasm.memory.buffer);
+
+async function init() {
+  const res = await fetch('anyd.wasm');
+  const { instance } = await WebAssembly.instantiateStreaming(res, {});
+  wasm = instance.exports;
+}
+
+function writeBytes(bytes) {
+  const ptr = wasm.alloc(bytes.length);
+  mem().set(bytes, ptr);
+  return ptr;
+}
+function readPacked(packed) { // packed: BigInt u64 = (ptr<<32)|len
+  return { ptr: Number(packed >> 32n), len: Number(packed & 0xffffffffn) };
+}
+function takeBytes(packed) {
+  const { ptr, len } = readPacked(packed);
+  if (len === 0) { if (ptr) wasm.dealloc(ptr, len); return new Uint8Array(0); }
+  const out = mem().slice(ptr, ptr + len);
+  wasm.dealloc(ptr, len);
+  return out;
+}
+
+function encode(sym, text) {
+  const sB = new TextEncoder().encode(sym), dB = new TextEncoder().encode(text);
+  const sp = writeBytes(sB), dp = writeBytes(dB);
+  const packed = wasm.encode(sp, sB.length, dp, dB.length);
+  wasm.dealloc(sp, sB.length); wasm.dealloc(dp, dB.length);
+  if (packed === 0n) return null;
+  const buf = takeBytes(packed);
+  const dv = new DataView(buf.buffer);
+  return { w: dv.getUint32(0, true), h: dv.getUint32(4, true), quiet: dv.getUint32(8, true),
+           kind: buf[12], bits: buf.subarray(13) };
+}
+function lumaFrom(imageData) {
+  const { width: w, height: h, data } = imageData;
+  const luma = new Uint8Array(w * h);
+  for (let i = 0, j = 0; i < luma.length; i++, j += 4)
+    luma[i] = (data[j] * 299 + data[j + 1] * 587 + data[j + 2] * 114) / 1000 | 0;
+  return { w, h, luma };
+}
+function callJson(fn, imageData) {
+  const { w, h, luma } = lumaFrom(imageData);
+  const ptr = writeBytes(luma);
+  const packed = fn(w, h, ptr);
+  wasm.dealloc(ptr, luma.length);
+  return JSON.parse(new TextDecoder().decode(takeBytes(packed)) || '[]');
+}
+const decode = (img) => callJson(wasm.decode, img);
+const locate = (img) => callJson(wasm.locate, img);
+
+// ---- encode UI ----
+const encCanvas = document.getElementById('enc-canvas');
+function drawEncoding(enc) {
+  const ctx = encCanvas.getContext('2d');
+  const q = enc.quiet;
+  if (enc.kind === 0) {
+    const W = enc.w + 2 * q, H = enc.h + 2 * q;
+    const s = Math.max(2, Math.floor(480 / Math.max(W, H)));
+    encCanvas.width = W * s; encCanvas.height = H * s;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, encCanvas.width, encCanvas.height);
+    ctx.fillStyle = '#000';
+    for (let y = 0; y < enc.h; y++) for (let x = 0; x < enc.w; x++)
+      if (enc.bits[y * enc.w + x]) ctx.fillRect((x + q) * s, (y + q) * s, s, s);
+  } else {
+    const W = enc.w + 2 * q, barH = 140;
+    const s = Math.max(1, Math.floor(820 / W));
+    encCanvas.width = W * s; encCanvas.height = barH + 2 * 8;
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, encCanvas.width, encCanvas.height);
+    ctx.fillStyle = '#000';
+    for (let x = 0; x < enc.w; x++) if (enc.bits[x]) ctx.fillRect((x + q) * s, 8, s, barH);
+  }
+}
+document.getElementById('enc-btn').onclick = () => {
+  const err = document.getElementById('enc-err'); err.textContent = '';
+  const enc = encode(document.getElementById('enc-sym').value, document.getElementById('enc-data').value);
+  if (!enc) { err.textContent = 'Encode failed (data not valid for this symbology).'; return; }
+  drawEncoding(enc);
+};
+
+// ---- live camera ----
+const video = document.getElementById('cam-video');
+const overlay = document.getElementById('cam-overlay');
+const scratch = document.createElement('canvas');
+let stream, running = false, lastDecode = 0;
+const FAMILY_COLORS = { matrix: '#3fb950', linear: '#58a6ff', stacked: '#d29922', postal: '#db61a2' };
+
+document.getElementById('cam-btn').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+  } catch (e) { document.getElementById('cam-stat').textContent = 'Camera error: ' + e.message; return; }
+  video.srcObject = stream; await video.play();
+  document.getElementById('cam-stage').hidden = false;
+  document.getElementById('cam-btn').disabled = true;
+  document.getElementById('cam-stop').disabled = false;
+  running = true; requestAnimationFrame(loop);
+};
+document.getElementById('cam-stop').onclick = () => {
+  running = false; stream && stream.getTracks().forEach(t => t.stop());
+  document.getElementById('cam-btn').disabled = false;
+  document.getElementById('cam-stop').disabled = true;
+};
+
+function loop(ts) {
+  if (!running) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (vw) {
+    const dw = 480, dh = Math.round(dw * vh / vw); // downscaled processing frame
+    scratch.width = dw; scratch.height = dh;
+    const sctx = scratch.getContext('2d', { willReadFrequently: true });
+    sctx.drawImage(video, 0, 0, dw, dh);
+    const img = sctx.getImageData(0, 0, dw, dh);
+
+    const t0 = performance.now();
+    const cands = locate(img);
+    const ms = performance.now() - t0;
+
+    overlay.width = video.clientWidth; overlay.height = video.clientHeight;
+    const octx = overlay.getContext('2d');
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    const sx = overlay.width / dw, sy = overlay.height / dh;
+    octx.lineWidth = 3;
+    for (const c of cands) {
+      octx.strokeStyle = FAMILY_COLORS[c.family] || '#e6edf3';
+      octx.beginPath();
+      c.corners.forEach(([x, y], i) => i ? octx.lineTo(x * sx, y * sy) : octx.moveTo(x * sx, y * sy));
+      octx.closePath(); octx.stroke();
+    }
+    document.getElementById('cam-stat').innerHTML =
+      `located <b>${cands.length}</b> code(s) in <b>${ms.toFixed(2)} ms</b> (${(1000 / ms | 0)} FPS budget)`;
+
+    if (ts - lastDecode > 400) {
+      lastDecode = ts;
+      const results = decode(img);
+      document.getElementById('cam-result').textContent =
+        results.length ? results.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---- file decode ----
+document.getElementById('file-input').onchange = (e) => {
+  const file = e.target.files[0]; if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.getElementById('file-canvas');
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const results = decode(ctx.getImageData(0, 0, c.width, c.height));
+    document.getElementById('file-result').textContent =
+      results.length ? results.map(r => `${r.symbology}: ${r.text}`).join('\n') : 'No barcode found.';
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(file);
+};
+
+// ---- go ----
+init().then(() => {
+  document.getElementById('enc-btn').click();
+}).catch(e => {
+  document.getElementById('enc-err').textContent = 'Failed to load anyd.wasm: ' + e.message;
+});
+</script>
+</body>
+</html>

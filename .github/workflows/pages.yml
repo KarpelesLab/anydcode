@@ -1,0 +1,67 @@
+name: Demo (GitHub Pages)
+
+# Builds the library to wasm32 and publishes the `web/` demo page to GitHub Pages.
+# Requires Pages to be enabled for the repo with source = "GitHub Actions"
+# (Settings → Pages → Build and deployment → Source: GitHub Actions).
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build wasm + assemble site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # Raw cdylib for wasm32 (no wasm-bindgen). `--crate-type cdylib` here avoids
+      # pinning it in Cargo.toml so normal builds stay rlib-only.
+      - name: Build wasm
+        run: cargo rustc --lib --release --target wasm32-unknown-unknown --features wasm --crate-type cdylib
+
+      - name: Assemble site
+        run: |
+          mkdir -p site
+          cp web/index.html site/index.html
+          cp target/wasm32-unknown-unknown/release/anyd.wasm site/anyd.wasm
+          ls -l site
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

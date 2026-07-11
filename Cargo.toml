@@ -9,11 +9,17 @@ repository = "https://github.com/KarpelesLab/anydcode"
 authors = ["Karpelès Lab Inc."]
 keywords = ["barcode", "qrcode", "decode", "encode", "scanner"]
 categories = ["encoding", "multimedia::images"]
+# Keep the published crate lean: the demo page and CI live in the repo, not the crate.
+exclude = ["/web", "/.github"]
 
 [features]
 # The `anyd` command-line tool. Off by default so the library stays
 # dependency-free; enable with `cargo build --features cli`.
 cli = ["dep:oxideav-png"]
+# Raw wasm32 FFI exports for the browser demo (no wasm-bindgen). Enable only when
+# building the demo for `wasm32-unknown-unknown`; it relaxes `forbid(unsafe_code)`
+# for the small FFI shim. Adds no dependencies.
+wasm = []
 
 [dependencies]
 oxideav-png = { version = "0.1.8", optional = true, default-features = false }

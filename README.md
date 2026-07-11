@@ -27,7 +27,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
 | QR Code (v1–40, all EC levels & masks) | ✅ | ✅ | ✅¹ |
-| Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ⬜ |
+| Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ✅³ |
 | Aztec (compact + full range, all modes) | ✅ | ✅ | ⬜ |
 | Aztec Runes | ⬜ | ⬜ | ⬜ |
 | Micro QR Code · Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
@@ -75,6 +75,12 @@ run-length → normalized `LinearPattern`), feeding each symbology's decoder. Th
 end-to-end pixel→symbol path is verified for Code 128, Code 39 and EAN-13 in
 `tests/scan1d_pipeline.rs`; it applies to any standard bar/space linear code.
 DataBar (finder-pattern based) and Pharmacode need dedicated samplers.
+
+³ Data Matrix ships an image sampler: Otsu binarization → largest-component isolation
+→ solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid
+sampling, with symbol size and grid chirality confirmed by Reed–Solomon. Robust to
+any-angle rotation, scale, blur/noise and (size-graded) tilt; envelope in
+`tests/datamatrix_image.rs`.
 
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes

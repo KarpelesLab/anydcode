@@ -30,13 +30,20 @@
   .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: end; }
   .row > * { flex: 1; min-width: 160px; }
   canvas { max-width: 100%; image-rendering: pixelated; border-radius: 8px; background: #fff; margin-top: 1rem; }
-  .stage { position: relative; display: inline-block; margin-top: 1rem; }
-  .stage video { max-width: 100%; border-radius: 8px; display: block; }
-  .stage canvas { position: absolute; inset: 0; background: transparent; margin: 0; }
+  .stage { position: relative; display: inline-block; margin-top: 1rem; border-radius: 10px;
+    border: 1px solid rgba(91,233,212,.25); box-shadow: inset 0 0 70px rgba(91,233,212,.07); overflow: hidden; }
+  .stage video { max-width: 100%; display: block; }
+  /* faint CRT scanlines over the feed, beneath the HUD overlay */
+  .stage::after { content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    background: repeating-linear-gradient(0deg, transparent 0 3px, rgba(91,233,212,.035) 3px 4px); }
+  .stage canvas { position: absolute; inset: 0; z-index: 2; background: transparent; margin: 0; }
   .result { font-family: ui-monospace, monospace; background: #0d1117; border: 1px solid #30363d;
-    border-radius: 8px; padding: .6rem .8rem; margin-top: 1rem; white-space: pre-wrap; min-height: 1.2rem; }
+    border-left: 3px solid #5be9d4; border-radius: 8px; padding: .6rem .8rem; margin-top: 1rem;
+    white-space: pre-wrap; min-height: 1.2rem; color: #b7f5ea; }
   .stat { color: #8b949e; font-size: .85rem; margin-top: .5rem; }
   .stat b { color: #3fb950; }
+  .stat.hud { font-family: ui-monospace, monospace; letter-spacing: .08em; color: #6b8896; text-transform: uppercase; font-size: .78rem; }
+  .stat.hud b { color: #5be9d4; font-weight: 600; }
   a { color: #58a6ff; }
 </style>
 </head>
@@ -81,7 +88,7 @@
     <p class="sub" style="margin-bottom:.5rem">Locates every code's <em>position</em> each frame (no decode), then decodes periodically — the two-stage pipeline a live feed needs.</p>
     <button id="cam-btn">Start camera</button>
     <button id="cam-stop" class="secondary" disabled>Stop</button>
-    <div class="stat" id="cam-stat"></div>
+    <div class="stat hud" id="cam-stat"></div>
     <div class="stage" id="cam-stage" hidden>
       <video id="cam-video" playsinline muted></video>
       <canvas id="cam-overlay"></canvas>
@@ -187,8 +194,135 @@ document.getElementById('enc-btn').onclick = () => {
 const video = document.getElementById('cam-video');
 const overlay = document.getElementById('cam-overlay');
 const scratch = document.createElement('canvas');
-let stream, running = false, lastDecode = 0;
-const FAMILY_COLORS = { matrix: '#3fb950', linear: '#58a6ff', stacked: '#d29922', postal: '#db61a2' };
+let stream, running = false, lastDecode = 0, lastDecoded = [];
+
+function bbox(corners) {
+  const xs = corners.map(p => p[0]), ys = corners.map(p => p[1]);
+  return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
+}
+// Copy a padded sub-rectangle of an ImageData (for decoding a located region at full res).
+function cropRGBA(img, x0, y0, x1, y1) {
+  x0 = Math.max(0, x0 | 0); y0 = Math.max(0, y0 | 0);
+  x1 = Math.min(img.width, Math.ceil(x1)); y1 = Math.min(img.height, Math.ceil(y1));
+  const cw = x1 - x0, ch = y1 - y0;
+  if (cw < 12 || ch < 12) return null;
+  const out = new ImageData(cw, ch);
+  for (let y = 0; y < ch; y++) {
+    const s = ((y0 + y) * img.width + x0) * 4;
+    out.data.set(img.data.subarray(s, s + cw * 4), y * cw * 4);
+  }
+  return out;
+}
+// ---- futuristic target-lock HUD ----
+const HUD = { lock: '#5be9d4', acquire: '#f5a623', chip: '#ffc24b', text: '#eafffb', ink: 'rgba(6,13,17,0.80)' };
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const lockState = new Map();
+const easeOut = p => 1 - Math.pow(1 - p, 3);
+
+function boxesOverlap(a, b) {
+  const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  const amin = Math.min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0)) || 1;
+  return (ix * iy) / amin > 0.4;
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+// L-shaped brackets at the four corners of a box (a target reticle).
+function reticle(ctx, x, y, w, h, color, glow, alpha, len) {
+  len = Math.max(7, Math.min(len || Math.min(w, h) * 0.24, Math.min(w, h) * 0.48));
+  ctx.save();
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.shadowColor = color; ctx.shadowBlur = glow;
+  for (const [cx, cy, dx, dy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x + w, y + h, -1, -1], [x, y + h, 1, -1]]) {
+    ctx.beginPath(); ctx.moveTo(cx, cy + dy * len); ctx.lineTo(cx, cy); ctx.lineTo(cx + dx * len, cy); ctx.stroke();
+  }
+  ctx.restore();
+}
+// The floating data-slate: value typed in above the code, tied to it by a leader line.
+function slate(ctx, bx, by, bw, bh, r, st, ts, W) {
+  const value = r.text || '';
+  const shown = REDUCED ? value : value.slice(0, Math.max(0, Math.floor((ts - st.t0 - 140) / 16)));
+  const typing = shown.length < value.length;
+  const sym = (r.symbology || '').toUpperCase();
+  const cursor = typing && Math.floor(ts / 380) % 2 ? '▋' : '';
+  ctx.save();
+  ctx.font = '600 15px ui-monospace, SFMono-Regular, monospace';
+  const valW = ctx.measureText(shown + cursor || ' ').width;
+  ctx.font = '600 10px ui-monospace, monospace';
+  const headW = ctx.measureText(sym).width + 52;
+  const padX = 12, slateW = Math.min(Math.max(valW, headW) + padX * 2, W - 16), slateH = 44;
+  let sx0 = bx + bw / 2 - slateW / 2; sx0 = Math.max(8, Math.min(sx0, W - slateW - 8));
+  let sy0 = by - 18 - slateH; const below = sy0 < 6; if (below) sy0 = by + bh + 18;
+  const cx = bx + bw / 2, ay = below ? by + bh : by, ty = below ? sy0 : sy0 + slateH;
+
+  // leader line + anchor node
+  ctx.globalAlpha = 0.9; ctx.strokeStyle = HUD.lock; ctx.lineWidth = 1.5; ctx.shadowColor = HUD.lock; ctx.shadowBlur = 8;
+  ctx.beginPath(); ctx.moveTo(cx, ay); ctx.lineTo(cx, ty); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, ay, 2.5, 0, 7); ctx.fillStyle = HUD.lock; ctx.fill();
+  ctx.shadowBlur = 0;
+  // panel
+  roundRect(ctx, sx0, sy0, slateW, slateH, 7);
+  ctx.fillStyle = HUD.ink; ctx.fill();
+  ctx.strokeStyle = 'rgba(91,233,212,.55)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = HUD.lock; ctx.fillRect(sx0, sy0, 3, slateH); // left accent
+  // header: family chip + LOCK
+  ctx.textBaseline = 'top';
+  ctx.font = '600 10px ui-monospace, monospace';
+  if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '1px';
+  ctx.fillStyle = HUD.chip; ctx.textAlign = 'left'; ctx.fillText(sym, sx0 + padX, sy0 + 7);
+  ctx.fillStyle = HUD.lock; ctx.textAlign = 'right'; ctx.fillText('● LOCK', sx0 + slateW - padX, sy0 + 7);
+  if (ctx.letterSpacing !== undefined) ctx.letterSpacing = '0px';
+  // value
+  ctx.textAlign = 'left';
+  ctx.font = '600 15px ui-monospace, SFMono-Regular, monospace';
+  ctx.fillStyle = HUD.text; ctx.shadowColor = HUD.lock; ctx.shadowBlur = 6;
+  ctx.fillText(shown + cursor, sx0 + padX, sy0 + 22);
+  ctx.restore();
+}
+function viewportFrame(ctx, W, H) {
+  ctx.save(); ctx.strokeStyle = 'rgba(91,233,212,.4)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  const L = 22, m = 10;
+  for (const [cx, cy, dx, dy] of [[m, m, 1, 1], [W - m, m, -1, 1], [W - m, H - m, -1, -1], [m, H - m, 1, -1]]) {
+    ctx.beginPath(); ctx.moveTo(cx, cy + dy * L); ctx.lineTo(cx, cy); ctx.lineTo(cx + dx * L, cy); ctx.stroke();
+  }
+  ctx.restore();
+}
+function renderHUD(ctx, W, H, cands, decoded, sx, sy, ts) {
+  if (!REDUCED) { // ambient scan sweep
+    const yy = (ts % 3200) / 3200 * H;
+    const g = ctx.createLinearGradient(0, yy - 46, 0, yy + 46);
+    g.addColorStop(0, 'rgba(91,233,212,0)'); g.addColorStop(.5, 'rgba(91,233,212,.09)'); g.addColorStop(1, 'rgba(91,233,212,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, yy - 46, W, 92);
+    ctx.strokeStyle = 'rgba(91,233,212,.3)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W, yy); ctx.stroke();
+  }
+  viewportFrame(ctx, W, H);
+
+  const dboxes = decoded.filter(r => r.box).map(r => r.box);
+  // acquiring: faint pulsing ticks on located-but-unresolved candidates
+  for (const c of cands) {
+    const b = bbox(c.corners);
+    if (dboxes.some(d => boxesOverlap(d, b))) continue;
+    const pulse = REDUCED ? 0.22 : 0.14 + 0.12 * (0.5 + 0.5 * Math.sin(ts / 420));
+    reticle(ctx, b.x0 * sx, b.y0 * sy, (b.x1 - b.x0) * sx, (b.y1 - b.y0) * sy, HUD.acquire, 5, pulse, 9);
+  }
+  // locked: brackets snap in + floating value slate
+  const now = new Set();
+  for (const r of decoded) {
+    if (!r.box) continue;
+    const key = r.symbology + '|' + r.text; now.add(key);
+    let st = lockState.get(key); if (!st) { st = { t0: ts }; lockState.set(key, st); }
+    const p = REDUCED ? 1 : Math.min(1, (ts - st.t0) / 260);
+    const x = r.box.x0 * sx, y = r.box.y0 * sy, w = (r.box.x1 - r.box.x0) * sx, h = (r.box.y1 - r.box.y0) * sy;
+    const inset = (1 - easeOut(p)) * 16;
+    reticle(ctx, x - inset, y - inset, w + 2 * inset, h + 2 * inset, HUD.lock, 13, 0.55 + 0.45 * p, Math.min(w, h) * 0.3);
+    slate(ctx, x, y, w, h, r, st, ts, W);
+  }
+  for (const k of [...lockState.keys()]) if (!now.has(k)) lockState.delete(k);
+}
 
 document.getElementById('cam-btn').onclick = async () => {
   try {
@@ -210,36 +344,49 @@ function loop(ts) {
   if (!running) return;
   const vw = video.videoWidth, vh = video.videoHeight;
   if (vw) {
-    const dw = 480, dh = Math.round(dw * vh / vw); // downscaled processing frame
-    scratch.width = dw; scratch.height = dh;
+    // Process at (capped) native resolution — small codes need the pixels: a QR that
+    // is ~30px in a 480px frame is invisible to both the locator and the sampler.
+    // 1080p passes through at full res (locate is ~1.8 ms there).
+    const pw = Math.min(vw, 1920), ph = Math.round(pw * vh / vw);
+    scratch.width = pw; scratch.height = ph;
     const sctx = scratch.getContext('2d', { willReadFrequently: true });
-    sctx.drawImage(video, 0, 0, dw, dh);
-    const img = sctx.getImageData(0, 0, dw, dh);
+    sctx.drawImage(video, 0, 0, pw, ph);
+    const img = sctx.getImageData(0, 0, pw, ph);
+    const frameArea = pw * ph;
 
     const t0 = performance.now();
-    const cands = locate(img);
+    // Drop background-sized boxes: a code is a bounded object, not half the scene.
+    const cands = locate(img).filter(c => {
+      const b = bbox(c.corners);
+      return (b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * frameArea;
+    });
     const ms = performance.now() - t0;
+
+    // Periodic decode: the two-stage pipeline — crop each located region and decode it
+    // at full resolution (a small code fills its own crop), plus a whole-frame attempt.
+    if (ts - lastDecode > 300) {
+      lastDecode = ts;
+      const seen = new Set(), found = [];
+      const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ ...r, box }); } };
+      decode(img).forEach(r => add(r, null));
+      for (const c of cands) {
+        if (found.length >= 8) break;
+        const b = bbox(c.corners);
+        const crop = cropRGBA(img, b.x0 - 16, b.y0 - 16, b.x1 + 16, b.y1 + 16);
+        if (crop) decode(crop).forEach(r => add(r, b));
+      }
+      lastDecoded = found;
+      document.getElementById('cam-result').textContent =
+        found.length ? found.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
+    }
 
     overlay.width = video.clientWidth; overlay.height = video.clientHeight;
     const octx = overlay.getContext('2d');
     octx.clearRect(0, 0, overlay.width, overlay.height);
-    const sx = overlay.width / dw, sy = overlay.height / dh;
-    octx.lineWidth = 3;
-    for (const c of cands) {
-      octx.strokeStyle = FAMILY_COLORS[c.family] || '#e6edf3';
-      octx.beginPath();
-      c.corners.forEach(([x, y], i) => i ? octx.lineTo(x * sx, y * sy) : octx.moveTo(x * sx, y * sy));
-      octx.closePath(); octx.stroke();
-    }
-    document.getElementById('cam-stat').innerHTML =
-      `located <b>${cands.length}</b> code(s) in <b>${ms.toFixed(2)} ms</b> (${(1000 / ms | 0)} FPS budget)`;
+    renderHUD(octx, overlay.width, overlay.height, cands, lastDecoded, overlay.width / pw, overlay.height / ph, ts);
 
-    if (ts - lastDecode > 400) {
-      lastDecode = ts;
-      const results = decode(img);
-      document.getElementById('cam-result').textContent =
-        results.length ? results.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
-    }
+    document.getElementById('cam-stat').innerHTML =
+      `◈ tracking <b>${cands.length}</b> · locked <b>${lastDecoded.length}</b> · scan <b>${ms.toFixed(1)}ms</b>`;
   }
   requestAnimationFrame(loop);
 }

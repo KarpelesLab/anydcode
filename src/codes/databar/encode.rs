@@ -60,6 +60,22 @@ impl DataBarEncoder {
             SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Limited)),
         ))
     }
+
+    /// Build a GS1 DataBar Expanded symbol from a reduced GS1 element string.
+    ///
+    /// `gs1` is the Application Identifier data in *reduced* form: AI numbers and
+    /// their values concatenated, with a GS1 separator (FNC1, byte `0x1D`) after a
+    /// variable-length AI's value when another AI follows. The bytes are validated
+    /// by running the encodation and stored verbatim as a single [`Segment::byte`].
+    pub fn build_expanded(&self, gs1: &[u8]) -> Result<Symbol> {
+        // Validate up front by attempting the encodation.
+        super::expanded::element_widths(gs1)?;
+        Ok(Symbol::new(
+            Symbology::DataBarExpanded,
+            vec![Segment::byte(gs1.to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Expanded)),
+        ))
+    }
 }
 
 impl Encode for DataBarEncoder {
@@ -73,11 +89,25 @@ impl Encode for DataBarEncoder {
                 let val = gtin_value(symbol, DataBarVariant::Limited)?;
                 Ok(linear(&ltd_total_widths(val)))
             }
-            Symbology::DataBarStacked
+            // Expanded is driven by its metadata: a symbol is encodable only when it
+            // carries the canonical Expanded metadata that `build_expanded` and
+            // `decode` produce. A DataBarExpanded symbology tagged with any other
+            // DataBar variant is a malformed/unsupported combination.
+            Symbology::DataBarExpanded
+                if matches!(
+                    symbol.meta,
+                    SymbolMeta::DataBar(DataBarMeta {
+                        variant: DataBarVariant::Expanded
+                    })
+                ) =>
+            {
+                super::expanded::encode(symbol)
+            }
+            Symbology::DataBarExpanded
+            | Symbology::DataBarStacked
             | Symbology::DataBarStackedOmni
-            | Symbology::DataBarExpanded
             | Symbology::DataBarExpandedStacked => Err(Error::Unsupported {
-                what: "GS1 DataBar Expanded / stacked encoding",
+                what: "GS1 DataBar stacked encoding, or Expanded without Expanded metadata",
             }),
             _ => Err(Error::invalid_parameter(
                 "DataBarEncoder given a non-DataBar symbol",
@@ -101,7 +131,7 @@ fn expand(widths: &[i32]) -> Vec<bool> {
 }
 
 /// Wrap an element-width sequence as a linear encoding.
-fn linear(widths: &[i32]) -> Encoding {
+pub(super) fn linear(widths: &[i32]) -> Encoding {
     Encoding::Linear(LinearPattern {
         modules: expand(widths),
         quiet_zone: QUIET_ZONE,

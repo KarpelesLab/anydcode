@@ -199,6 +199,99 @@ pub const LTD_FINDER: [[u16; 14]; 89] = [
     [2, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 2, 1, 1],
 ];
 
+// ======== DataBar Expanded tables (ISO/IEC 24724:2011 Tables 8, 14, 15, 16) ========
+
+/// Group cumulative sums `Gsum` for the 12-bit symbol-character value (Table 8).
+pub const EXP_G_SUM: [i32; 5] = [0, 348, 1388, 2948, 3988];
+
+/// Per-group even-element divisor `Teven` (Table 8).
+pub const EXP_T_EVEN: [i32; 5] = [4, 20, 52, 104, 204];
+
+/// Odd-element module totals per group; even uses `17 - odd` (Table 8).
+pub const EXP_MODULES: [i32; 5] = [12, 10, 8, 6, 4];
+
+/// Widest permitted odd element per group; even uses `9 - widest` (Table 8).
+pub const EXP_WIDEST: [i32; 5] = [7, 5, 4, 3, 1];
+
+/// Checksum weight rows (Table 14): 23 rows of 8 element weights.
+#[rustfmt::skip]
+pub const EXP_CHECK_WEIGHT: [[i32; 8]; 23] = [
+    [  1,   3,   9,  27,  81,  32,  96,  77],
+    [ 20,  60, 180, 118, 143,   7,  21,  63],
+    [189, 145,  13,  39, 117, 140, 209, 205],
+    [193, 157,  49, 147,  19,  57, 171,  91],
+    [ 62, 186, 136, 197, 169,  85,  44, 132],
+    [185, 133, 188, 142,   4,  12,  36, 108],
+    [113, 128, 173,  97,  80,  29,  87,  50],
+    [150,  28,  84,  41, 123, 158,  52, 156],
+    [ 46, 138, 203, 187, 139, 206, 196, 166],
+    [ 76,  17,  51, 153,  37, 111, 122, 155],
+    [ 43, 129, 176, 106, 107, 110, 119, 146],
+    [ 16,  48, 144,  10,  30,  90,  59, 177],
+    [109, 116, 137, 200, 178, 112, 125, 164],
+    [ 70, 210, 208, 202, 184, 130, 179, 115],
+    [134, 191, 151,  31,  93,  68, 204, 190],
+    [148,  22,  66, 198, 172,  94,  71,   2],
+    [  6,  18,  54, 162,  64, 192, 154,  40],
+    [120, 149,  25,  75,  14,  42, 126, 167],
+    [ 79,  26,  78,  23,  69, 207, 199, 175],
+    [103,  98,  83,  38, 114, 131, 182, 124],
+    [161,  61, 183, 127, 170,  88,  53, 159],
+    [ 55, 165,  73,   8,  24,  72,   5,  15],
+    [ 45, 135, 194, 160,  58, 174, 100,  89],
+];
+
+/// Finder patterns (Table 15): 12 patterns of 5 element widths each. Even indices
+/// are left-to-right forms; odd indices are their right-to-left reversals.
+#[rustfmt::skip]
+pub const EXP_FINDER: [[u16; 5]; 12] = [
+    [1, 8, 4, 1, 1],
+    [1, 1, 4, 8, 1],
+    [3, 6, 4, 1, 1],
+    [1, 1, 4, 6, 3],
+    [3, 4, 6, 1, 1],
+    [1, 1, 6, 4, 3],
+    [3, 2, 8, 1, 1],
+    [1, 1, 8, 2, 3],
+    [2, 6, 5, 1, 1],
+    [1, 1, 5, 6, 2],
+    [2, 2, 9, 1, 1],
+    [1, 1, 9, 2, 2],
+];
+
+/// Finder sequence (Table 16): for a symbol with `p = (symbol_chars - 1) / 2 - 1`,
+/// row `p` gives the 1-based finder-pattern indices in symbol-character-pair order.
+/// Only the 10 rows a non-stacked symbol can use (`p` in `0..=9`) are tabulated.
+#[rustfmt::skip]
+pub const EXP_FINDER_SEQUENCE: [[u8; 11]; 10] = [
+    [1,  2, 0, 0, 0,  0,  0,  0,  0,  0,  0],
+    [1,  4, 3, 0, 0,  0,  0,  0,  0,  0,  0],
+    [1,  6, 3, 8, 0,  0,  0,  0,  0,  0,  0],
+    [1, 10, 3, 8, 5,  0,  0,  0,  0,  0,  0],
+    [1, 10, 3, 8, 7, 12,  0,  0,  0,  0,  0],
+    [1, 10, 3, 8, 9, 12, 11,  0,  0,  0,  0],
+    [1,  2, 3, 4, 5,  6,  7,  8,  0,  0,  0],
+    [1,  2, 3, 4, 5,  6,  7, 10,  9,  0,  0],
+    [1,  2, 3, 4, 5,  6,  7, 10, 11, 12,  0],
+    [1,  2, 3, 4, 5,  8,  7, 10,  9, 12, 11],
+];
+
+/// Checksum weight-row selector: `EXP_WEIGHT_ROWS[(data_chars - 2) / 2][i]` is the
+/// [`EXP_CHECK_WEIGHT`] row applied to data character `i`.
+#[rustfmt::skip]
+pub const EXP_WEIGHT_ROWS: [[u8; 21]; 10] = [
+    [0,  1,  2, 0, 0,  0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  5,  6, 3, 4,  0, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  9, 10, 3, 4, 13, 14, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0, 17, 18, 3, 4, 13, 14, 7,  8,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0, 17, 18, 3, 4, 13, 14, 11, 12, 21, 22, 0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
+    [0, 17, 18, 3, 4, 13, 14, 15, 16, 21, 22, 19, 20, 0,  0,  0,  0,  0,  0,  0,  0],
+    [0,  1,  2, 3, 4,  5, 6,  7,  8,  9, 10, 11, 12, 13, 14, 0,  0,  0,  0,  0,  0],
+    [0,  1,  2, 3, 4,  5, 6,  7,  8,  9, 10, 11, 12, 17, 18, 15, 16, 0,  0,  0,  0],
+    [0,  1,  2, 3, 4,  5, 6,  7,  8,  9, 10, 11, 12, 17, 18, 19, 20, 21, 22, 0,  0],
+    [0,  1,  2, 3, 4,  5, 6,  7,  8, 13, 14, 11, 12, 17, 18, 15, 16, 21, 22, 19, 20],
+];
+
 /// GS1 mod-10 check digit for a 13-digit GTIN body, returned as an ASCII digit.
 ///
 /// Positions are weighted 3, 1, 3, 1, ... from the left (equivalently 3 on the

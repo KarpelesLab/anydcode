@@ -44,8 +44,6 @@
 
 pub mod codes;
 pub mod detect;
-#[cfg(feature = "wasm")]
-mod wasm;
 pub mod error;
 pub mod geometry;
 pub mod image;
@@ -59,6 +57,8 @@ pub mod symbol;
 pub mod symbology;
 pub mod traits;
 pub mod transform;
+#[cfg(feature = "wasm")]
+mod wasm;
 
 pub use error::{Error, Result};
 pub use image::{GrayFrame, GrayImage};

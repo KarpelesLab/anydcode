@@ -288,6 +288,8 @@ fn build(sym: &str, data: &str) -> Result<Encoding, crate::Error> {
             let e = codabar::CodabarEncoder::new();
             e.encode(&e.build(b'A', b, b'A')?)
         }
-        _ => Err(crate::Error::Unsupported { what: "symbology not in the web demo set" }),
+        _ => Err(crate::Error::Unsupported {
+            what: "symbology not in the web demo set",
+        }),
     }
 }

@@ -50,6 +50,14 @@ pub enum SymbolMeta {
     DataMatrix(crate::codes::datamatrix::DataMatrixMeta),
     /// Aztec / Aztec Runes parameters.
     Aztec(crate::codes::aztec::AztecMeta),
+    /// MaxiCode parameters.
+    MaxiCode(crate::codes::maxicode::MaxiCodeMeta),
+    /// Micro QR Code parameters.
+    MicroQr(crate::codes::microqr::MicroQrMeta),
+    /// Rectangular Micro QR (rMQR) parameters.
+    Rmqr(crate::codes::rmqr::RmqrMeta),
+    /// Postal (4-state / height-modulated) parameters.
+    Postal(crate::codes::postal::PostalMeta),
     /// No symbology-specific metadata captured.
     Generic,
 }

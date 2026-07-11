@@ -25,4 +25,10 @@ pub mod databar;
 // 2D matrix and stacked families.
 pub mod aztec;
 pub mod datamatrix;
+pub mod maxicode;
+pub mod microqr;
 pub mod pdf417;
+pub mod rmqr;
+
+// Postal (height-modulated / 4-state).
+pub mod postal;

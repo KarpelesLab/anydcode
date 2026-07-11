@@ -238,7 +238,8 @@ impl Symbology {
 
     /// Whether an encoder/decoder is currently implemented for this symbology.
     pub fn is_implemented(self) -> bool {
-        matches!(self, Symbology::QrCode)
+        use Symbology::*;
+        matches!(self, QrCode | Code128 | Gs1_128)
     }
 
     /// A short, stable, human-readable name.

@@ -58,6 +58,20 @@ pub enum SymbolMeta {
     Rmqr(crate::codes::rmqr::RmqrMeta),
     /// Postal (4-state / height-modulated) parameters.
     Postal(crate::codes::postal::PostalMeta),
+    /// Han Xin Code parameters.
+    HanXin(crate::codes::hanxin::HanXinMeta),
+    /// Grid Matrix parameters.
+    GridMatrix(crate::codes::gridmatrix::GridMatrixMeta),
+    /// DotCode parameters.
+    DotCode(crate::codes::dotcode::DotCodeMeta),
+    /// Code 16K parameters.
+    Code16k(crate::codes::code16k::Code16kMeta),
+    /// Code 49 parameters.
+    Code49(crate::codes::code49::Code49Meta),
+    /// Codablock F parameters.
+    CodablockF(crate::codes::codablockf::CodablockFMeta),
+    /// DX Film Edge parameters.
+    DxFilm(crate::codes::dxfilm::DxFilmMeta),
     /// No symbology-specific metadata captured.
     Generic,
 }

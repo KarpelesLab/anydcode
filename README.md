@@ -55,8 +55,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Codabar · MSI Plessey · Plessey | ✅ | ✅ | ✅² |
 | Telepen | ✅ | ✅ | ✅² |
 | Pharmacode (1- & 2-track) | ✅ | ✅ | ⬜ |
-| GS1 DataBar Omni (RSS-14) · Limited | ✅ | ✅ | ⬜ |
-| GS1 DataBar Expanded · DX Film Edge | ⬜ | ⬜ | ⬜ |
+| GS1 DataBar Omni (RSS-14) · Limited · Expanded | ✅ | ✅ | ⬜ |
+| DX Film Edge | ⬜ | ⬜ | ⬜ |
 
 ### Postal (height-modulated)
 

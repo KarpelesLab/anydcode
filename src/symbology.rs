@@ -269,6 +269,7 @@ impl Symbology {
                 | PharmacodeTwoTrack
                 | DataBarOmni
                 | DataBarLimited
+                | DataBarExpanded
                 | Postnet
                 | Planet
                 | IntelligentMail

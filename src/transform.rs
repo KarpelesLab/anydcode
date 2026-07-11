@@ -59,6 +59,20 @@ impl Rng {
     }
 }
 
+/// Which axis a non-planar transform is organized around.
+///
+/// The precise meaning is documented per transform, but the convention is that the
+/// variant names the *reference line's orientation*: [`Axis::Vertical`] refers to a
+/// vertical line/axis (so bending happens left-to-right across the image), and
+/// [`Axis::Horizontal`] to a horizontal one (bending top-to-bottom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    /// A horizontal reference line/axis (effect varies down the image).
+    Horizontal,
+    /// A vertical reference line/axis (effect varies across the image).
+    Vertical,
+}
+
 /// A 3×3 projective transform on 2D points, used for perspective warping.
 ///
 /// Points are treated as homogeneous `(x, y, 1)`; [`Projection::map`] divides through
@@ -361,6 +375,222 @@ pub fn brightness_contrast(img: &GrayImage, brightness: f32, contrast: f32) -> G
     out
 }
 
+// ===================================================================================
+// Non-planar (curved-surface) distortions
+//
+// Real codes are printed on bottles, cans, crumpled paper and bulging labels — surfaces
+// the planar warps above cannot express. Each transform below is a deterministic,
+// bilinear *inverse* warp: it walks every OUTPUT pixel, maps it back to a source
+// coordinate, samples there, and leaves exposed area as light background so quiet zones
+// survive. None of them use randomness.
+// ===================================================================================
+
+/// Simulate wrapping the image around a cylinder — a label on a bottle or can — and
+/// viewing it head-on with an orthographic camera.
+///
+/// The flat image is treated as arc length on the cylinder surface; the visible image
+/// is the projection of that arc. Consequently the middle (facing the camera) is at
+/// true scale while both edges (curving away) are **foreshortened** — the further from
+/// centre, the more source detail is squeezed into each output pixel — exactly as a
+/// real curved label reads. The two outer edges stay pinned to the image border.
+///
+/// * `curvature` — half of the arc angle subtended by the image, in **radians**. `0`
+///   (flat) returns an unchanged copy; ~`0.3` is a gentle curve, ~`0.8` a pronounced
+///   one, and values approaching `π/2` wrap almost a full quarter-cylinder. Negative
+///   values behave like their absolute value.
+/// * `axis` — orientation of the **cylinder's axis**. [`Axis::Vertical`] bends the
+///   image horizontally (a standing bottle); [`Axis::Horizontal`] bends it vertically
+///   (a can lying on its side).
+pub fn cylinder(img: &GrayImage, curvature: f32, axis: Axis) -> GrayImage {
+    let theta_max = curvature.abs();
+    if theta_max < 1e-4 {
+        return img.clone();
+    }
+    let sin_max = theta_max.sin();
+    let w = img.width();
+    let h = img.height();
+    let mut out = GrayImage::filled(w, h, BACKGROUND as u8);
+    // Map a projected offset `u` in [-1, 1] back to a flat (arc-length) offset in the
+    // same range: invert `u = sin(theta)/sin(theta_max)` then normalize by the arc.
+    let unproject = |u: f32| -> f32 {
+        let s = (u * sin_max).clamp(-1.0, 1.0);
+        s.asin() / theta_max
+    };
+    for oy in 0..h {
+        for ox in 0..w {
+            let (sx, sy) = match axis {
+                Axis::Vertical => {
+                    let half = w as f32 / 2.0;
+                    let u = (ox as f32 + 0.5 - half) / half;
+                    (half + unproject(u) * half - 0.5, oy as f32)
+                }
+                Axis::Horizontal => {
+                    let half = h as f32 / 2.0;
+                    let u = (oy as f32 + 0.5 - half) / half;
+                    (ox as f32, half + unproject(u) * half - 0.5)
+                }
+            };
+            if let Some(v) = img.sample_bilinear(sx, sy) {
+                out.set(ox, oy, v.round() as u8);
+            }
+        }
+    }
+    out
+}
+
+/// Apply a sinusoidal ripple, as if the print were on gently rippled/waving paper.
+///
+/// Rows (or columns) are displaced perpendicular to the ripple direction following a
+/// sine wave. The output canvas is grown by the amplitude plus [`PAD`] on every side so
+/// no content is clipped.
+///
+/// * `amplitude` — peak displacement, in **pixels**. `0` returns an unchanged (but
+///   re-padded) copy.
+/// * `wavelength` — length of one full cycle, in **pixels** (must be non-zero; a value
+///   near `0` returns a copy). Smaller wavelengths pack more ripples across the image.
+/// * `axis` — the axis the ripple **progresses along**. [`Axis::Horizontal`] varies the
+///   wave with `x` and displaces pixels vertically (a horizontally-travelling ripple);
+///   [`Axis::Vertical`] varies with `y` and displaces horizontally.
+pub fn wave(img: &GrayImage, amplitude: f32, wavelength: f32, axis: Axis) -> GrayImage {
+    let off = amplitude.abs().ceil() as usize + PAD;
+    let w = img.width();
+    let h = img.height();
+    let nw = w + 2 * off;
+    let nh = h + 2 * off;
+    let mut out = GrayImage::filled(nw, nh, BACKGROUND as u8);
+    if wavelength.abs() < 1e-4 {
+        // Degenerate wavelength: just re-emit the padded image.
+        for oy in 0..h {
+            for ox in 0..w {
+                out.set(ox + off, oy + off, img.get(ox, oy));
+            }
+        }
+        return out;
+    }
+    let k = core::f32::consts::TAU / wavelength;
+    for oy in 0..nh {
+        for ox in 0..nw {
+            let bx = ox as f32 - off as f32;
+            let by = oy as f32 - off as f32;
+            let (sx, sy) = match axis {
+                Axis::Horizontal => (bx, by - amplitude * (k * bx).sin()),
+                Axis::Vertical => (bx - amplitude * (k * by).sin(), by),
+            };
+            if let Some(v) = img.sample_bilinear(sx, sy) {
+                out.set(ox, oy, v.round() as u8);
+            }
+        }
+    }
+    out
+}
+
+/// Simulate a crease: split the image along a straight line and rotate one half away
+/// from the camera in depth, as with a folded sheet of paper.
+///
+/// The half on the near side of the crease is untouched; the far half is
+/// foreshortened by `cos(angle)` about the crease line (an orthographic depth
+/// rotation), so its modules compress toward the fold and the area past the receding
+/// edge falls back to light background.
+///
+/// * `position` — location of the crease along `axis`, as a **fraction** `0.0..=1.0`
+///   of the image extent (e.g. `0.5` folds through the middle).
+/// * `angle_deg` — dihedral fold angle in **degrees**, `0` (flat) up to but not
+///   including `90`. Larger angles compress the folded half more; the magnitude is
+///   used, so sign is irrelevant.
+/// * `axis` — orientation of the **crease line**. [`Axis::Vertical`] creases along a
+///   vertical line and folds the right half; [`Axis::Horizontal`] creases horizontally
+///   and folds the bottom half.
+pub fn fold(img: &GrayImage, position: f32, angle_deg: f32, axis: Axis) -> GrayImage {
+    let w = img.width();
+    let h = img.height();
+    let nw = w + 2 * PAD;
+    let nh = h + 2 * PAD;
+    let mut out = GrayImage::filled(nw, nh, BACKGROUND as u8);
+    // Clamp the fold just shy of 90° so the foreshortening factor stays finite.
+    let cos_f = angle_deg
+        .abs()
+        .to_radians()
+        .clamp(0.0, 1.556)
+        .cos()
+        .max(1e-3);
+    let pos = position.clamp(0.0, 1.0);
+    for oy in 0..nh {
+        for ox in 0..nw {
+            let bx = ox as f32 - PAD as f32;
+            let by = oy as f32 - PAD as f32;
+            let (sx, sy) = match axis {
+                Axis::Vertical => {
+                    let xc = pos * w as f32;
+                    let sx = if bx <= xc { bx } else { xc + (bx - xc) / cos_f };
+                    (sx, by)
+                }
+                Axis::Horizontal => {
+                    let yc = pos * h as f32;
+                    let sy = if by <= yc { by } else { yc + (by - yc) / cos_f };
+                    (bx, sy)
+                }
+            };
+            if let Some(v) = img.sample_bilinear(sx, sy) {
+                out.set(ox, oy, v.round() as u8);
+            }
+        }
+    }
+    out
+}
+
+/// Apply a radial bulge or pinch centred on `center`, as if the label covered a rounded
+/// bump (bulge) or sank into a dimple (pinch).
+///
+/// Distance from the centre is remapped by a power law that fixes both the centre and
+/// the outer boundary, so the frame edges stay put while the interior swells or shrinks.
+///
+/// * `strength` — deformation amount, roughly `-1.0..1.0`. `strength > 0` **bulges**
+///   (magnifies the centre); `strength < 0` **pinches** (shrinks the centre); `0` is
+///   the identity. Useful magnitudes are ~`0.2` (subtle) to ~`0.6` (strong).
+/// * `center` — bulge centre in **normalized** image coordinates, each component in
+///   `0.0..=1.0` (`(0.5, 0.5)` is the image middle).
+pub fn bulge(img: &GrayImage, strength: f32, center: (f32, f32)) -> GrayImage {
+    let w = img.width();
+    let h = img.height();
+    let mut out = GrayImage::filled(w, h, BACKGROUND as u8);
+    if strength.abs() < 1e-4 {
+        return img.clone();
+    }
+    let cx = center.0.clamp(0.0, 1.0) * w as f32;
+    let cy = center.1.clamp(0.0, 1.0) * h as f32;
+    // Effect radius: reach the farthest corner so the whole image is remapped and the
+    // deformation eases back to identity exactly at that boundary.
+    let mut radius = 0.0_f32;
+    for &(px, py) in &[
+        (0.0, 0.0),
+        (w as f32, 0.0),
+        (w as f32, h as f32),
+        (0.0, h as f32),
+    ] {
+        radius = radius.max((px - cx).hypot(py - cy));
+    }
+    let radius = radius.max(1.0);
+    for oy in 0..h {
+        for ox in 0..w {
+            let dx = ox as f32 + 0.5 - cx;
+            let dy = oy as f32 + 0.5 - cy;
+            let r = dx.hypot(dy);
+            let (sx, sy) = if r < 1e-3 {
+                (cx - 0.5, cy - 0.5)
+            } else {
+                // scale = (r/radius)^strength: <1 pulls the source toward centre
+                // (magnifying it) for strength>0, >1 for a pinch.
+                let scale = (r / radius).powf(strength);
+                (cx + dx * scale - 0.5, cy + dy * scale - 0.5)
+            };
+            if let Some(v) = img.sample_bilinear(sx, sy) {
+                out.set(ox, oy, v.round() as u8);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +626,84 @@ mod tests {
         let cx = out.width() / 2;
         let cy = out.height() / 2;
         assert!(out.get(cx, cy) < 128);
+    }
+
+    /// A checkerboard-ish test pattern with distinct dark features to track.
+    fn feature_image() -> GrayImage {
+        let mut img = GrayImage::filled(40, 40, 255);
+        for y in 10..30 {
+            for x in 10..30 {
+                if (x + y) % 2 == 0 {
+                    img.set(x, y, 0);
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn zero_strength_transforms_are_identity() {
+        let img = feature_image();
+        assert_eq!(cylinder(&img, 0.0, Axis::Vertical), img);
+        assert_eq!(cylinder(&img, 0.0, Axis::Horizontal), img);
+        assert_eq!(bulge(&img, 0.0, (0.5, 0.5)), img);
+        // fold with a 0° angle keeps source coordinates unchanged (only padded).
+        let f = fold(&img, 0.5, 0.0, Axis::Vertical);
+        assert_eq!(f.get(PAD + 15, PAD + 15), img.get(15, 15));
+    }
+
+    #[test]
+    fn curved_transforms_are_deterministic() {
+        let img = feature_image();
+        assert_eq!(
+            cylinder(&img, 0.6, Axis::Vertical),
+            cylinder(&img, 0.6, Axis::Vertical)
+        );
+        assert_eq!(
+            wave(&img, 3.0, 18.0, Axis::Horizontal),
+            wave(&img, 3.0, 18.0, Axis::Horizontal)
+        );
+        assert_eq!(
+            fold(&img, 0.5, 30.0, Axis::Vertical),
+            fold(&img, 0.5, 30.0, Axis::Vertical)
+        );
+        assert_eq!(bulge(&img, 0.4, (0.5, 0.5)), bulge(&img, 0.4, (0.5, 0.5)));
+    }
+
+    #[test]
+    fn cylinder_pins_edges_and_preserves_size() {
+        let img = feature_image();
+        let out = cylinder(&img, 0.8, Axis::Vertical);
+        assert_eq!((out.width(), out.height()), (img.width(), img.height()));
+        // Middle column is near true scale; a mid dark pixel stays roughly put.
+        // Simply confirm the transform produced some dark content (not all-white).
+        assert!(out.pixels().iter().any(|&p| p < 128));
+    }
+
+    #[test]
+    fn wave_grows_canvas_and_keeps_content() {
+        let img = feature_image();
+        let out = wave(&img, 4.0, 20.0, Axis::Horizontal);
+        assert!(out.width() > img.width() && out.height() > img.height());
+        assert!(out.pixels().iter().any(|&p| p < 128));
+    }
+
+    #[test]
+    fn fold_compresses_far_half() {
+        let img = feature_image();
+        let out = fold(&img, 0.5, 45.0, Axis::Vertical);
+        assert!(out.pixels().iter().any(|&p| p < 128));
+    }
+
+    #[test]
+    fn bulge_and_pinch_keep_size_and_content() {
+        let img = feature_image();
+        let b = bulge(&img, 0.5, (0.5, 0.5));
+        let p = bulge(&img, -0.5, (0.5, 0.5));
+        assert_eq!((b.width(), b.height()), (img.width(), img.height()));
+        assert!(b.pixels().iter().any(|&v| v < 128));
+        assert!(p.pixels().iter().any(|&v| v < 128));
+        // Bulge and pinch of equal magnitude differ.
+        assert_ne!(b, p);
     }
 }

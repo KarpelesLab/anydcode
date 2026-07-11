@@ -56,6 +56,7 @@ impl Pdf417Encoder {
             rows,
             columns,
             ec_level: level,
+            variant: super::Pdf417Variant::Standard,
         };
         Ok(Symbol::new(
             Symbology::Pdf417,

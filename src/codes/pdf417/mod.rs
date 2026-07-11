@@ -33,11 +33,13 @@ mod compaction;
 mod decode;
 pub mod ec;
 mod encode;
+mod micro;
 mod sample;
 mod tables;
 
 pub use decode::Pdf417Decoder;
 pub use encode::Pdf417Encoder;
+pub use micro::{MicroPdf417Decoder, MicroPdf417Encoder};
 pub use sample::{Pdf417Scanner, sample_grid, scan};
 
 use crate::error::Error;
@@ -74,7 +76,25 @@ impl TryFrom<u8> for EcLevel {
     }
 }
 
-/// Parameters required to re-encode a PDF417 symbol identically (lossless round-trip).
+/// Which member of the PDF417 family a [`Pdf417Meta`] describes.
+///
+/// The two share this crate's compaction and GF(929) Reed–Solomon layers but differ
+/// in geometry and framing, so a single flag lets [`SymbolMeta::Pdf417`] carry either.
+///
+/// [`SymbolMeta::Pdf417`]: crate::symbol::SymbolMeta::Pdf417
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pdf417Variant {
+    /// Standard PDF417 (ISO/IEC 15438): start/stop guards and row indicators.
+    Standard,
+    /// MicroPDF417 (ISO/IEC 24728) at the given size-variant index (`0..=33`).
+    ///
+    /// The index selects a row of the fixed size table (columns, rows and
+    /// error-correction codeword count); Row Address Patterns replace the guards.
+    Micro(u8),
+}
+
+/// Parameters required to re-encode a PDF417 (or MicroPDF417) symbol identically
+/// (lossless round-trip).
 ///
 /// The compaction-mode sequence itself lives in the symbol's ordered
 /// [`Segment`](crate::Segment)s (one mode latch per segment); this metadata pins the
@@ -82,12 +102,17 @@ impl TryFrom<u8> for EcLevel {
 /// fully determine the module matrix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pdf417Meta {
-    /// Number of rows (`3..=90`).
+    /// Number of rows. Standard PDF417: `3..=90`; MicroPDF417: fixed by the variant.
     pub rows: usize,
-    /// Number of data columns (`1..=30`), excluding start/stop and row indicators.
+    /// Number of data columns. Standard PDF417: `1..=30` (excluding start/stop and
+    /// row indicators); MicroPDF417: `1..=4`.
     pub columns: usize,
-    /// Error-correction level.
+    /// Error-correction level. For MicroPDF417 the number of error-correction
+    /// codewords is fixed by the size variant, so this field is unused and left at
+    /// level 0.
     pub ec_level: EcLevel,
+    /// Which family member this describes (standard PDF417 or a MicroPDF417 variant).
+    pub variant: Pdf417Variant,
 }
 
 impl Default for Pdf417Meta {
@@ -96,6 +121,7 @@ impl Default for Pdf417Meta {
             rows: 3,
             columns: 1,
             ec_level: EcLevel(0),
+            variant: Pdf417Variant::Standard,
         }
     }
 }

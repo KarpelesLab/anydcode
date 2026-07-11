@@ -241,7 +241,18 @@ impl Symbology {
         use Symbology::*;
         matches!(
             self,
-            QrCode | DataMatrix | Code128 | Gs1_128 | Ean13 | Ean8 | UpcA | UpcE | Ean2 | Ean5
+            QrCode
+                | DataMatrix
+                | Code128
+                | Gs1_128
+                | Ean13
+                | Ean8
+                | UpcA
+                | UpcE
+                | Ean2
+                | Ean5
+                | DataBarOmni
+                | DataBarLimited
         )
     }
 

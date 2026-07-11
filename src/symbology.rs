@@ -321,10 +321,8 @@ mod tests {
             assert!(names.insert(s.name()), "duplicate name: {}", s.name());
             let _ = s.dimension();
         }
-        // Only QR is implemented so far.
-        assert_eq!(
-            Symbology::ALL.iter().filter(|s| s.is_implemented()).count(),
-            1
-        );
+        // At least QR is implemented; coverage grows over time.
+        assert!(Symbology::QrCode.is_implemented());
+        assert!(Symbology::ALL.iter().any(|s| s.is_implemented()));
     }
 }

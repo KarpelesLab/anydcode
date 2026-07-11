@@ -646,6 +646,18 @@ impl Located {
 
     /// Sample every module centre `(col+0.5, row+0.5)` into a clean [`BitMatrix`],
     /// mapping grid→image through `map` (a planar projection or a non-planar warp).
+    ///
+    /// The [`ModuleThreshold::Global`] path (the clean/global-Otsu pass) reads a single
+    /// 5-tap plus at the module centre, so evenly-lit renders sample exactly as before.
+    /// The [`ModuleThreshold::Local`] path (adaptive and dewarp passes) instead
+    /// **oversamples**: it reads a 4×4 grid across the module's inner ~60% and takes the
+    /// majority vote, each sub-tap classified against a *local-contrast midpoint*
+    /// `(min + max)/2` measured over a small window around the module. The midpoint tracks
+    /// the true dark/light split of a low-contrast, blurred capture far better than a plain
+    /// mean (which skews when a neighbourhood holds more dark than light modules), and the
+    /// majority vote is robust to the sub-module pitch drift a real print + camera + gentle
+    /// curve introduces — the two together fix the scattered module errors a single central
+    /// tap produces.
     fn sample_map(
         &self,
         frame: &GrayFrame<'_>,
@@ -654,13 +666,40 @@ impl Located {
     ) -> BitMatrix {
         let dim = self.dimension;
         // Average a few taps within the module footprint so blur and single-pixel
-        // noise do not flip a module.
+        // noise do not flip a module (global path).
         let tap = (self.module_size * 0.25).clamp(0.5, 8.0) as f64;
+        // Sub-tap offsets (grid units) spanning the module's inner ~60% for the majority
+        // vote (local path).
+        const OFF: [f64; 4] = [-0.3, -0.1, 0.1, 0.3];
+        // Local-contrast window radius: ≈ two modules, so it always spans both a dark and a
+        // light module and its min/max bracket the true black/white levels.
+        let win = (self.module_size * 2.0).round().clamp(2.0, 48.0) as i32;
         let mut matrix = BitMatrix::new(dim, dim, QUIET_ZONE);
         for my in 0..dim {
             for mx in 0..dim {
-                let (px, py) = map(mx as f64 + 0.5, my as f64 + 0.5);
-                if sample_dark(frame, px, py, tap, thr) {
+                let gx = mx as f64 + 0.5;
+                let gy = my as f64 + 0.5;
+                let dark = match *thr {
+                    ModuleThreshold::Global(t) => {
+                        let (px, py) = map(gx, gy);
+                        sample_dark_global(frame, px, py, tap, t)
+                    }
+                    ModuleThreshold::Local { integral, radius } => {
+                        let (cx, cy) = map(gx, gy);
+                        let midpoint = local_contrast_midpoint(frame, cx, cy, win);
+                        let mut votes_dark = 0u32;
+                        for &dv in &OFF {
+                            for &du in &OFF {
+                                let (px, py) = map(gx + du, gy + dv);
+                                if sample_dark_local(frame, px, py, integral, radius, midpoint) {
+                                    votes_dark += 1;
+                                }
+                            }
+                        }
+                        votes_dark * 2 > (OFF.len() * OFF.len()) as u32
+                    }
+                };
+                if dark {
                     matrix.set(mx, my, true);
                 }
             }
@@ -669,35 +708,80 @@ impl Located {
     }
 }
 
-/// Decide dark vs light at module centre `(px, py)`.
+/// Local-contrast midpoint `(min + max)/2` of luminance over a `±win`-pixel window centred
+/// on `(cx, cy)`.
 ///
-/// Luminance is the mean of five bilinear taps (centre plus four offset by `tap`),
-/// which survives blur and noise. It is then compared either to a fixed global cutoff
-/// or to the local-neighbourhood mean (Bradley), which tracks lighting gradients.
-fn sample_dark(
-    frame: &GrayFrame<'_>,
-    px: f64,
-    py: f64,
-    tap: f64,
-    thr: &ModuleThreshold<'_>,
-) -> bool {
+/// On a low-contrast, blurred capture the true black/white levels vary across the symbol,
+/// so a fixed cutoff — or even a local *mean*, which skews when a window holds more dark
+/// than light — misclassifies modules. The midpoint of the local min and max brackets the
+/// two levels and sits between them regardless of their ratio. Returns `None`-equivalent
+/// `128.0` only if the window is degenerate.
+fn local_contrast_midpoint(frame: &GrayFrame<'_>, cx: f64, cy: f64, win: i32) -> f64 {
+    let w = frame.width() as i32;
+    let h = frame.height() as i32;
+    let ix = cx.round() as i32;
+    let iy = cy.round() as i32;
+    let mut mn = 255.0f64;
+    let mut mx = 0.0f64;
+    let mut any = false;
+    let mut dy = -win;
+    while dy <= win {
+        let mut dx = -win;
+        while dx <= win {
+            let x = ix + dx;
+            let y = iy + dy;
+            if x >= 0 && y >= 0 && x < w && y < h {
+                let l = f64::from(frame.get_unchecked(x as usize, y as usize));
+                mn = mn.min(l);
+                mx = mx.max(l);
+                any = true;
+            }
+            dx += 1;
+        }
+        dy += 1;
+    }
+    if any { (mn + mx) * 0.5 } else { 128.0 }
+}
+
+/// Decide dark vs light at module centre `(px, py)` against a fixed global cutoff.
+///
+/// Luminance is the mean of five bilinear taps (centre plus four offset by `tap`), which
+/// survives blur and noise. Used only by the clean/global-Otsu pass, so evenly-lit renders
+/// sample bit-for-bit as before.
+fn sample_dark_global(frame: &GrayFrame<'_>, px: f64, py: f64, tap: f64, t: u8) -> bool {
     let lum = (sample_bilinear(frame, px, py)
         + sample_bilinear(frame, px - tap, py)
         + sample_bilinear(frame, px + tap, py)
         + sample_bilinear(frame, px, py - tap)
         + sample_bilinear(frame, px, py + tap))
         / 5.0;
-    match *thr {
-        ModuleThreshold::Global(t) => lum <= f64::from(t),
-        ModuleThreshold::Local { integral, radius } => {
-            let cx = (px.round().max(0.0) as usize).min(integral.width().saturating_sub(1));
-            let cy = (py.round().max(0.0) as usize).min(integral.height().saturating_sub(1));
-            let (sum, count) = integral.window_sum_count(cx, cy, radius);
-            let mean = sum as f64 / count.max(1) as f64;
-            // Dark when meaningfully below the local mean.
-            lum < mean - 4.0 && lum < mean * 0.98
-        }
-    }
+    lum <= f64::from(t)
+}
+
+/// Decide dark vs light at sub-tap `(px, py)`.
+///
+/// The primary discriminator is the local-contrast `midpoint` (`(min+max)/2`) the caller
+/// measured around the module — a low-contrast, blurred module still lands on the correct
+/// side of it. The local-neighbourhood *mean* (Bradley, from `integral`) is kept as a
+/// gradient-following backstop: a sub-tap must be below *both* to count as dark, which
+/// suppresses spurious flips in near-uniform areas the bare midpoint would coin-flip.
+fn sample_dark_local(
+    frame: &GrayFrame<'_>,
+    px: f64,
+    py: f64,
+    integral: &IntegralImage,
+    radius: usize,
+    midpoint: f64,
+) -> bool {
+    let lum = sample_bilinear(frame, px, py);
+    let cx = (px.round().max(0.0) as usize).min(integral.width().saturating_sub(1));
+    let cy = (py.round().max(0.0) as usize).min(integral.height().saturating_sub(1));
+    let (sum, count) = integral.window_sum_count(cx, cy, radius);
+    let mean = sum as f64 / count.max(1) as f64;
+    // Dark when below the local-contrast midpoint and meaningfully below the local mean.
+    // The mean backstop suppresses spurious flips in near-uniform areas the bare midpoint
+    // would coin-flip.
+    lum < midpoint && lum < mean - 4.0 && lum < mean * 0.98
 }
 
 /// Order three finder centers into `[top-left, top-right, bottom-left]` using the
@@ -732,6 +816,9 @@ fn order_finders(a: Finder, b: Finder, c: Finder) -> ([Point; 3], f32) {
 
 /// Four ordered `(x, y)` correspondence points (grid or image space).
 type Quad4 = [(f64, f64); 4];
+
+/// An anchor mesh: parallel `(grid, image)` correspondence vectors used to fit a warp.
+type AnchorMesh = (Vec<(f64, f64)>, Vec<(f64, f64)>);
 
 /// Grid/image correspondences using the parallelogram rule for the fourth corner
 /// (a would-be bottom-right finder center at grid `(dim-3.5, dim-3.5)`).
@@ -842,6 +929,103 @@ fn find_alignment(
     best.map(|(p, _)| p)
 }
 
+/// Whether module `(i, j)` of a 5×5 alignment pattern is dark: the outer ring and the
+/// single central module are dark; the ring between them is light.
+fn alignment_module_dark(i: usize, j: usize) -> bool {
+    let ring = i == 0 || i == 4 || j == 0 || j == 4;
+    let center = i == 2 && j == 2;
+    ring || center
+}
+
+/// Correlation of the 5×5 alignment template centred at pixel `(cx, cy)` with the frame,
+/// using per-module step vectors `ax` (columns) and `ay` (rows). Returns mean light-module
+/// luminance minus mean dark-module luminance — larger is a better match. Like
+/// [`finder_template_score`], this low-frequency signal survives blur that destroys the
+/// run-length cross-section [`find_alignment`] relies on.
+fn alignment_template_score(
+    frame: &GrayFrame<'_>,
+    cx: f32,
+    cy: f32,
+    ax: (f32, f32),
+    ay: (f32, f32),
+) -> f32 {
+    let (mut light, mut dark) = (0.0f32, 0.0f32);
+    let (mut nl, mut nd) = (0.0f32, 0.0f32);
+    for j in 0..5usize {
+        for i in 0..5usize {
+            let fi = i as f32 - 2.0;
+            let fj = j as f32 - 2.0;
+            let px = cx + fi * ax.0 + fj * ay.0;
+            let py = cy + fi * ax.1 + fj * ay.1;
+            let lum = sample_bilinear(frame, px as f64, py as f64) as f32;
+            if alignment_module_dark(i, j) {
+                dark += lum;
+                nd += 1.0;
+            } else {
+                light += lum;
+                nl += 1.0;
+            }
+        }
+    }
+    light / nl.max(1.0) - dark / nd.max(1.0)
+}
+
+/// Locate an alignment pattern by grayscale template correlation, given its predicted image
+/// centre `(cx0, cy0)` and the local per-module image basis `ax` (one column) / `ay` (one
+/// row).
+///
+/// The binary [`find_alignment`] fails when blur erases the pattern's 1:1:1:1:1 cross-section
+/// — exactly the regime of a small real-world capture. This maximizes
+/// [`alignment_template_score`] over a sub-module search around the prediction. Returns the
+/// refined sub-pixel image centre when the best match clears a modest contrast bar (so
+/// featureless neighbourhoods are rejected).
+fn search_alignment_template(
+    frame: &GrayFrame<'_>,
+    cx0: f32,
+    cy0: f32,
+    ax: (f32, f32),
+    ay: (f32, f32),
+    reach_modules: f32,
+) -> Option<Point> {
+    if ax.0.hypot(ax.1) < 0.5 || ay.0.hypot(ay.1) < 0.5 {
+        return None;
+    }
+    let step = 0.2f32;
+    let n = (reach_modules / step).round() as i32;
+    let mut best: Option<(f32, f32, f32)> = None; // (score, x, y)
+    for oy in -n..=n {
+        for ox in -n..=n {
+            let fx = ox as f32 * step;
+            let fy = oy as f32 * step;
+            let cx = cx0 + fx * ax.0 + fy * ay.0;
+            let cy = cy0 + fx * ax.1 + fy * ay.1;
+            let s = alignment_template_score(frame, cx, cy, ax, ay);
+            if best.is_none_or(|(bs, _, _)| s > bs) {
+                best = Some((s, cx, cy));
+            }
+        }
+    }
+    // Require a real dark/light contrast so blank areas do not masquerade as a pattern.
+    best.and_then(|(s, x, y)| (s > 6.0).then_some(Point::new(x, y)))
+}
+
+/// Locate an alignment pattern near grid `(gx, gy)` by predicting its centre and module axes
+/// from `projection`, then running [`search_alignment_template`].
+fn find_alignment_template(
+    frame: &GrayFrame<'_>,
+    projection: &Projection,
+    gx: f64,
+    gy: f64,
+    reach_modules: f32,
+) -> Option<Point> {
+    let (cx0, cy0) = projection.map(gx, gy);
+    let (rx, ry) = projection.map(gx + 1.0, gy);
+    let (dx, dy) = projection.map(gx, gy + 1.0);
+    let ax = ((rx - cx0) as f32, (ry - cy0) as f32);
+    let ay = ((dx - cx0) as f32, (dy - cy0) as f32);
+    search_alignment_template(frame, cx0 as f32, cy0 as f32, ax, ay, reach_modules)
+}
+
 // ===================================================================================
 // Non-planar (thin-plate-spline) dewarping
 // ===================================================================================
@@ -853,8 +1037,6 @@ struct Anchors {
     grid: Vec<(f64, f64)>,
     /// Image-pixel coordinates of the same anchors, in matching order.
     img: Vec<(f64, f64)>,
-    /// How many of the anchors are interior alignment patterns (finders excluded).
-    alignments: usize,
 }
 
 /// Refine a detected alignment centre to sub-pixel precision by a darkness-weighted
@@ -958,12 +1140,26 @@ fn collect_anchors(frame: &GrayFrame<'_>, bin: &Binary, located: &Located) -> Op
                 Some(t) => t.map(gx, gy),
                 None => located.projection.map(gx, gy),
             };
+            // Binary cross-section first, grayscale template as a blur-tolerant fallback.
             let hit = find_alignment(
                 bin,
                 Point::new(ex as f32, ey as f32),
                 located.module_size,
                 radius,
-            );
+            )
+            .or_else(|| {
+                let predictor_proj = &located.projection;
+                match &predictor {
+                    Some(t) => {
+                        let (rx, ry) = t.map(gx + 1.0, gy);
+                        let (dx, dy) = t.map(gx, gy + 1.0);
+                        let ax = ((rx - ex) as f32, (ry - ey) as f32);
+                        let ay = ((dx - ex) as f32, (dy - ey) as f32);
+                        search_alignment_template(frame, ex as f32, ey as f32, ax, ay, radius)
+                    }
+                    None => find_alignment_template(frame, predictor_proj, gx, gy, radius),
+                }
+            });
             if let Some(p) = hit {
                 let (rx, ry) = refine_alignment_centroid(frame, p.x, p.y, located.module_size);
                 grid.push((gx, gy));
@@ -980,22 +1176,176 @@ fn collect_anchors(frame: &GrayFrame<'_>, bin: &Binary, located: &Located) -> Op
         }
     }
 
-    (alignments >= 1).then_some(Anchors {
-        grid,
-        img,
-        alignments,
-    })
+    (alignments >= 1).then_some(Anchors { grid, img })
+}
+
+/// Detect the sub-pixel image positions of the two timing-pattern lines and return them as
+/// `(grid, image)` anchor correspondences.
+///
+/// A QR's timing patterns — grid row 6 between the top finders and grid col 6 between the
+/// left finders — are a *dense* run of modules at known grid coordinates with a perfect
+/// dark/light alternation extending, by parity, from one finder's centre column all the way
+/// to the other's. Walking each binarized timing line records where the module *boundaries*
+/// truly land in the image; each boundary is at a known integer grid coordinate, so the
+/// pair is an anchor. Feeding these into the dewarp mesh pins down the module pitch across
+/// the code — the exact drift that a plain finder-triangle map leaves uncorrected and that
+/// scatters errors past version 2's Reed–Solomon budget on real prints.
+///
+/// A line contributes anchors only when its walk yields exactly the expected number of
+/// evenly-spaced transitions (a clean alternation), so a blur- or curvature-spoiled timing
+/// line is skipped rather than allowed to poison the fit. Returns matching `(grid, image)`
+/// vectors, empty when neither line reads cleanly.
+fn timing_anchors(bin: &Binary, located: &Located) -> AnchorMesh {
+    let dim = located.dimension;
+    let mut grid = Vec::new();
+    let mut img = Vec::new();
+    collect_timing_line(bin, located, dim, true, &mut grid, &mut img);
+    collect_timing_line(bin, located, dim, false, &mut grid, &mut img);
+    (grid, img)
+}
+
+/// Walk one timing line and append its boundary anchors to `grid`/`img`.
+///
+/// `horizontal` selects grid row 6 (scan across columns) versus grid col 6 (scan down
+/// rows). The finder triangle fixes the timing line only approximately — its perpendicular
+/// position can drift up to ~a module between the finders — so the scan first *locks* onto
+/// the true line by sweeping the perpendicular grid offset and keeping the offset whose walk
+/// yields the cleanest alternation (exactly `dim - 13` boundaries, most evenly spaced).
+///
+/// The scan runs in *grid* space, `map`ping each `(scan, perp)` through the located
+/// projection, so the image position of every dark/light transition is the projection of the
+/// grid parameter where the binary flips — the module boundary's real image location. Each
+/// boundary sits at a known integer grid coordinate `7..=dim-7`, so `(grid, image)` pairs
+/// fall out. The locked perpendicular offset (vs the ideal 6.5) is itself a correction the
+/// TPS absorbs.
+fn collect_timing_line(
+    bin: &Binary,
+    located: &Located,
+    dim: usize,
+    horizontal: bool,
+    grid: &mut Vec<(f64, f64)>,
+    img: &mut Vec<(f64, f64)>,
+) {
+    let expected = dim as i32 - 13;
+    if expected < 3 {
+        return;
+    }
+    // Both endpoints (grid 6.5 and dim-6.5 along the scan axis) sit inside a finder's dark
+    // outer ring, so a walk on the true line starts and ends dark and the interior
+    // alternation yields one transition per integer boundary.
+    let lo = 6.5f64;
+    let hi = dim as f64 - 6.5;
+
+    // Lock the perpendicular position: sweep grid offsets around the ideal 6.5 and keep the
+    // one whose walk reads a clean `expected`-boundary alternation with the lowest gap
+    // variance (most regular spacing = genuinely on the timing line).
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    let mut best_var = f64::MAX;
+    let mut perp = 6.5 - 1.5;
+    while perp <= 6.5 + 1.5 + 1e-9 {
+        if let Some(tr) = walk_timing(bin, located, horizontal, perp, lo, hi, expected) {
+            let mean = (hi - lo) / tr.len() as f64;
+            let var: f64 = tr
+                .windows(2)
+                .map(|w| {
+                    let g = w[1] - w[0] - mean;
+                    g * g
+                })
+                .sum();
+            if var < best_var {
+                best_var = var;
+                best = Some((perp, tr));
+            }
+        }
+        perp += 0.1;
+    }
+
+    let Some((perp, transitions)) = best else {
+        return;
+    };
+    let map_pt = |scan: f64| -> (f64, f64) {
+        if horizontal {
+            located.projection.map(scan, perp)
+        } else {
+            located.projection.map(perp, scan)
+        }
+    };
+    // Transition i is the boundary at integer grid coordinate 7+i on the timing line.
+    for (i, &s_t) in transitions.iter().enumerate() {
+        let b = (7 + i) as f64;
+        let (px, py) = map_pt(s_t);
+        if horizontal {
+            grid.push((b, 6.5));
+        } else {
+            grid.push((6.5, b));
+        }
+        img.push((px, py));
+    }
+}
+
+/// Walk the timing line at grid perpendicular offset `perp` and return the sub-pixel scan
+/// positions of its dark/light transitions, or `None` unless there are exactly `expected`
+/// of them spaced ≈ one module apart (a clean alternation on the true line).
+fn walk_timing(
+    bin: &Binary,
+    located: &Located,
+    horizontal: bool,
+    perp: f64,
+    lo: f64,
+    hi: f64,
+    expected: i32,
+) -> Option<Vec<f64>> {
+    let dark_at = |scan: f64| -> bool {
+        let (px, py) = if horizontal {
+            located.projection.map(scan, perp)
+        } else {
+            located.projection.map(perp, scan)
+        };
+        let xi = px.round();
+        let yi = py.round();
+        if xi < 0.0 || yi < 0.0 || xi >= bin.width() as f64 || yi >= bin.height() as f64 {
+            return false;
+        }
+        bin.dark(xi as usize, yi as usize)
+    };
+    let step = 0.02f64;
+    let mut transitions: Vec<f64> = Vec::new();
+    let mut prev = dark_at(lo);
+    let mut prev_s = lo;
+    let mut s = lo + step;
+    while s <= hi {
+        let cur = dark_at(s);
+        if cur != prev {
+            transitions.push((s + prev_s) * 0.5);
+            prev = cur;
+        }
+        prev_s = s;
+        s += step;
+    }
+    if transitions.len() as i32 != expected {
+        return None;
+    }
+    if transitions
+        .windows(2)
+        .any(|w| !(0.5..1.6).contains(&(w[1] - w[0])))
+    {
+        return None;
+    }
+    Some(transitions)
 }
 
 /// Fit a non-planar thin-plate-spline warp through every detected anchor and resample the
 /// symbol through it, decode-validating the result.
 ///
-/// This is the curved-surface primary path for versions ≥ 2: a homography can only model
-/// a flat plane, so a code on a cylinder, fold or ripple samples wrong through it, but a
-/// TPS through the finder + alignment mesh follows the curvature. Two module-classification
-/// thresholds are tried (local-mean and global) since blur and curvature favour different
-/// ones. Returns the decoded symbol, or `None` if no alignment anchors were found or the
-/// resampled grid still fails Reed–Solomon.
+/// This is the curved / real-world primary path for versions ≥ 2. The anchor mesh combines
+/// three sources: the three finder centres, every interior alignment pattern that can be
+/// located, and — crucially for real prints — the two timing lines' module boundaries
+/// (`timing_anchors`), which pin the module pitch across the whole code. A homography can
+/// only model a flat plane; a TPS through this mesh follows curvature *and* the slight pitch
+/// drift of a real print + camera. Richer meshes are tried first, then leaner ones, and two
+/// module-classification thresholds (local-mean then global) since blur and curvature favour
+/// different ones. Returns the decoded symbol, or `None` if no usable anchor mesh exists or
+/// every resample still fails Reed–Solomon.
 fn dewarp_decode(
     frame: &GrayFrame<'_>,
     bin: &Binary,
@@ -1003,18 +1353,58 @@ fn dewarp_decode(
     integral: &IntegralImage,
     decoder: &QrDecoder,
 ) -> Option<Symbol> {
-    let anchors = collect_anchors(frame, bin, located)?;
-    debug_assert!(anchors.alignments >= 1);
-    let warp = ThinPlateSpline::fit(&anchors.grid, &anchors.img)?;
+    let base = collect_anchors(frame, bin, located);
+    let (tg, ti) = timing_anchors(bin, located);
+
+    // Candidate anchor meshes, richest first. Timing-augmented meshes correct the module
+    // pitch that scatters errors on real prints; the un-augmented mesh is kept as a fallback
+    // so nothing that used to decode via the alignment-only warp regresses.
+    let mut meshes: Vec<AnchorMesh> = Vec::new();
+    match &base {
+        Some(a) => {
+            if !tg.is_empty() {
+                let mut g = a.grid.clone();
+                g.extend_from_slice(&tg);
+                let mut im = a.img.clone();
+                im.extend_from_slice(&ti);
+                meshes.push((g, im));
+            }
+            meshes.push((a.grid.clone(), a.img.clone()));
+        }
+        None => {
+            // No alignment pattern was located (e.g. version 2 whose lone alignment is
+            // degraded). The finder triangle plus the timing lines is still a dense enough
+            // mesh to correct the pitch drift.
+            if !tg.is_empty() {
+                let [tl, tr, _, bl] = located.corners;
+                let d = located.dimension as f64;
+                let mut g = vec![(3.5, 3.5), (d - 3.5, 3.5), (3.5, d - 3.5)];
+                g.extend_from_slice(&tg);
+                let mut im = vec![
+                    (tl.x as f64, tl.y as f64),
+                    (tr.x as f64, tr.y as f64),
+                    (bl.x as f64, bl.y as f64),
+                ];
+                im.extend_from_slice(&ti);
+                meshes.push((g, im));
+            }
+        }
+    }
+
     let radius = (located.module_size * 2.0).round().clamp(2.0, 64.0) as usize;
     let thresholds = [
         ModuleThreshold::Local { integral, radius },
         ModuleThreshold::Global(located.threshold),
     ];
-    for thr in &thresholds {
-        let matrix = located.sample_warp(frame, thr, &warp);
-        if let Ok(sym) = decoder.decode_matrix(&matrix) {
-            return Some(sym);
+    for (g, im) in &meshes {
+        let Some(warp) = ThinPlateSpline::fit(g, im) else {
+            continue;
+        };
+        for thr in &thresholds {
+            let matrix = located.sample_warp(frame, thr, &warp);
+            if let Ok(sym) = decoder.decode_matrix(&matrix) {
+                return Some(sym);
+            }
         }
     }
     None
@@ -1235,7 +1625,7 @@ fn candidates(frame: &GrayFrame<'_>, bin: &Binary) -> Vec<Located> {
 
     let mut out = Vec::new();
     for (_, tri) in triples.into_iter().take(MAX_TRIPLES) {
-        if let Some(located) = build_located(bin, tri[0], tri[1], tri[2]) {
+        if let Some(located) = build_located(frame, bin, tri[0], tri[1], tri[2]) {
             out.push(located);
         }
     }
@@ -1281,10 +1671,35 @@ fn triple_score(a: Finder, b: Finder, c: Finder) -> Option<f32> {
     Some(cos.abs() * 2.0 + ratio.ln() - 0.02 * count)
 }
 
+/// Refine a finder centre to sub-pixel precision by a darkness-weighted centroid over its
+/// central dark core.
+///
+/// Run-length finder centres are biased by up to ~a pixel on a blurred small symbol, and
+/// that bias skews the module pitch across the whole grid. A finder's dark 3×3 core is
+/// point-symmetric, so the darkness centroid over a ~1.5-module radius lands on its true
+/// centre even through blur — the same trick [`refine_alignment_centroid`] uses for
+/// alignment patterns.
+fn refine_finder_centroid(frame: &GrayFrame<'_>, p: Point, module_size: f32) -> Point {
+    let (x, y) = refine_alignment_centroid(frame, p.x, p.y, module_size * 0.75);
+    Point::new(x, y)
+}
+
 /// Build the full grid→pixel hypothesis for a chosen finder triple, or `None` if the
 /// implied dimension is invalid.
-fn build_located(bin: &Binary, a: Finder, b: Finder, c: Finder) -> Option<Located> {
+fn build_located(
+    frame: &GrayFrame<'_>,
+    bin: &Binary,
+    a: Finder,
+    b: Finder,
+    c: Finder,
+) -> Option<Located> {
     let ([tl, tr, bl], module_size) = order_finders(a, b, c);
+
+    // Refine each finder centre to sub-pixel precision; the run-length centres are biased by
+    // blur on a small symbol, and that bias propagates into the module pitch everywhere.
+    let tl = refine_finder_centroid(frame, tl, module_size);
+    let tr = refine_finder_centroid(frame, tr, module_size);
+    let bl = refine_finder_centroid(frame, bl, module_size);
 
     // Estimate the symbol dimension from the finder-center spacing. The centers sit
     // 3.5 modules in from each edge, so the TL→TR / TL→BL spans are (dim - 7) modules.
@@ -1311,7 +1726,15 @@ fn build_located(bin: &Binary, a: Finder, b: Finder, c: Finder) -> Option<Locate
         let u = (d - 10.0) / (d - 7.0);
         let ex = tl.x + u as f32 * (tr.x - tl.x) + u as f32 * (bl.x - tl.x);
         let ey = tl.y + u as f32 * (tr.y - tl.y) + u as f32 * (bl.y - tl.y);
-        if let Some(align) = find_alignment(bin, Point::new(ex, ey), module_size, 5.0) {
+        // Binary cross-section first (exact on clean renders); grayscale template as a
+        // blur-tolerant fallback, its axes taken from the finder arms.
+        let align = find_alignment(bin, Point::new(ex, ey), module_size, 5.0).or_else(|| {
+            let inv = (d - 7.0) as f32;
+            let ax = ((tr.x - tl.x) / inv, (tr.y - tl.y) / inv);
+            let ay = ((bl.x - tl.x) / inv, (bl.y - tl.y) / inv);
+            search_alignment_template(frame, ex, ey, ax, ay, 3.0)
+        });
+        if let Some(align) = align {
             let src = [
                 (3.5, 3.5),
                 (d - 3.5, 3.5),

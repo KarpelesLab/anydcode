@@ -1,9 +1,9 @@
 //! Interleaved 2 of 5: encode → decode → re-encode identity across the option matrix.
 
-use anydcode::codes::itf::{ItfDecoder, ItfEncoder};
-use anydcode::segment::Segment;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::itf::{ItfDecoder, ItfEncoder};
+use anyd::segment::Segment;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_lossless(digits: &[u8], check: bool) {
     let enc = ItfEncoder::new();

@@ -24,8 +24,8 @@
 //! ## Example: QR round-trip
 //!
 //! ```
-//! use anydcode::codes::qr::{EcLevel, QrDecoder, QrEncoder};
-//! use anydcode::traits::{Decode, Encode};
+//! use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
+//! use anyd::traits::{Decode, Encode};
 //!
 //! let encoder = QrEncoder::new();
 //! let symbol = encoder.build_text("HELLO WORLD", EcLevel::Q).unwrap();

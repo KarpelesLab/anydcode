@@ -2,9 +2,9 @@
 //! byte-identical, across square sizes and ASCII / Base256 encodation, and must
 //! survive correctable errors.
 
-use anydcode::codes::datamatrix::{DataMatrixDecoder, DataMatrixEncoder};
-use anydcode::output::Encoding;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::datamatrix::{DataMatrixDecoder, DataMatrixEncoder};
+use anyd::output::Encoding;
+use anyd::traits::{Decode, Encode};
 
 /// Assert that a payload decodes to the same segments/meta and re-encodes identically.
 fn assert_lossless(data: &[u8]) {
@@ -66,8 +66,8 @@ fn segment_structure_is_recovered() {
     let symbol = enc.build(&[b'A', 0x80, b'B']).unwrap();
     let encoding = enc.encode(&symbol).unwrap();
     let decoded = DataMatrixDecoder::new().decode(&encoding).unwrap();
-    use anydcode::codes::datamatrix::Encodation;
-    use anydcode::symbol::SymbolMeta;
+    use anyd::codes::datamatrix::Encodation;
+    use anyd::symbol::SymbolMeta;
     let SymbolMeta::DataMatrix(meta) = &decoded.meta else {
         panic!("expected Data Matrix meta");
     };

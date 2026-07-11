@@ -14,11 +14,11 @@
 //! - POSTNET/PLANET: the `7-4-2-1-0` digit weighting and mod-10 check digit
 //!   (USPS DMM; Wikipedia "POSTNET" / "PLANET").
 
-use anydcode::Symbology;
-use anydcode::codes::postal::{PostalDecoder, PostalEncoder, PostalVariant};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::symbol::{Symbol, SymbolMeta};
-use anydcode::traits::{Decode, Encode};
+use anyd::Symbology;
+use anyd::codes::postal::{PostalDecoder, PostalEncoder, PostalVariant};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::symbol::{Symbol, SymbolMeta};
+use anyd::traits::{Decode, Encode};
 
 /// Render a symbol and return its bar states as the spec's `F/A/D/T` letters,
 /// reading each bar column of the 3-row matrix.
@@ -298,7 +298,7 @@ fn rm4scc_rejects_lowercase_and_symbols() {
 
 #[test]
 fn unsupported_symbologies_error() {
-    use anydcode::Segment;
+    use anyd::Segment;
     let enc = PostalEncoder::new();
     // Australia Post / Japan Post / Mailmark remain unsupported.
     let sym = Symbol::new(

@@ -18,10 +18,10 @@
 //! 2. **Lossless round-trips.** `encode(decode(encode(build(x)))) == encode(build(x))`
 //!    across modes 4, 5, 6 and 2/3, plus recovery from correctable errors.
 
-use anydcode::codes::maxicode::{MaxiCodeDecoder, MaxiCodeEncoder, MaxiCodeMeta};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::maxicode::{MaxiCodeDecoder, MaxiCodeEncoder, MaxiCodeMeta};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 /// Build a 30×33 [`BitMatrix`] from 33 rows of `'0'`/`'1'` (top to bottom).
 fn matrix_from_rows(rows: &[&str]) -> BitMatrix {
@@ -38,7 +38,7 @@ fn matrix_from_rows(rows: &[&str]) -> BitMatrix {
     m
 }
 
-fn meta(sym: &anydcode::Symbol) -> &MaxiCodeMeta {
+fn meta(sym: &anyd::Symbol) -> &MaxiCodeMeta {
     match &sym.meta {
         SymbolMeta::MaxiCode(m) => m,
         _ => panic!("expected MaxiCode meta"),
@@ -165,7 +165,7 @@ fn decodes_iso_figureb2_ups_symbol() {
 
 /// Full lossless invariant: decode recovers identical segments + meta, and the
 /// decoded symbol re-encodes byte-for-byte.
-fn assert_lossless(sym: &anydcode::Symbol) {
+fn assert_lossless(sym: &anyd::Symbol) {
     let enc = MaxiCodeEncoder::new();
     let encoding = enc.encode(sym).unwrap();
     let decoded = MaxiCodeDecoder::new().decode(&encoding).unwrap();

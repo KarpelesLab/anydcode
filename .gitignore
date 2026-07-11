@@ -1,7 +1,14 @@
 /target
-Cargo.lock
+**/*.rs.bk
+*.pdb
 *.swp
+.*.swp
 .DS_Store
+
+# Cargo.lock intentionally not committed: this is a library-first crate
+# (the `anyd` binary is an optional, feature-gated convenience). release-plz
+# publishes to crates.io, which resolves versions fresh.
+/Cargo.lock
 
 # Agent worktrees
 .claude/

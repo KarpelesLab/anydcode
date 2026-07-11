@@ -18,12 +18,12 @@
 //! one `#[test]` that feeds representative [`Symbol`]s through [`assert_roundtrip`].
 //! Only QR is implemented at branch time, so only the QR codec appears below.
 
-use anydcode::Symbol;
-use anydcode::codes::qr::{EcLevel, QrDecoder, QrEncoder};
-use anydcode::error::Result;
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::traits::{Decode, Encode};
+use anyd::Symbol;
+use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
+use anyd::error::Result;
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::traits::{Decode, Encode};
 
 /// A symbology whose encode/decode pair can be round-tripped at the module level.
 trait StructuralCodec {

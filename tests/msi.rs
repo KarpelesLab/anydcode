@@ -1,10 +1,10 @@
 //! MSI Plessey (all check schemes) and Plessey (CRC): round-trip identity.
 
-use anydcode::codes::msi::{MsiCheck, MsiDecoder, MsiEncoder, MsiMeta};
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::msi::{MsiCheck, MsiDecoder, MsiEncoder, MsiMeta};
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_msi_lossless(digits: &[u8], scheme: MsiCheck) {
     let enc = MsiEncoder::new();
@@ -37,14 +37,13 @@ fn msi_bad_check_is_rejected() {
     // Corrupt the check digit: decoder with the matching scheme must reject it.
     let enc = MsiEncoder::new();
     let sym = enc.build_msi(b"1234567", MsiCheck::Mod10).unwrap();
-    let anydcode::output::Encoding::Linear(mut p) = enc.encode(&sym).unwrap() else {
+    let anyd::output::Encoding::Linear(mut p) = enc.encode(&sym).unwrap() else {
         panic!("expected linear");
     };
     // Flip a module inside the last data/check character region.
     let n = p.modules.len();
     p.modules[n - 6] = !p.modules[n - 6];
-    let res =
-        MsiDecoder::with_check(MsiCheck::Mod10).decode(&anydcode::output::Encoding::Linear(p));
+    let res = MsiDecoder::with_check(MsiCheck::Mod10).decode(&anyd::output::Encoding::Linear(p));
     assert!(res.is_err());
 }
 

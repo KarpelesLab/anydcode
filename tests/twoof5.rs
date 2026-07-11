@@ -1,9 +1,9 @@
 //! Standard/IATA/Matrix 2 of 5: encode → decode → re-encode identity per variant.
 
-use anydcode::codes::twoof5::{TwoOf5Decoder, TwoOf5Encoder};
-use anydcode::segment::Segment;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::twoof5::{TwoOf5Decoder, TwoOf5Encoder};
+use anyd::segment::Segment;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_lossless(sym: Symbology, digits: &[u8]) {
     let enc = TwoOf5Encoder::new();

@@ -5,7 +5,7 @@
 //! Encodes a single integer `3..=131070` as a run of thin/thick bars separated by
 //! narrow spaces. Reading right-to-left, bar position `n` contributes `2^n` (thin) or
 //! `2·2^n` (thick); equivalently each value maps to a bijective base-2 numeral with
-//! digits {1, 2}. A thin bar is one module wide, a thick bar is [`WIDE`] modules.
+//! digits {1, 2}. A thin bar is one module wide, a thick bar is `WIDE` modules.
 //!
 //! # Two-track ([`Symbology::PharmacodeTwoTrack`])
 //!
@@ -107,7 +107,7 @@ fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
 
 // ---------- one-track ----------
 
-/// Left-to-right bar widths for a one-track value (thin = 1, thick = [`WIDE`]).
+/// Left-to-right bar widths for a one-track value (thin = 1, thick = `WIDE`).
 fn one_track_bars(mut n: u32) -> Vec<u32> {
     let mut bars = Vec::new(); // least-significant first
     while n > 0 {

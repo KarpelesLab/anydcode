@@ -30,14 +30,14 @@
 //! comfortable margin inside the sampler's measured failure points — see the
 //! `known-hard` test for cases deliberately pushed to the edge of what still passes.
 
-use anydcode::GrayImage;
-use anydcode::codes::qr::{EcLevel, QrEncoder, QrScanner, sample_grid, scan};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::pipeline::Hints;
-use anydcode::render::render_matrix;
-use anydcode::segment::Segment;
-use anydcode::traits::{Analyze, Detect, Encode};
-use anydcode::transform::{self, Rng};
+use anyd::GrayImage;
+use anyd::codes::qr::{EcLevel, QrEncoder, QrScanner, sample_grid, scan};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::pipeline::Hints;
+use anyd::render::render_matrix;
+use anyd::segment::Segment;
+use anyd::traits::{Analyze, Detect, Encode};
+use anyd::transform::{self, Rng};
 
 /// Pixels per module for every rendered symbol in this harness.
 const SCALE: usize = 6;
@@ -212,12 +212,12 @@ fn detect_and_analyze_traits() {
     let candidates = scanner.detect(&frame, &Hints::new());
     assert_eq!(candidates.len(), 1, "detector should find one QR candidate");
     let cand = &candidates[0];
-    assert_eq!(cand.symbology, Some(anydcode::Symbology::QrCode));
+    assert_eq!(cand.symbology, Some(anyd::Symbology::QrCode));
     assert!(cand.location.module_size.unwrap() > 0.0);
 
     let symbol = scanner.analyze(&frame, cand).expect("analyze");
     assert_eq!(symbol.payload_bytes(), expected);
-    assert_eq!(symbol.symbology, anydcode::Symbology::QrCode);
+    assert_eq!(symbol.symbology, anyd::Symbology::QrCode);
 }
 
 #[test]

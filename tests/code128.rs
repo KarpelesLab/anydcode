@@ -2,11 +2,11 @@
 //! encode → decode → re-encode identity across all three code sets, set switches,
 //! shifts, and a GS1-128 Application Identifier example.
 
-use anydcode::codes::code128::{Code128Decoder, Code128Encoder, Code128Input};
-use anydcode::output::Encoding;
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::code128::{Code128Decoder, Code128Encoder, Code128Input};
+use anyd::output::Encoding;
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn data(text: &str) -> Vec<Code128Input> {
     text.bytes().map(Code128Input::Data).collect()
@@ -47,8 +47,8 @@ fn assert_roundtrip(input: &[Code128Input], gs1: bool) {
 /// rendered module row against the concatenated documented patterns.
 #[test]
 fn wikipedia_reference_vector() {
-    use anydcode::Symbol;
-    use anydcode::codes::code128::Code128Meta;
+    use anyd::Symbol;
+    use anyd::codes::code128::Code128Meta;
 
     let meta = Code128Meta {
         gs1: false,

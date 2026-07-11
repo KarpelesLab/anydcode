@@ -1,10 +1,10 @@
 //! End-to-end QR round-trip tests: encode → decode → re-encode must be identical,
 //! across modes, EC levels and versions, and must survive correctable errors.
 
-use anydcode::codes::qr::{EcLevel, QrDecoder, QrEncoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::traits::{Decode, Encode};
 
 /// Assert that a symbol decodes to the same segments/meta and re-encodes identically.
 fn assert_lossless(segments: Vec<Segment>, level: EcLevel) {

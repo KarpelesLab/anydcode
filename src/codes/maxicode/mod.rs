@@ -23,7 +23,7 @@
 //!
 //! [`MaxiCodeMeta`] stores the symbol mode, the Structured Carrier fields (modes
 //! 2/3) and the exact **data codeword body** — the code-set-encoded stream before
-//! Reed–Solomon. [`Symbol::segments`] are the human-readable decoding of that body.
+//! Reed–Solomon. `Symbol::segments` are the human-readable decoding of that body.
 //! Because the encoder places the stored body verbatim and appends freshly computed
 //! RS, `encode(decode(x)) == x` byte-for-byte. See [`crate::codes::qr`] for the
 //! reference round-trip pattern.
@@ -32,7 +32,7 @@
 //!
 //! The hexagonal module grid is represented as a plain [`BitMatrix`] of width 30,
 //! height 33 — cell `(x, y)` is Figure 5's module at row `y`, column `x`. See
-//! [`tables`] for the (reversible) mapping from cells to codeword bits.
+//! `tables` for the (reversible) mapping from cells to codeword bits.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

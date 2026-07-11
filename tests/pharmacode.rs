@@ -1,9 +1,9 @@
 //! Pharmacode one-track and two-track: round-trip identity across the value ranges.
 
-use anydcode::codes::pharmacode::{PharmacodeDecoder, PharmacodeEncoder};
-use anydcode::segment::Segment;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::pharmacode::{PharmacodeDecoder, PharmacodeEncoder};
+use anyd::segment::Segment;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_one_track(value: u32) {
     let enc = PharmacodeEncoder::new();

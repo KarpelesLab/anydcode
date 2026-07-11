@@ -94,7 +94,7 @@ impl Symbol {
     ///
     /// This flattens segmentation and ignores ECI switches; it is a convenience for
     /// callers that only want the raw content and do not care how it was encoded.
-    /// For lossless work, inspect [`Symbol::segments`] directly.
+    /// For lossless work, inspect `Symbol::segments` directly.
     pub fn payload_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for seg in &self.segments {

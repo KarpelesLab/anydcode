@@ -15,12 +15,12 @@
 //! the GS1 separator FNC1 encoded as byte `0x1D`. This matches zint's internal
 //! "reduced" element string, so the reference module patterns line up.
 
-use anydcode::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
-use anydcode::output::Encoding;
-use anydcode::segment::Mode;
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
+use anyd::output::Encoding;
+use anyd::segment::Mode;
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 /// Render an encoding to a `1`/`0` module string (dark = `1`).
 fn bits(encoding: &Encoding) -> String {

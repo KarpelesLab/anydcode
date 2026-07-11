@@ -9,7 +9,7 @@
 //! # Representation
 //!
 //! [`LinearPattern::modules`] uses one boolean per narrow module (`true` = bar).
-//! A narrow element is one module; a wide element is [`WIDE`] modules.
+//! A narrow element is one module; a wide element is `WIDE` modules.
 //!
 //! # Options ([`ItfMeta`])
 //!
@@ -45,7 +45,7 @@ const WIDE: u32 = 3;
 /// Quiet-zone width in narrow modules on each side.
 const QUIET_ZONE: usize = 10;
 
-/// Two-of-five element widths per digit (5 elements, wide = [`WIDE`], narrow = [`NARROW`]).
+/// Two-of-five element widths per digit (5 elements, wide = `WIDE`, narrow = `NARROW`).
 ///
 /// Matches zint's `C25InterTable`; equivalently the ISO/IEC 16390 patterns weighted
 /// 1-2-4-7 with a parity element.

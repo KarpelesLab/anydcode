@@ -9,13 +9,13 @@
 //!
 //! # Pipeline
 //!
-//! 1. **Scanline extraction** ([`sample`] helpers). One or more horizontal — and
+//! 1. **Scanline extraction** (`sample` helpers). One or more horizontal — and
 //!    optionally slightly rotated — lines are sampled across the frame's height.
 //!    We work on the raw luminance *profile* along each line; there is no global
 //!    image binarization. Each scan is a straight line in image space whose slope
 //!    is `tan(angle)`, sampled one column per pixel of width with vertical linear
 //!    interpolation.
-//! 2. **Edge detection & run-lengths** ([`extract_runs`]). Robust dark/light
+//! 2. **Edge detection & run-lengths** (`extract_runs`). Robust dark/light
 //!    levels are estimated per scanline from luminance percentiles (tolerant of
 //!    noise and a bar-or-two of outliers). Transitions are located by a hysteresis
 //!    state machine, then each edge is re-placed at the sub-pixel crossing of the
@@ -24,7 +24,7 @@
 //!    quiet zones saturate the bright level above the interior space peaks, and it
 //!    keeps edge positions stable under blur. The result is a run sequence in
 //!    pixels bracketed by light quiet zones at both ends.
-//! 3. **Module quantization** ([`quantize`]). The narrow-module pixel width is
+//! 3. **Module quantization** (`quantize`). The narrow-module pixel width is
 //!    estimated from the run-width distribution (seeded by the smallest run, then
 //!    refined by least-squares against the assigned integer counts). Each run is
 //!    expanded into that many equal `bool`s, yielding a [`LinearPattern`] plus a

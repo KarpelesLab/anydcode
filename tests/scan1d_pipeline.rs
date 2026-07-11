@@ -3,13 +3,13 @@
 //! symbology's real decoder. This exercises the render → scan → decode path across
 //! three independently-implemented modules, not just structural round-trips.
 
-use anydcode::codes::code39::{Code39Decoder, Code39Encoder};
-use anydcode::codes::code128::{Code128Decoder, Code128Encoder};
-use anydcode::codes::ean::{EanDecoder, EanEncoder};
-use anydcode::output::Encoding;
-use anydcode::render::render;
-use anydcode::scan1d::{ScanOptions, scan_lines, try_decode};
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::code39::{Code39Decoder, Code39Encoder};
+use anyd::codes::code128::{Code128Decoder, Code128Encoder};
+use anyd::codes::ean::{EanDecoder, EanEncoder};
+use anyd::output::Encoding;
+use anyd::render::render;
+use anyd::scan1d::{ScanOptions, scan_lines, try_decode};
+use anyd::traits::{Decode, Encode};
 
 /// Render `encoding` at `scale` px/module, scan it with `scan1d`, and return the
 /// first scanline candidate that `decoder` accepts.

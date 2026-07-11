@@ -1,11 +1,11 @@
 //! Code 11 end-to-end tests: independent checksum reference vectors plus
 //! encode → decode → re-encode identity across 0/1/2 check characters.
 
-use anydcode::codes::code11::{Code11Decoder, Code11Encoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::code11::{Code11Decoder, Code11Encoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 fn modules(enc: &Encoding) -> Vec<bool> {
     match enc {

@@ -14,13 +14,13 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
-use anydcode::GrayFrame;
-use anydcode::Symbol;
-use anydcode::output::Encoding;
-use anydcode::render::render;
-use anydcode::segment::Segment;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::GrayFrame;
+use anyd::Symbol;
+use anyd::output::Encoding;
+use anyd::render::render;
+use anyd::segment::Segment;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -146,9 +146,9 @@ fn write_text(out: Option<&String>, s: &str) -> Result<(), String> {
 
 /// Build the abstract [`Encoding`] for a symbology name + data string.
 fn build_encoding(symbology: &str, data: &str, ec: Option<&str>) -> Result<Encoding, String> {
-    use anydcode::codes::*;
+    use anyd::codes::*;
     let bytes = data.as_bytes();
-    let err = |e: anydcode::Error| e.to_string();
+    let err = |e: anyd::Error| e.to_string();
 
     let (sym, enc): (Symbol, Encoding) = match symbology {
         "qr" | "qrcode" => {
@@ -217,15 +217,15 @@ fn build_encoding(symbology: &str, data: &str, ec: Option<&str>) -> Result<Encod
 fn encode_via<E, F>(encoder: E, f: F) -> Result<(Symbol, Encoding), String>
 where
     E: Encode,
-    F: FnOnce(&E) -> anydcode::Result<Symbol>,
+    F: FnOnce(&E) -> anyd::Result<Symbol>,
 {
     let symbol = f(&encoder).map_err(|e| e.to_string())?;
     let encoding = encoder.encode(&symbol).map_err(|e| e.to_string())?;
     Ok((symbol, encoding))
 }
 
-fn qr_ec(ec: Option<&str>) -> Result<anydcode::codes::qr::EcLevel, String> {
-    use anydcode::codes::qr::EcLevel::*;
+fn qr_ec(ec: Option<&str>) -> Result<anyd::codes::qr::EcLevel, String> {
+    use anyd::codes::qr::EcLevel::*;
     Ok(match ec.map(str::to_lowercase).as_deref() {
         None => M,
         Some("l") => L,
@@ -236,8 +236,8 @@ fn qr_ec(ec: Option<&str>) -> Result<anydcode::codes::qr::EcLevel, String> {
     })
 }
 
-fn micro_ec(ec: Option<&str>) -> Result<anydcode::codes::microqr::MicroEcLevel, String> {
-    use anydcode::codes::microqr::MicroEcLevel::*;
+fn micro_ec(ec: Option<&str>) -> Result<anyd::codes::microqr::MicroEcLevel, String> {
+    use anyd::codes::microqr::MicroEcLevel::*;
     Ok(match ec.map(str::to_lowercase).as_deref() {
         None => M,
         Some("detection" | "d") => Detection,
@@ -248,8 +248,8 @@ fn micro_ec(ec: Option<&str>) -> Result<anydcode::codes::microqr::MicroEcLevel, 
     })
 }
 
-fn rmqr_ec(ec: Option<&str>) -> Result<anydcode::codes::rmqr::RmqrEcLevel, String> {
-    use anydcode::codes::rmqr::RmqrEcLevel::*;
+fn rmqr_ec(ec: Option<&str>) -> Result<anyd::codes::rmqr::RmqrEcLevel, String> {
+    use anyd::codes::rmqr::RmqrEcLevel::*;
     Ok(match ec.map(str::to_lowercase).as_deref() {
         None => M,
         Some("m") => M,
@@ -258,14 +258,14 @@ fn rmqr_ec(ec: Option<&str>) -> Result<anydcode::codes::rmqr::RmqrEcLevel, Strin
     })
 }
 
-fn pdf417_ec(ec: Option<&str>) -> Result<anydcode::codes::pdf417::EcLevel, String> {
+fn pdf417_ec(ec: Option<&str>) -> Result<anyd::codes::pdf417::EcLevel, String> {
     let level: u8 = match ec {
         None => 2,
         Some(s) => s
             .parse()
             .map_err(|_| "PDF417 --ec must be 0..=8".to_string())?,
     };
-    anydcode::codes::pdf417::EcLevel::new(level).ok_or_else(|| "PDF417 --ec must be 0..=8".into())
+    anyd::codes::pdf417::EcLevel::new(level).ok_or_else(|| "PDF417 --ec must be 0..=8".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -426,30 +426,29 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     };
 
     // 2D samplers.
-    if let Ok(s) = anydcode::codes::qr::scan(&frame) {
+    if let Ok(s) = anyd::codes::qr::scan(&frame) {
         record(s);
     }
-    if let Ok(s) = anydcode::codes::datamatrix::scan(&frame) {
+    if let Ok(s) = anyd::codes::datamatrix::scan(&frame) {
         record(s);
     }
-    if let Some(s) = anydcode::codes::pdf417::scan(&frame) {
+    if let Some(s) = anyd::codes::pdf417::scan(&frame) {
         record(s);
     }
 
     // 1D front-end: scan lines, then try the checksummed linear decoders.
-    let candidates =
-        anydcode::scan1d::scan_lines(&frame, &anydcode::scan1d::ScanOptions::default());
+    let candidates = anyd::scan1d::scan_lines(&frame, &anyd::scan1d::ScanOptions::default());
     let linear: Vec<Box<dyn Decode>> = vec![
-        Box::new(anydcode::codes::code128::Code128Decoder::new()),
-        Box::new(anydcode::codes::ean::EanDecoder::new()),
-        Box::new(anydcode::codes::code93::Code93Decoder::new()),
-        Box::new(anydcode::codes::code39::Code39Decoder::new()),
-        Box::new(anydcode::codes::itf::ItfDecoder::new()),
-        Box::new(anydcode::codes::codabar::CodabarDecoder::new()),
+        Box::new(anyd::codes::code128::Code128Decoder::new()),
+        Box::new(anyd::codes::ean::EanDecoder::new()),
+        Box::new(anyd::codes::code93::Code93Decoder::new()),
+        Box::new(anyd::codes::code39::Code39Decoder::new()),
+        Box::new(anyd::codes::itf::ItfDecoder::new()),
+        Box::new(anyd::codes::codabar::CodabarDecoder::new()),
     ];
     for cand in &candidates {
         for dec in &linear {
-            if let Some(s) = anydcode::scan1d::try_decode(cand, dec.as_ref()) {
+            if let Some(s) = anyd::scan1d::try_decode(cand, dec.as_ref()) {
                 record(s);
             }
         }

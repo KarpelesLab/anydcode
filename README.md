@@ -96,8 +96,8 @@ in `tests/pdf417_image.rs`.
 ## Example: QR round-trip
 
 ```rust
-use anydcode::codes::qr::{EcLevel, QrDecoder, QrEncoder};
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
+use anyd::traits::{Decode, Encode};
 
 let encoder = QrEncoder::new();
 let symbol = encoder.build_text("HELLO WORLD", EcLevel::Q).unwrap();

@@ -30,13 +30,13 @@
 //! tilt column. Magnitudes are set a comfortable margin inside the sampler's measured
 //! failure points; the `known_hard_edge_cases` test pins a few points near the edge.
 
-use anydcode::codes::datamatrix::{DataMatrixEncoder, DataMatrixScanner, sample_grid, scan};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::pipeline::Hints;
-use anydcode::render::render_matrix;
-use anydcode::traits::{Analyze, Detect, Encode};
-use anydcode::transform::{self, Rng};
-use anydcode::{GrayImage, Symbology};
+use anyd::codes::datamatrix::{DataMatrixEncoder, DataMatrixScanner, sample_grid, scan};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::pipeline::Hints;
+use anyd::render::render_matrix;
+use anyd::traits::{Analyze, Detect, Encode};
+use anyd::transform::{self, Rng};
+use anyd::{GrayImage, Symbology};
 
 /// Pixels per module for every rendered symbol in this harness.
 const SCALE: usize = 6;

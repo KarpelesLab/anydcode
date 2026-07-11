@@ -7,12 +7,12 @@
 //!     bit-for-bit.
 //!  2. **Round-trip identity** across all 32 sizes and both EC levels.
 
-use anydcode::codes::rmqr::{RmqrDecoder, RmqrEcLevel, RmqrEncoder, RmqrMeta, RmqrSize};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::segment::Segment;
-use anydcode::symbol::{Symbol, SymbolMeta};
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::rmqr::{RmqrDecoder, RmqrEcLevel, RmqrEncoder, RmqrMeta, RmqrSize};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::segment::Segment;
+use anyd::symbol::{Symbol, SymbolMeta};
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn meta(width: usize, height: usize, ec: RmqrEcLevel) -> RmqrMeta {
     RmqrMeta {

@@ -441,7 +441,7 @@ pub fn cylinder(img: &GrayImage, curvature: f32, axis: Axis) -> GrayImage {
 /// Apply a sinusoidal ripple, as if the print were on gently rippled/waving paper.
 ///
 /// Rows (or columns) are displaced perpendicular to the ripple direction following a
-/// sine wave. The output canvas is grown by the amplitude plus [`PAD`] on every side so
+/// sine wave. The output canvas is grown by the amplitude plus `PAD` on every side so
 /// no content is clipped.
 ///
 /// * `amplitude` — peak displacement, in **pixels**. `0` returns an unchanged (but

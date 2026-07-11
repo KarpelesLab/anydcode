@@ -2,11 +2,11 @@
 //! across encodation modes and both compact and full-range sizes, and must survive
 //! correctable errors.
 
-use anydcode::codes::aztec::{AztecDecoder, AztecEncoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::aztec::{AztecDecoder, AztecEncoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 /// Assert a payload decodes to the same bytes/meta and re-encodes identically.
 fn assert_lossless(payload: &[u8]) {

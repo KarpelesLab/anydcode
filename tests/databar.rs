@@ -8,12 +8,12 @@
 //! 2. **Lossless round-trip** — encode -> decode -> re-encode must reproduce the
 //!    exact segments, metadata and module pattern.
 
-use anydcode::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
-use anydcode::output::Encoding;
-use anydcode::segment::{Mode, Segment};
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
+use anyd::output::Encoding;
+use anyd::segment::{Mode, Segment};
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 /// Render an encoding to a `1`/`0` module string (dark = `1`).
 fn bits(encoding: &Encoding) -> String {
@@ -237,14 +237,14 @@ fn unsupported_variants_error() {
         Symbology::DataBarStackedOmni,
         Symbology::DataBarExpandedStacked,
     ] {
-        let symbol = anydcode::symbol::Symbol::new(
+        let symbol = anyd::symbol::Symbol::new(
             sym,
             vec![Segment::numeric(b"0000000000000".to_vec())],
             SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Omni)),
         );
         assert!(matches!(
             enc.encode(&symbol),
-            Err(anydcode::error::Error::Unsupported { .. })
+            Err(anyd::error::Error::Unsupported { .. })
         ));
     }
 }

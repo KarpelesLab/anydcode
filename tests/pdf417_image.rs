@@ -25,14 +25,14 @@
 //! the geometry model is affine — perspective tilt is out of scope and not asserted. The
 //! magnitudes above sit a comfortable margin inside the measured failure points.
 
-use anydcode::GrayImage;
-use anydcode::codes::pdf417::{EcLevel, Pdf417Encoder, Pdf417Scanner, sample_grid, scan};
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::pipeline::Hints;
-use anydcode::render::render_matrix;
-use anydcode::segment::Segment;
-use anydcode::traits::{Analyze, Detect, Encode};
-use anydcode::transform::{self, Rng};
+use anyd::GrayImage;
+use anyd::codes::pdf417::{EcLevel, Pdf417Encoder, Pdf417Scanner, sample_grid, scan};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::pipeline::Hints;
+use anyd::render::render_matrix;
+use anyd::segment::Segment;
+use anyd::traits::{Analyze, Detect, Encode};
+use anyd::transform::{self, Rng};
 
 /// Pixels per module for every rendered symbol in this harness.
 const SCALE: usize = 6;
@@ -200,10 +200,10 @@ fn detect_and_analyze_traits() {
     let candidates = scanner.detect(&frame, &Hints::new());
     assert_eq!(candidates.len(), 1, "detector should find one candidate");
     let cand = &candidates[0];
-    assert_eq!(cand.symbology, Some(anydcode::Symbology::Pdf417));
+    assert_eq!(cand.symbology, Some(anyd::Symbology::Pdf417));
     assert!(cand.location.module_size.unwrap() > 0.0);
 
     let symbol = scanner.analyze(&frame, cand).expect("analyze");
     assert_eq!(symbol.payload_bytes(), expected);
-    assert_eq!(symbol.symbology, anydcode::Symbology::Pdf417);
+    assert_eq!(symbol.symbology, anyd::Symbology::Pdf417);
 }

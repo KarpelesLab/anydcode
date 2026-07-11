@@ -2,10 +2,10 @@
 //! identical, across Text/Byte/Numeric compaction and several error-correction
 //! levels, and must survive correctable errors.
 
-use anydcode::codes::pdf417::{EcLevel, Pdf417Decoder, Pdf417Encoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::pdf417::{EcLevel, Pdf417Decoder, Pdf417Encoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::traits::{Decode, Encode};
 
 fn level(n: u8) -> EcLevel {
     EcLevel::new(n).unwrap()

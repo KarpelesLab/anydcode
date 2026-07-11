@@ -1,11 +1,11 @@
 //! Codabar: encode → decode → re-encode identity across start/stop pairs and the
 //! full character set.
 
-use anydcode::codes::codabar::{CodabarDecoder, CodabarEncoder, CodabarMeta};
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::codabar::{CodabarDecoder, CodabarEncoder, CodabarMeta};
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_lossless(start: u8, data: &[u8], stop: u8) {
     let enc = CodabarEncoder::new();

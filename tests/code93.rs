@@ -1,11 +1,11 @@
 //! Code 93 end-to-end tests: an independent checksum reference vector plus
 //! encode → decode → re-encode identity across standard and full-ASCII payloads.
 
-use anydcode::codes::code93::{Code93Decoder, Code93Encoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::code93::{Code93Decoder, Code93Encoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 fn modules(enc: &Encoding) -> Vec<bool> {
     match enc {

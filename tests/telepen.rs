@@ -1,10 +1,10 @@
 //! Telepen full-ASCII: round-trip identity with and without the mod-127 check.
 
-use anydcode::codes::telepen::{TelepenDecoder, TelepenEncoder, TelepenMeta};
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::telepen::{TelepenDecoder, TelepenEncoder, TelepenMeta};
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn assert_lossless(data: &[u8], check: bool) {
     let enc = TelepenEncoder::new();

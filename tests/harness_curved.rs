@@ -3,13 +3,13 @@
 //! Real symbols are printed on bottles, cans, crumpled/rippled paper and bulging
 //! labels — surfaces the planar warps (rotation/scale/perspective) cannot express. This
 //! harness renders representative symbols, subjects them to the four curved transforms
-//! added to [`anydcode::transform`] — [`cylinder`], [`wave`], [`fold`] and [`bulge`] —
+//! added to [`anyd::transform`] — [`cylinder`], [`wave`], [`fold`] and [`bulge`] —
 //! and feeds the result back through the **current, flat-plane** image samplers.
 //!
-//! [`cylinder`]: anydcode::transform::cylinder
-//! [`wave`]: anydcode::transform::wave
-//! [`fold`]: anydcode::transform::fold
-//! [`bulge`]: anydcode::transform::bulge
+//! [`cylinder`]: anyd::transform::cylinder
+//! [`wave`]: anyd::transform::wave
+//! [`fold`]: anyd::transform::fold
+//! [`bulge`]: anyd::transform::bulge
 //!
 //! ## Purpose
 //!
@@ -57,16 +57,16 @@
 //!   breakpoint was found within the swept range (cylinder H ≥1.5 rad, wave ≥20 px,
 //!   fold H ≥85°).
 
-use anydcode::GrayImage;
-use anydcode::codes::code128::{Code128Decoder, Code128Encoder};
-use anydcode::codes::datamatrix::{DataMatrixEncoder, scan as dm_scan};
-use anydcode::codes::qr::{EcLevel, QrEncoder, scan as qr_scan};
-use anydcode::output::Encoding;
-use anydcode::render::{render, render_matrix};
-use anydcode::scan1d::{ScanOptions, scan_lines, try_decode};
-use anydcode::segment::Segment;
-use anydcode::traits::Encode;
-use anydcode::transform::{self, Axis};
+use anyd::GrayImage;
+use anyd::codes::code128::{Code128Decoder, Code128Encoder};
+use anyd::codes::datamatrix::{DataMatrixEncoder, scan as dm_scan};
+use anyd::codes::qr::{EcLevel, QrEncoder, scan as qr_scan};
+use anyd::output::Encoding;
+use anyd::render::{render, render_matrix};
+use anyd::scan1d::{ScanOptions, scan_lines, try_decode};
+use anyd::segment::Segment;
+use anyd::traits::Encode;
+use anyd::transform::{self, Axis};
 
 /// Pixels per module for every rendered symbol in this harness.
 const SCALE: usize = 6;

@@ -2,11 +2,11 @@
 //! re-encode identity across the option matrix (standard/full-ASCII, with/without a
 //! mod-43 check character).
 
-use anydcode::codes::code39::{Code39Decoder, Code39Encoder};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::codes::code39::{Code39Decoder, Code39Encoder};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 /// Turn a `1`/`0` string into a module vector (`true` = bar).
 fn bits(s: &str) -> Vec<bool> {

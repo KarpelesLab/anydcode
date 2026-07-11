@@ -2,24 +2,24 @@
 //! identical across every family member, plus 2- and 5-digit add-ons. Also asserts
 //! independent reference vectors for the computed check/parity digits.
 
-use anydcode::Symbology;
-use anydcode::codes::ean::{AddOnKind, EanDecoder, EanEncoder, EanVariant};
-use anydcode::output::Encoding;
-use anydcode::segment::Segment;
-use anydcode::symbol::SymbolMeta;
-use anydcode::traits::{Decode, Encode};
+use anyd::Symbology;
+use anyd::codes::ean::{AddOnKind, EanDecoder, EanEncoder, EanVariant};
+use anyd::output::Encoding;
+use anyd::segment::Segment;
+use anyd::symbol::SymbolMeta;
+use anyd::traits::{Decode, Encode};
 
 /// The single numeric segment's digits, as a String.
-fn digits_of(symbol: &anydcode::Symbol) -> String {
+fn digits_of(symbol: &anyd::Symbol) -> String {
     let seg = symbol
         .segments
         .iter()
-        .find(|s| matches!(s.mode, anydcode::Mode::Numeric))
+        .find(|s| matches!(s.mode, anyd::Mode::Numeric))
         .expect("numeric segment");
     String::from_utf8(seg.data.clone()).unwrap()
 }
 
-fn ean_meta(symbol: &anydcode::Symbol) -> (EanVariant, Option<(AddOnKind, String)>) {
+fn ean_meta(symbol: &anyd::Symbol) -> (EanVariant, Option<(AddOnKind, String)>) {
     match &symbol.meta {
         SymbolMeta::Ean(m) => (
             m.variant,
@@ -32,7 +32,7 @@ fn ean_meta(symbol: &anydcode::Symbol) -> (EanVariant, Option<(AddOnKind, String
 }
 
 /// Encode, decode, and assert the decoded symbol re-encodes to the identical row.
-fn assert_lossless(symbol: &anydcode::Symbol) {
+fn assert_lossless(symbol: &anyd::Symbol) {
     let enc = EanEncoder::new();
     let encoding = enc.encode(symbol).unwrap();
     let decoded = EanDecoder::new().decode(&encoding).unwrap();
@@ -44,7 +44,7 @@ fn assert_lossless(symbol: &anydcode::Symbol) {
     assert_eq!(reencoded, encoding, "re-encoding not identical");
 }
 
-fn module_len(symbol: &anydcode::Symbol) -> usize {
+fn module_len(symbol: &anyd::Symbol) -> usize {
     match EanEncoder::new().encode(symbol).unwrap() {
         Encoding::Linear(lp) => lp.modules.len(),
         Encoding::Matrix(_) => panic!("expected linear"),
@@ -240,8 +240,8 @@ fn rejects_non_digits() {
 #[test]
 fn manual_symbol_roundtrips() {
     // A symbol assembled by hand (not via a builder) encodes and decodes cleanly.
-    use anydcode::Symbol;
-    use anydcode::codes::ean::EanMeta;
+    use anyd::Symbol;
+    use anyd::codes::ean::EanMeta;
     let sym = Symbol::new(
         Symbology::Ean13,
         vec![Segment::numeric(b"4006381333931".to_vec())],

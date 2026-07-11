@@ -8,7 +8,7 @@
 //! # Representation
 //!
 //! [`LinearPattern::modules`] uses one boolean per narrow module (`true` = bar); a
-//! wide element spans [`WIDE`] modules. The start/stop pair is carried in the bars
+//! wide element spans `WIDE` modules. The start/stop pair is carried in the bars
 //! and recovered on decode, and is also recorded in [`CodabarMeta`].
 //!
 //! # Validation

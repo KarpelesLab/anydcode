@@ -14,9 +14,9 @@
 //!   per-blob bounding boxes, centroids and areas.
 //! - [`homography`] — a 3×3 [`Homography`] solved from four point correspondences,
 //!   with forward mapping and inversion.
-//! - [`line`] — least-squares line fitting and a seeded [`ransac_line`] fitter for
+//! - `line` — least-squares line fitting and a seeded [`ransac_line`] fitter for
 //!   locating code borders.
-//! - [`sample`] — [`sample_grid`], the sub-pixel bilinear grid reader that turns a
+//! - `sample` — [`sample_grid`], the sub-pixel bilinear grid reader that turns a
 //!   warped frame plus a homography into a [`BitMatrix`].
 //! - [`edges`] — Sobel gradient magnitude and binary morphology (erode/dilate).
 //! - [`rng`] — a small explicit seeded [`Prng`] so any randomness is reproducible.

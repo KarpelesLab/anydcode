@@ -8,14 +8,14 @@
 //!  2. **Round-trip identity** — encode → decode → re-encode is byte-identical and
 //!     recovers the exact segments and metadata.
 
-use anydcode::codes::microqr::{
+use anyd::codes::microqr::{
     MicroEcLevel, MicroMask, MicroQrDecoder, MicroQrEncoder, MicroQrMeta, MicroVersion,
 };
-use anydcode::output::{BitMatrix, Encoding};
-use anydcode::segment::Segment;
-use anydcode::symbol::{Symbol, SymbolMeta};
-use anydcode::symbology::Symbology;
-use anydcode::traits::{Decode, Encode};
+use anyd::output::{BitMatrix, Encoding};
+use anyd::segment::Segment;
+use anyd::symbol::{Symbol, SymbolMeta};
+use anyd::symbology::Symbology;
+use anyd::traits::{Decode, Encode};
 
 fn meta(v: MicroVersion, ec: MicroEcLevel, mask: u8) -> MicroQrMeta {
     MicroQrMeta {

@@ -277,6 +277,12 @@ impl Symbology {
                 | DataBarOmni
                 | DataBarLimited
                 | DataBarExpanded
+                | DataBarStacked
+                | DataBarStackedOmni
+                | DataBarExpandedStacked
+                | Code16k
+                | Code49
+                | CodablockF
                 | Postnet
                 | Planet
                 | IntelligentMail

@@ -47,8 +47,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 |-----------|:------:|:------:|:------:|
 | PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ✅⁴ |
 | MicroPDF417 (all 34 size variants) | ✅ | ✅ | ⬜ |
-| Code 16K · Code 49 · Codablock F | ⬜ | ⬜ | ⬜ |
-| GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ⬜ | ⬜ | ⬜ |
+| Code 16K · Code 49 · Codablock F | ✅ | ✅ | ⬜ |
+| GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ✅ | ✅ | ⬜ |
 
 ### 1D — linear
 

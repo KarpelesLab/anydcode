@@ -45,6 +45,26 @@
   .stat.hud { font-family: ui-monospace, monospace; letter-spacing: .08em; color: #6b8896; text-transform: uppercase; font-size: .78rem; }
   .stat.hud b { color: #5be9d4; font-weight: 600; }
   a { color: #58a6ff; }
+  /* --- create-a-code panel --- */
+  .enc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem; align-items: start; }
+  @media (max-width: 640px) { .enc-grid { grid-template-columns: 1fr; } }
+  .spec { font-family: ui-monospace, monospace; font-size: .8rem; background: #0d1117; border: 1px solid #30363d;
+    border-left: 3px solid #5be9d4; border-radius: 8px; padding: .65rem .75rem; margin-top: .5rem; }
+  .spec .desc { color: #c9d6de; margin-bottom: .5rem; }
+  .spec .k { color: #6b8896; text-transform: uppercase; letter-spacing: .06em; font-size: .68rem; }
+  .spec .v { color: #b7c5cd; }
+  .spec .v b { color: #5be9d4; font-weight: 600; }
+  .accepts-tag { color: #5be9d4; font-family: ui-monospace, monospace; font-size: .72rem; font-weight: 400; }
+  input.invalid { border-color: #f5576c; }
+  input.valid { border-color: rgba(91,233,212,.5); }
+  .hint { font-size: .78rem; margin-top: .35rem; min-height: 1.1rem; color: #8b949e; }
+  .hint .bad { color: #f5807c; }
+  .chip { display: inline-block; font-family: ui-monospace, monospace; font-size: .72rem; color: #8b949e;
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: .12rem .45rem; cursor: pointer; }
+  .chip:hover { border-color: #5be9d4; color: #5be9d4; }
+  .opts { display: flex; gap: .7rem; flex-wrap: wrap; margin-top: .7rem; }
+  .opts .field { min-width: 130px; flex: 1; }
+  .opts label { margin: 0 0 .2rem; }
 </style>
 </head>
 <body>
@@ -52,33 +72,25 @@
   <p class="sub">Pure-Rust barcode encode / decode / live-detection, compiled to WebAssembly. No wasm-bindgen, no runtime dependencies.</p>
 
   <section class="card">
-    <h2>Encode</h2>
-    <div class="row">
-      <div style="flex:2">
-        <label for="enc-data">Data</label>
-        <input id="enc-data" type="text" value="https://github.com/KarpelesLab/anydcode">
-      </div>
+    <h2>Create a code</h2>
+    <div class="enc-grid">
       <div>
         <label for="enc-sym">Symbology</label>
-        <select id="enc-sym">
-          <option value="qr">QR Code</option>
-          <option value="microqr">Micro QR</option>
-          <option value="datamatrix">Data Matrix</option>
-          <option value="aztec">Aztec</option>
-          <option value="pdf417">PDF417</option>
-          <option value="maxicode">MaxiCode</option>
-          <option value="code128">Code 128</option>
-          <option value="code39">Code 39</option>
-          <option value="code93">Code 93</option>
-          <option value="ean13">EAN-13</option>
-          <option value="ean8">EAN-8</option>
-          <option value="upca">UPC-A</option>
-          <option value="itf">ITF</option>
-          <option value="codabar">Codabar</option>
-        </select>
+        <select id="enc-sym"></select>
+        <div class="spec" id="enc-spec"></div>
+        <div class="opts" id="enc-opts"></div>
+      </div>
+      <div>
+        <label for="enc-data">Data <span class="accepts-tag" id="enc-accepts"></span></label>
+        <input id="enc-data" type="text" autocomplete="off" spellcheck="false">
+        <div class="hint" id="enc-hint"></div>
+        <div class="row" style="margin-top:.2rem">
+          <button id="enc-btn">Generate</button>
+          <button id="enc-dl-png" class="secondary" hidden>Download PNG</button>
+          <button id="enc-dl-svg" class="secondary" hidden>Download SVG</button>
+        </div>
       </div>
     </div>
-    <button id="enc-btn">Encode</button>
     <div id="enc-err" class="stat"></div>
     <div><canvas id="enc-canvas" width="0" height="0"></canvas></div>
   </section>
@@ -133,16 +145,18 @@ function takeBytes(packed) {
   return out;
 }
 
-function encode(sym, text) {
-  const sB = new TextEncoder().encode(sym), dB = new TextEncoder().encode(text);
-  const sp = writeBytes(sB), dp = writeBytes(dB);
-  const packed = wasm.encode(sp, sB.length, dp, dB.length);
-  wasm.dealloc(sp, sB.length); wasm.dealloc(dp, dB.length);
-  if (packed === 0n) return null;
+function encode(sym, text, opts = '') {
+  const te = new TextEncoder();
+  const sB = te.encode(sym), dB = te.encode(text), oB = te.encode(opts);
+  const sp = writeBytes(sB), dp = writeBytes(dB), op = writeBytes(oB);
+  const packed = wasm.encode(sp, sB.length, dp, dB.length, op, oB.length);
+  wasm.dealloc(sp, sB.length); wasm.dealloc(dp, dB.length); wasm.dealloc(op, oB.length);
   const buf = takeBytes(packed);
-  const dv = new DataView(buf.buffer);
-  return { w: dv.getUint32(0, true), h: dv.getUint32(4, true), quiet: dv.getUint32(8, true),
-           kind: buf[12], bits: buf.subarray(13) };
+  if (buf.length === 0) return { error: 'encode failed' };
+  if (buf[0] === 2) return { error: new TextDecoder().decode(buf.subarray(1)) };
+  const dv = new DataView(buf.buffer, buf.byteOffset);
+  return { kind: buf[0], w: dv.getUint32(1, true), h: dv.getUint32(5, true), quiet: dv.getUint32(9, true),
+           bits: buf.subarray(13) };
 }
 function lumaFrom(imageData) {
   const { width: w, height: h, data } = imageData;
@@ -183,12 +197,103 @@ function drawEncoding(enc) {
     for (let x = 0; x < enc.w; x++) if (enc.bits[x]) ctx.fillRect((x + q) * s, 8, s, barH);
   }
 }
-document.getElementById('enc-btn').onclick = () => {
-  const err = document.getElementById('enc-err'); err.textContent = '';
-  const enc = encode(document.getElementById('enc-sym').value, document.getElementById('enc-data').value);
-  if (!enc) { err.textContent = 'Encode failed (data not valid for this symbology).'; return; }
-  drawEncoding(enc);
+const $ = id => document.getElementById(id);
+
+// per-symbology creation metadata: what it accepts + which options apply
+const ascii = s => [...s].every(c => c.charCodeAt(0) < 128) ? '' : 'ASCII characters only (0–127)';
+const digits = (min, max) => s => !/^\d+$/.test(s) ? 'digits only'
+  : (s.length < min || s.length > max) ? `expected ${min === max ? min : min + '–' + max} digits` : '';
+const nonEmpty = s => s.length ? '' : 'enter some data';
+const EC_QMH = { id: 'ec', label: 'Error correction', values: [['L', 'L · 7%'], ['M', 'M · 15%'], ['Q', 'Q · 25%'], ['H', 'H · 30%']], def: 'M' };
+
+const SYMS = [
+  { id: 'qr', label: 'QR Code', group: '2D matrix', desc: 'The ubiquitous 2D matrix code. Any UTF-8 text; auto-sizes across 40 versions.', accepts: 'Any text (UTF-8)', length: 'up to ~2,900 bytes', example: 'https://anyd.dev', validate: nonEmpty, options: [EC_QMH] },
+  { id: 'microqr', label: 'Micro QR', group: '2D matrix', desc: 'Compact QR for tiny payloads (versions M1–M4).', accepts: 'Any text · small capacity', length: 'a few chars', example: '1234', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['Detection', 'Detect only'], ['L', 'L · 7%'], ['M', 'M · 15%'], ['Q', 'Q · 25%']], def: 'M' }] },
+  { id: 'rmqr', label: 'Rectangular Micro QR', group: '2D matrix', desc: 'Flat rectangular QR for narrow label space.', accepts: 'Any text', length: 'short–medium', example: 'anyd rMQR', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['M', 'M · 15%'], ['H', 'H · 30%']], def: 'M' }] },
+  { id: 'datamatrix', label: 'Data Matrix', group: '2D matrix', desc: 'Dense square 2D code (ECC 200) — electronics, pharma, DPM.', accepts: 'Any bytes', length: 'up to ~1,500 bytes', example: 'DM-2026', validate: nonEmpty, options: [] },
+  { id: 'aztec', label: 'Aztec', group: '2D matrix', desc: 'Compact 2D code with a central bullseye; needs no quiet zone.', accepts: 'Any text', length: 'short–long', example: 'AZTEC', validate: nonEmpty, options: [] },
+  { id: 'maxicode', label: 'MaxiCode', group: '2D matrix', desc: 'Fixed-size hexagonal code (UPS). Mode 4 here.', accepts: 'Any text', length: '~90 chars', example: 'MAXICODE', validate: nonEmpty, options: [] },
+  { id: 'pdf417', label: 'PDF417', group: '2D stacked', desc: 'Stacked 2D code on IDs & boarding passes.', accepts: 'Any text', length: 'up to ~1,100 bytes', example: 'PDF417 DEMO', validate: nonEmpty, options: [{ id: 'ec', label: 'EC level (0–8)', values: [['0', '0 · min'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5'], ['6', '6'], ['7', '7'], ['8', '8 · max']], def: '2' }] },
+  { id: 'code128', label: 'Code 128', group: '1D linear', desc: 'High-density logistics 1D code; full ASCII.', accepts: 'ASCII (0–127)', length: 'any', example: 'ABC-1234', validate: s => nonEmpty(s) || ascii(s), options: [] },
+  { id: 'code39', label: 'Code 39', group: '1D linear', desc: 'Rugged 1D code (full-ASCII extension).', accepts: 'ASCII', length: 'any', example: 'CODE 39', validate: s => nonEmpty(s) || ascii(s), options: [] },
+  { id: 'code93', label: 'Code 93', group: '1D linear', desc: 'Denser successor to Code 39 (full ASCII).', accepts: 'ASCII', length: 'any', example: 'CODE93', validate: s => nonEmpty(s) || ascii(s), options: [] },
+  { id: 'ean13', label: 'EAN-13', group: '1D linear', desc: 'Retail product barcode (GTIN-13).', accepts: 'Digits', length: '12 (+auto check) or 13', example: '5901234123457', validate: s => nonEmpty(s) || digits(12, 13)(s), options: [] },
+  { id: 'ean8', label: 'EAN-8', group: '1D linear', desc: 'Short retail barcode (GTIN-8).', accepts: 'Digits', length: '7 or 8', example: '96385074', validate: s => nonEmpty(s) || digits(7, 8)(s), options: [] },
+  { id: 'upca', label: 'UPC-A', group: '1D linear', desc: 'North-American retail barcode.', accepts: 'Digits', length: '11 or 12', example: '036000291452', validate: s => nonEmpty(s) || digits(11, 12)(s), options: [] },
+  { id: 'upce', label: 'UPC-E', group: '1D linear', desc: 'Zero-suppressed compact UPC.', accepts: 'Digits', length: '6–8', example: '04252614', validate: s => nonEmpty(s) || digits(6, 8)(s), options: [] },
+  { id: 'itf', label: 'Interleaved 2 of 5', group: '1D linear', desc: 'Digit-pair 1D code (cartons).', accepts: 'Digits · even count', length: 'even number', example: '1234567895', validate: s => nonEmpty(s) || (/^\d+$/.test(s) ? (s.length % 2 ? 'even number of digits' : '') : 'digits only'), options: [] },
+  { id: 'codabar', label: 'Codabar', group: '1D linear', desc: 'Older 1D code (blood banks, libraries).', accepts: '0-9 and - $ : / . +', length: 'any', example: '12345', validate: s => nonEmpty(s) || (/^[0-9\-$:/.+]+$/.test(s) ? '' : 'allowed: digits and - $ : / . +'), options: [] },
+];
+
+let current = SYMS[0];
+const optValues = {};
+
+{ // build grouped <select>
+  const sel = $('enc-sym'), groups = {};
+  for (const s of SYMS) (groups[s.group] ||= []).push(s);
+  for (const [g, list] of Object.entries(groups)) {
+    const og = document.createElement('optgroup'); og.label = g;
+    for (const s of list) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.label; og.appendChild(o); }
+    sel.appendChild(og);
+  }
+  sel.onchange = () => selectSym(sel.value);
+}
+
+function selectSym(id) {
+  current = SYMS.find(s => s.id === id);
+  $('enc-spec').innerHTML =
+    `<div class="desc">${current.desc}</div>` +
+    `<div><span class="k">accepts</span> <span class="v">${current.accepts}</span></div>` +
+    (current.length ? `<div><span class="k">length</span> <span class="v">${current.length}</span></div>` : '');
+  $('enc-accepts').textContent = '· ' + current.accepts;
+  const opts = $('enc-opts'); opts.innerHTML = '';
+  for (const o of current.options) {
+    optValues[o.id] = o.def;
+    const field = document.createElement('div'); field.className = 'field';
+    field.innerHTML = `<label>${o.label}</label>`;
+    const os = document.createElement('select');
+    for (const [v, l] of o.values) { const opt = document.createElement('option'); opt.value = v; opt.textContent = l; if (v === o.def) opt.selected = true; os.appendChild(opt); }
+    os.onchange = () => { optValues[o.id] = os.value; };
+    field.appendChild(os); opts.appendChild(field);
+  }
+  const data = $('enc-data');
+  if (!data.value || data.dataset.autofill) { data.value = current.example; data.dataset.autofill = '1'; }
+  validateData();
+}
+
+function validateData() {
+  const data = $('enc-data'), msg = current.validate(data.value);
+  data.classList.toggle('invalid', !!msg && data.value.length > 0);
+  data.classList.toggle('valid', !msg);
+  $('enc-btn').disabled = !!msg;
+  $('enc-hint').innerHTML = msg ? `<span class="bad">${msg}</span>` : `example: <span class="chip" id="enc-eg">${current.example}</span>`;
+  const eg = $('enc-eg'); if (eg) eg.onclick = () => { data.value = current.example; delete data.dataset.autofill; validateData(); };
+}
+$('enc-data').oninput = () => { delete $('enc-data').dataset.autofill; validateData(); };
+
+let lastEnc = null;
+$('enc-btn').onclick = () => {
+  $('enc-err').textContent = '';
+  const optStr = current.options.map(o => `${o.id}=${optValues[o.id]}`).join(';');
+  const res = encode(current.id, $('enc-data').value, optStr);
+  if (res.error) { $('enc-err').innerHTML = `<span class="bad">${res.error}</span>`; return; }
+  lastEnc = res; drawEncoding(res);
+  $('enc-dl-png').hidden = false; $('enc-dl-svg').hidden = false;
 };
+
+function dl(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+$('enc-dl-png').onclick = () => encCanvas.toBlob(b => dl(`${current.id}.png`, b));
+$('enc-dl-svg').onclick = () => dl(`${current.id}.svg`, new Blob([buildSVG(lastEnc)], { type: 'image/svg+xml' }));
+function buildSVG(e) {
+  const q = e.quiet, sc = 8, rects = [];
+  const W = (e.w + 2 * q) * sc, H = ((e.kind === 0 ? e.h : 24) + 2 * q) * sc;
+  const rect = (x, y, w, h) => rects.push(`<rect x="${x * sc}" y="${y * sc}" width="${w * sc}" height="${h * sc}"/>`);
+  if (e.kind === 0) { for (let y = 0; y < e.h; y++) { let x = 0; while (x < e.w) { if (e.bits[y * e.w + x]) { const s = x; while (x < e.w && e.bits[y * e.w + x]) x++; rect(s + q, y + q, x - s, 1); } else x++; } } }
+  else { let x = 0; while (x < e.w) { if (e.bits[x]) { const s = x; while (x < e.w && e.bits[x]) x++; rect(s + q, q, x - s, 24); } else x++; } }
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fff"/><g fill="#000">${rects.join('')}</g></svg>\n`;
+}
+
+selectSym('qr');
 
 // ---- live camera ----
 const video = document.getElementById('cam-video');

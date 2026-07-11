@@ -8,8 +8,9 @@
 //!   parses them, then frees with `dealloc(ptr, len)`.
 //!
 //! Output formats:
-//! - `encode`: `[w:u32 LE][h:u32 LE][quiet:u32 LE][kind:u8 (0=matrix,1=linear)][bits: w*h]`
-//!   where each bit byte is 1 for a dark module.
+//! - `encode`: `[kind:u8][w:u32 LE][h:u32 LE][quiet:u32 LE][bits: w*h]` where kind is
+//!   0=matrix, 1=linear (each bit byte is 1 for a dark module); OR on failure
+//!   `[2][utf8 error message]` so the UI can explain what was rejected.
 //! - `decode` / `locate`: a UTF-8 JSON string.
 
 #![allow(clippy::missing_safety_doc)]
@@ -51,7 +52,8 @@ unsafe fn input(ptr: *const u8, len: usize) -> &'static [u8] {
     unsafe { core::slice::from_raw_parts(ptr, len) }
 }
 
-/// Encode `data` as `symbology` (both UTF-8), returning the module grid, or 0 on error.
+/// Encode `data` as `symbology` (all UTF-8) with `opts` (a `key=value;…` string, e.g.
+/// `ec=H`). Returns the module grid, or a `[2][message]` error buffer.
 ///
 /// # Safety
 /// Pointers must describe valid buffers of the given lengths.
@@ -61,13 +63,28 @@ pub unsafe extern "C" fn encode(
     sym_len: usize,
     data_ptr: *const u8,
     data_len: usize,
+    opt_ptr: *const u8,
+    opt_len: usize,
 ) -> u64 {
     let sym = core::str::from_utf8(unsafe { input(sym_ptr, sym_len) }).unwrap_or("");
     let data = core::str::from_utf8(unsafe { input(data_ptr, data_len) }).unwrap_or("");
-    match build(sym, data) {
+    let opts = core::str::from_utf8(unsafe { input(opt_ptr, opt_len) }).unwrap_or("");
+    match build(sym, data, opts) {
         Ok(enc) => export(serialize_encoding(&enc)),
-        Err(_) => 0,
+        Err(msg) => {
+            let mut buf = vec![2u8];
+            buf.extend_from_slice(msg.as_bytes());
+            export(buf)
+        }
     }
+}
+
+/// Read `key`'s value out of a `key=value;key=value` options string.
+fn opt<'a>(opts: &'a str, key: &str) -> Option<&'a str> {
+    opts.split([';', '&'])
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
 }
 
 /// Decode all codes in a `w`×`h` 8-bit luminance frame; returns a JSON array
@@ -203,10 +220,10 @@ fn serialize_encoding(enc: &Encoding) -> Vec<u8> {
     let mut buf = Vec::new();
     match enc {
         Encoding::Matrix(m) => {
+            buf.push(0);
             buf.extend_from_slice(&(m.width() as u32).to_le_bytes());
             buf.extend_from_slice(&(m.height() as u32).to_le_bytes());
             buf.extend_from_slice(&(m.quiet_zone as u32).to_le_bytes());
-            buf.push(0);
             for y in 0..m.height() {
                 for x in 0..m.width() {
                     buf.push(m.get(x, y) as u8);
@@ -214,10 +231,10 @@ fn serialize_encoding(enc: &Encoding) -> Vec<u8> {
             }
         }
         Encoding::Linear(p) => {
+            buf.push(1);
             buf.extend_from_slice(&(p.modules.len() as u32).to_le_bytes());
             buf.extend_from_slice(&1u32.to_le_bytes());
             buf.extend_from_slice(&(p.quiet_zone as u32).to_le_bytes());
-            buf.push(1);
             for &b in &p.modules {
                 buf.push(b as u8);
             }
@@ -228,68 +245,122 @@ fn serialize_encoding(enc: &Encoding) -> Vec<u8> {
 
 /// Build an [`Encoding`] for a symbology name + UTF-8 data. Covers a representative
 /// set for the demo; unknown names return an error.
-fn build(sym: &str, data: &str) -> Result<Encoding, crate::Error> {
+fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
     use crate::codes::*;
     let b = data.as_bytes();
+    let ec = opt(opts, "ec");
+    let es = |e: crate::Error| e.to_string();
     match sym {
         "qr" => {
             let e = qr::QrEncoder::new();
-            e.encode(&e.build_text(data, qr::EcLevel::M)?)
+            e.encode(&e.build_text(data, qr_ec(ec)?).map_err(es)?)
+                .map_err(es)
         }
         "microqr" => {
             let e = microqr::MicroQrEncoder::new();
-            e.encode(&e.build(vec![Segment::byte(b.to_vec())], microqr::MicroEcLevel::M)?)
+            let s = e
+                .build(vec![Segment::byte(b.to_vec())], micro_ec(ec)?)
+                .map_err(es)?;
+            e.encode(&s).map_err(es)
+        }
+        "rmqr" => {
+            let e = rmqr::RmqrEncoder::new();
+            e.encode(&e.build_text(data, rmqr_ec(ec)?).map_err(es)?)
+                .map_err(es)
         }
         "aztec" => {
             let e = aztec::AztecEncoder::new();
-            e.encode(&e.build_text(data)?)
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
         }
         "datamatrix" => {
             let e = datamatrix::DataMatrixEncoder::new();
-            e.encode(&e.build_text(data)?)
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
         }
         "pdf417" => {
             let e = pdf417::Pdf417Encoder::new();
-            e.encode(&e.build_text(data, pdf417::EcLevel::new(2).unwrap())?)
+            e.encode(&e.build_text(data, pdf417_ec(ec)?).map_err(es)?)
+                .map_err(es)
         }
         "maxicode" => {
             let e = maxicode::MaxiCodeEncoder::new();
-            e.encode(&e.build_text(data)?)
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
         }
         "code128" => {
             let e = code128::Code128Encoder::new();
-            e.encode(&e.build_text(data)?)
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
         }
         "code39" => {
             let e = code39::Code39Encoder::new();
-            e.encode(&e.build(b, true, false)?)
+            e.encode(&e.build(b, true, false).map_err(es)?).map_err(es)
         }
         "code93" => {
             let e = code93::Code93Encoder::new();
-            e.encode(&e.build(b, true)?)
+            e.encode(&e.build(b, true).map_err(es)?).map_err(es)
         }
         "ean13" => {
             let e = ean::EanEncoder::new();
-            e.encode(&e.build_ean13(data)?)
+            e.encode(&e.build_ean13(data).map_err(es)?).map_err(es)
         }
         "ean8" => {
             let e = ean::EanEncoder::new();
-            e.encode(&e.build_ean8(data)?)
+            e.encode(&e.build_ean8(data).map_err(es)?).map_err(es)
         }
         "upca" => {
             let e = ean::EanEncoder::new();
-            e.encode(&e.build_upca(data)?)
+            e.encode(&e.build_upca(data).map_err(es)?).map_err(es)
+        }
+        "upce" => {
+            let e = ean::EanEncoder::new();
+            e.encode(&e.build_upce(data).map_err(es)?).map_err(es)
         }
         "itf" => {
             let e = itf::ItfEncoder::new();
-            e.encode(&e.build(b, false)?)
+            e.encode(&e.build(b, false).map_err(es)?).map_err(es)
         }
         "codabar" => {
             let e = codabar::CodabarEncoder::new();
-            e.encode(&e.build(b'A', b, b'A')?)
+            e.encode(&e.build(b'A', b, b'A').map_err(es)?).map_err(es)
         }
-        _ => Err(crate::Error::Unsupported {
-            what: "symbology not in the web demo set",
-        }),
+        other => Err(format!("unknown symbology '{other}'")),
     }
+}
+
+fn qr_ec(ec: Option<&str>) -> Result<crate::codes::qr::EcLevel, String> {
+    use crate::codes::qr::EcLevel::*;
+    match ec {
+        None | Some("M") => Ok(M),
+        Some("L") => Ok(L),
+        Some("Q") => Ok(Q),
+        Some("H") => Ok(H),
+        Some(o) => Err(format!("QR error-correction must be L/M/Q/H (got '{o}')")),
+    }
+}
+fn micro_ec(ec: Option<&str>) -> Result<crate::codes::microqr::MicroEcLevel, String> {
+    use crate::codes::microqr::MicroEcLevel::*;
+    match ec {
+        None | Some("M") => Ok(M),
+        Some("Detection" | "D") => Ok(Detection),
+        Some("L") => Ok(L),
+        Some("Q") => Ok(Q),
+        Some(o) => Err(format!(
+            "Micro QR error-correction must be Detection/L/M/Q (got '{o}')"
+        )),
+    }
+}
+fn rmqr_ec(ec: Option<&str>) -> Result<crate::codes::rmqr::RmqrEcLevel, String> {
+    use crate::codes::rmqr::RmqrEcLevel::*;
+    match ec {
+        None | Some("M") => Ok(M),
+        Some("H") => Ok(H),
+        Some(o) => Err(format!("rMQR error-correction must be M/H (got '{o}')")),
+    }
+}
+fn pdf417_ec(ec: Option<&str>) -> Result<crate::codes::pdf417::EcLevel, String> {
+    let n: u8 = match ec {
+        None => 2,
+        Some(s) => s
+            .parse()
+            .map_err(|_| "PDF417 EC level must be 0–8".to_string())?,
+    };
+    crate::codes::pdf417::EcLevel::new(n).ok_or_else(|| "PDF417 EC level must be 0–8".to_string())
 }

@@ -1,5 +1,10 @@
 # AnyDCode
 
+[![CI](https://github.com/KarpelesLab/anydcode/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/anydcode/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/anyd.svg)](https://crates.io/crates/anyd)
+[![docs.rs](https://img.shields.io/docsrs/anyd)](https://docs.rs/anyd)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A from-scratch Rust library for **decoding and encoding 1D and 2D barcodes**, aiming
 for the widest possible symbology coverage while preserving every variation of a code.
 

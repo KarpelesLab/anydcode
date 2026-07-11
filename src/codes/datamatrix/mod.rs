@@ -31,10 +31,12 @@ mod decode;
 mod encode;
 pub mod gf;
 mod placement;
+mod sample;
 mod tables;
 
 pub use decode::DataMatrixDecoder;
 pub use encode::DataMatrixEncoder;
+pub use sample::{DataMatrixScanner, sample_grid, scan};
 
 /// The data-encodation scheme used for one segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

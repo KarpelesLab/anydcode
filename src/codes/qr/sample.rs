@@ -43,9 +43,18 @@
 //!   homography on the interior bottom-right alignment position and sweeps it, bowing the
 //!   grid to follow the curvature of a label on a bottle or can. Reached only when every
 //!   direct hypothesis has failed, so clean renders never pay for it.
+//! - **Multi-anchor non-planar dewarp** — for genuinely curved surfaces (a cylinder, a
+//!   crease, a ripple) no single homography samples correctly, so every finder *and*
+//!   alignment pattern is located and a thin-plate spline (`ThinPlateSpline`) is fitted
+//!   through the whole grid→image anchor mesh; the symbol is then resampled through that
+//!   smooth warp. This is the primary path once at least one alignment pattern is found
+//!   (version ≥ 2) and the flat sample has failed, and it degrades to a near-affine fit
+//!   when only a couple of anchors exist. Version 1 (no alignment pattern) and
+//!   already-decoding clean renders never reach it (see `collect_anchors`/`dewarp_decode`).
 
-use super::QrDecoder;
 use super::matrix::QUIET_ZONE;
+use super::tables::alignment_positions;
+use super::{QrDecoder, Version};
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
@@ -55,6 +64,7 @@ use crate::imgproc::sample::sample_bilinear;
 use crate::imgproc::threshold::{
     adaptive_binarize_bradley, adaptive_binarize_sauvola, otsu_threshold,
 };
+use crate::imgproc::tps::ThinPlateSpline;
 use crate::output::BitMatrix;
 use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
@@ -120,6 +130,17 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                 Ok(sym) => return Ok(sym),
                 Err(e) => {
                     last = e;
+                    // The single-homography sample failed. If this symbol carries
+                    // interior alignment patterns (version ≥ 2), fit a smooth non-planar
+                    // (thin-plate-spline) warp through every finder and alignment anchor
+                    // and resample. This is the curved-surface path — a homography cannot
+                    // bend to a cylinder/fold/wave, a TPS through the anchor mesh can.
+                    // `dewarp_decode` self-guards (returns `None` for version 1 and when
+                    // no alignment is found), and is only reached once the cheap path has
+                    // already failed, so clean renders never pay for it.
+                    if let Some(sym) = dewarp_decode(frame, &bin, &located, &integral, &decoder) {
+                        return Ok(sym);
+                    }
                     if located.dimension > 21 && pending.len() < REFINE_HYPOTHESES {
                         pending.push(located);
                     }
@@ -605,8 +626,32 @@ impl Located {
         }
     }
 
-    /// Sample every module center into a clean [`BitMatrix`].
+    /// Sample every module center into a clean [`BitMatrix`] through the planar
+    /// projection.
     fn sample(&self, frame: &GrayFrame<'_>, thr: &ModuleThreshold<'_>) -> BitMatrix {
+        self.sample_map(frame, thr, |x, y| self.projection.map(x, y))
+    }
+
+    /// Sample every module center through a non-planar [`ThinPlateSpline`] warp instead
+    /// of the planar projection. Used by the curved-surface dewarping path; the per-module
+    /// classification (local-mean threshold, multi-tap bilinear averaging) is identical.
+    fn sample_warp(
+        &self,
+        frame: &GrayFrame<'_>,
+        thr: &ModuleThreshold<'_>,
+        warp: &ThinPlateSpline,
+    ) -> BitMatrix {
+        self.sample_map(frame, thr, |x, y| warp.map(x, y))
+    }
+
+    /// Sample every module centre `(col+0.5, row+0.5)` into a clean [`BitMatrix`],
+    /// mapping grid→image through `map` (a planar projection or a non-planar warp).
+    fn sample_map(
+        &self,
+        frame: &GrayFrame<'_>,
+        thr: &ModuleThreshold<'_>,
+        map: impl Fn(f64, f64) -> (f64, f64),
+    ) -> BitMatrix {
         let dim = self.dimension;
         // Average a few taps within the module footprint so blur and single-pixel
         // noise do not flip a module.
@@ -614,7 +659,7 @@ impl Located {
         let mut matrix = BitMatrix::new(dim, dim, QUIET_ZONE);
         for my in 0..dim {
             for mx in 0..dim {
-                let (px, py) = self.projection.map(mx as f64 + 0.5, my as f64 + 0.5);
+                let (px, py) = map(mx as f64 + 0.5, my as f64 + 0.5);
                 if sample_dark(frame, px, py, tap, thr) {
                     matrix.set(mx, my, true);
                 }
@@ -726,10 +771,16 @@ fn found_alignment_cross(counts: [i32; 5], module: f32) -> Option<f32> {
     (inner_ok && outer_ok).then_some(m)
 }
 
-/// Search a window around `expected` for the bottom-right alignment pattern, returning
-/// the detected center closest to the prediction.
-fn find_alignment(bin: &Binary, expected: Point, module_size: f32) -> Option<Point> {
-    let radius = (module_size * 5.0).ceil() as i32;
+/// Search a window around `expected` for an alignment pattern, returning the detected
+/// center closest to the prediction. `radius_modules` sizes the search window (in
+/// modules) around the predicted centre.
+fn find_alignment(
+    bin: &Binary,
+    expected: Point,
+    module_size: f32,
+    radius_modules: f32,
+) -> Option<Point> {
+    let radius = (module_size * radius_modules).ceil() as i32;
     let x0 = (expected.x as i32 - radius).max(0) as usize;
     let x1 = ((expected.x as i32 + radius) as usize).min(bin.width() - 1);
     let y0 = (expected.y as i32 - radius).max(0) as usize;
@@ -789,6 +840,184 @@ fn find_alignment(bin: &Binary, expected: Point, module_size: f32) -> Option<Poi
         }
     }
     best.map(|(p, _)| p)
+}
+
+// ===================================================================================
+// Non-planar (thin-plate-spline) dewarping
+// ===================================================================================
+
+/// A mesh of `(grid-coord, image-coord)` correspondences to fit the non-planar warp
+/// through: the three finder centres plus every alignment pattern that could be located.
+struct Anchors {
+    /// Module-grid coordinates of each anchor (`col+0.5`, `row+0.5`).
+    grid: Vec<(f64, f64)>,
+    /// Image-pixel coordinates of the same anchors, in matching order.
+    img: Vec<(f64, f64)>,
+    /// How many of the anchors are interior alignment patterns (finders excluded).
+    alignments: usize,
+}
+
+/// Refine a detected alignment centre to sub-pixel precision by a darkness-weighted
+/// centroid over the pattern.
+///
+/// An alignment pattern is point-symmetric about its centre, so the centroid of its
+/// darkness lands on the true centre even when blur has smeared its rings. The window is
+/// kept to the pattern's own extent (a circle ~2 modules in radius) so the surrounding
+/// data modules do not pull the centroid off.
+fn refine_alignment_centroid(
+    frame: &GrayFrame<'_>,
+    cx: f32,
+    cy: f32,
+    module_size: f32,
+) -> (f32, f32) {
+    let r = (module_size * 2.0).round().clamp(2.0, 32.0) as i32;
+    let r2 = (r * r) as f32;
+    let (mut sw, mut sx, mut sy) = (0.0f32, 0.0f32, 0.0f32);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if (dx * dx + dy * dy) as f32 > r2 {
+                continue;
+            }
+            let x = cx + dx as f32;
+            let y = cy + dy as f32;
+            let lum = sample_bilinear(frame, x as f64, y as f64) as f32;
+            let w = (255.0 - lum).max(0.0);
+            sw += w;
+            sx += w * x;
+            sy += w * y;
+        }
+    }
+    if sw > 1e-3 {
+        (sx / sw, sy / sw)
+    } else {
+        (cx, cy)
+    }
+}
+
+/// Collect the anchor mesh for `located`: the three finder centres plus every alignment
+/// pattern that can be located, each a `(grid, image)` correspondence.
+///
+/// Alignment centres are predicted from the current grid→image map, searched for in the
+/// binarized frame, and refined to sub-pixel. Because a single homography mis-predicts
+/// interior alignments under curvature, the mesh is grown in rounds: once a few anchors
+/// are found a provisional thin-plate spline re-predicts the ones still missing — which
+/// then fall inside the (widened) search window — so the mesh fills inward across the
+/// bulge. Returns `None` unless at least one alignment is found, so the warp always bends
+/// beyond the plain finder triangle.
+fn collect_anchors(frame: &GrayFrame<'_>, bin: &Binary, located: &Located) -> Option<Anchors> {
+    let dim = located.dimension;
+    let d = dim as f64;
+    let version = Version::new(((dim - 17) / 4) as u8)?;
+    let positions = alignment_positions(version);
+    let n = positions.len();
+    if n == 0 {
+        return None;
+    }
+
+    // Finder anchors (always three, trusted): TL, TR, BL.
+    let [tl, tr, _, bl] = located.corners;
+    let mut grid = vec![(3.5, 3.5), (d - 3.5, 3.5), (3.5, d - 3.5)];
+    let mut img = vec![
+        (tl.x as f64, tl.y as f64),
+        (tr.x as f64, tr.y as f64),
+        (bl.x as f64, bl.y as f64),
+    ];
+
+    // Wanted alignment grid centres: all row/col combinations of the position list minus
+    // the three that coincide with the finder patterns.
+    let mut remaining: Vec<(f64, f64)> = Vec::new();
+    for ri in 0..n {
+        for ci in 0..n {
+            let finder_corner = (ri == 0 && (ci == 0 || ci == n - 1)) || (ri == n - 1 && ci == 0);
+            if finder_corner {
+                continue;
+            }
+            remaining.push((
+                f64::from(positions[ci]) + 0.5,
+                f64::from(positions[ri]) + 0.5,
+            ));
+        }
+    }
+
+    let mut alignments = 0usize;
+    // A handful of rounds is plenty for the mesh to reach the centre; each round either
+    // finds new anchors (and re-predicts from a better spline) or stops.
+    for round in 0.. {
+        if remaining.is_empty() || round >= 6 {
+            break;
+        }
+        // Predict from a provisional TPS once we have alignments to bend it; before that,
+        // fall back to the located projection.
+        let predictor = (alignments > 0)
+            .then(|| ThinPlateSpline::fit(&grid, &img))
+            .flatten();
+        let radius = if round == 0 { 3.5 } else { 5.5 };
+        let mut still = Vec::new();
+        for &(gx, gy) in &remaining {
+            let (ex, ey) = match &predictor {
+                Some(t) => t.map(gx, gy),
+                None => located.projection.map(gx, gy),
+            };
+            let hit = find_alignment(
+                bin,
+                Point::new(ex as f32, ey as f32),
+                located.module_size,
+                radius,
+            );
+            if let Some(p) = hit {
+                let (rx, ry) = refine_alignment_centroid(frame, p.x, p.y, located.module_size);
+                grid.push((gx, gy));
+                img.push((f64::from(rx), f64::from(ry)));
+                alignments += 1;
+            } else {
+                still.push((gx, gy));
+            }
+        }
+        let progressed = still.len() < remaining.len();
+        remaining = still;
+        if !progressed {
+            break;
+        }
+    }
+
+    (alignments >= 1).then_some(Anchors {
+        grid,
+        img,
+        alignments,
+    })
+}
+
+/// Fit a non-planar thin-plate-spline warp through every detected anchor and resample the
+/// symbol through it, decode-validating the result.
+///
+/// This is the curved-surface primary path for versions ≥ 2: a homography can only model
+/// a flat plane, so a code on a cylinder, fold or ripple samples wrong through it, but a
+/// TPS through the finder + alignment mesh follows the curvature. Two module-classification
+/// thresholds are tried (local-mean and global) since blur and curvature favour different
+/// ones. Returns the decoded symbol, or `None` if no alignment anchors were found or the
+/// resampled grid still fails Reed–Solomon.
+fn dewarp_decode(
+    frame: &GrayFrame<'_>,
+    bin: &Binary,
+    located: &Located,
+    integral: &IntegralImage,
+    decoder: &QrDecoder,
+) -> Option<Symbol> {
+    let anchors = collect_anchors(frame, bin, located)?;
+    debug_assert!(anchors.alignments >= 1);
+    let warp = ThinPlateSpline::fit(&anchors.grid, &anchors.img)?;
+    let radius = (located.module_size * 2.0).round().clamp(2.0, 64.0) as usize;
+    let thresholds = [
+        ModuleThreshold::Local { integral, radius },
+        ModuleThreshold::Global(located.threshold),
+    ];
+    for thr in &thresholds {
+        let matrix = located.sample_warp(frame, thr, &warp);
+        if let Ok(sym) = decoder.decode_matrix(&matrix) {
+            return Some(sym);
+        }
+    }
+    None
 }
 
 /// Estimate the module size along the direction from finder center `from` toward
@@ -1082,7 +1311,7 @@ fn build_located(bin: &Binary, a: Finder, b: Finder, c: Finder) -> Option<Locate
         let u = (d - 10.0) / (d - 7.0);
         let ex = tl.x + u as f32 * (tr.x - tl.x) + u as f32 * (bl.x - tl.x);
         let ey = tl.y + u as f32 * (tr.y - tl.y) + u as f32 * (bl.y - tl.y);
-        if let Some(align) = find_alignment(bin, Point::new(ex, ey), module_size) {
+        if let Some(align) = find_alignment(bin, Point::new(ex, ey), module_size, 5.0) {
             let src = [
                 (3.5, 3.5),
                 (d - 3.5, 3.5),

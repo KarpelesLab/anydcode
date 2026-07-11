@@ -19,24 +19,35 @@
 //! | Combined camera capture              | gradient + 6° rotation + σ1.2 blur + σ12    |
 //! |                                      | noise together                              |
 //! | Perspective tilt + rotation together | tilt 0.12 + 7° rotation (versions ≥ 2)      |
-//! | Cylinder curvature (bottle/can)      | half-arc 0.45 flat; 0.35 with σ1.0 blur     |
-//! |                                      | (versions ≥ 2 for the blurred case)         |
+//! | Cylinder curvature (bottle/can)      | half-arc 0.8 (dim 25) / 0.6 (dim 45); 0.7   |
+//! |                                      | with σ1.0 blur — well past the 0.45 the     |
+//! |                                      | flat homography reached                     |
+//! | Non-planar ripple / crease           | a sine ripple (amp ≈ 1.7 modules) and a     |
+//! |                                      | dihedral fold that **no** single homography |
+//! |                                      | spans — decoded via the alignment-anchor    |
+//! |                                      | thin-plate-spline dewarp (versions ≥ 7)     |
 //!
 //! These are driven by the adaptive (Bradley/Sauvola) binarization ladder, per-module
-//! local thresholding, dual-axis + synthesized finder detection, and the interior
-//! bottom-right anchor sweep added to `codes::qr::sample`.
+//! local thresholding, dual-axis + synthesized finder detection, the interior
+//! bottom-right anchor sweep, and — for genuinely non-planar surfaces — a multi-anchor
+//! thin-plate-spline dewarp (fit through every detected finder and alignment pattern)
+//! added to `codes::qr::sample`.
 //!
 //! ## Real bottle fixture (`testdata/real_qr_bottle.png`)
 //!
 //! A tight crop of a QR on a curved, glossy bottle sticker, noticeably blurred (module
-//! pitch ≈ 4 px with blur on the same order). The hardened front-end now **locates** the
+//! pitch ≈ 4 px with blur on the same order). The hardened front-end **locates** the
 //! symbol and recovers a correctly-sized 25×25 (version 2) grid where the previous global
-//! sampler could not even find three finder patterns. Full payload recovery of this
-//! particular capture is still out of reach: an exhaustive geometry/threshold search
-//! confirms no single planar homography samples it cleanly enough for its version-2 error
-//! correction — the combination of heavy blur and cylindrical bulge would require true
-//! multi-anchor dewarping. The feature-gated test therefore asserts the recovered
-//! front-end geometry and deliberately does not assert full decode.
+//! sampler could not even find three finder patterns. The multi-anchor thin-plate-spline
+//! dewarp now also runs on it and reaches the point of *reading the format information*,
+//! but full payload recovery of this specific capture is still out of reach: it fails with
+//! `unreadable format information`. That is a **residual-blur** limit, not a curvature one
+//! — with module pitch ≈ 4 px and a blur radius on the same order, the format modules bleed
+//! into their neighbours below what version 2's error correction can repair, independent of
+//! how well the surface is dewarped (the synthetic `strong_cylinder_beyond_flat_envelope`
+//! test decodes far tighter *un-blurred* curvature on this same version). The feature-gated
+//! test therefore asserts the recovered front-end geometry and deliberately does not assert
+//! full decode.
 
 use anyd::GrayImage;
 use anyd::codes::qr::{EcLevel, QrEncoder, scan};
@@ -189,6 +200,64 @@ fn cylinder_curvature() {
             assert_decodes(&curved_blur, &expected, &format!("dim{dim} cylinder+blur"));
         }
     }
+}
+
+/// Byte payloads that render at versions carrying a genuine interior alignment mesh
+/// (dims 45, 61, 81 — versions 7, 12, 16). The non-planar dewarp needs those interior
+/// anchors, so it is exercised where the mesh actually exists.
+fn mesh_cases() -> Vec<(Vec<Segment>, EcLevel)> {
+    vec![
+        (vec![Segment::byte(vec![b'B'; 120])], EcLevel::M), // dim 45 (v7)
+        (vec![Segment::byte(vec![b'C'; 220])], EcLevel::M), // dim 61 (v12)
+        (vec![Segment::byte(vec![b'D'; 440])], EcLevel::M), // dim 81 (v16)
+    ]
+}
+
+#[test]
+fn strong_cylinder_beyond_flat_envelope() {
+    // Half-arc well past the 0.45 the flat/homography path reached. Version 2 (dim 25) is
+    // small enough that even the interior bottom-right anchor carries it a long way; the
+    // larger dim-45 mesh follows a 0.6 arc.
+    let (base2, exp2, _) = encode(vec![Segment::byte(vec![b'A'; 20])], EcLevel::M); // dim 25
+    for &c in &[0.6f32, 0.8] {
+        let curved = transform::cylinder(&base2, c, Axis::Vertical);
+        assert_decodes(&curved, &exp2, &format!("dim25 cylinder{c}"));
+    }
+    // And a 0.7 arc that additionally carries σ1.0 blur.
+    let cb = transform::gaussian_blur(&transform::cylinder(&base2, 0.7, Axis::Vertical), 1.0);
+    assert_decodes(&cb, &exp2, "dim25 cylinder0.7+blur");
+
+    let (base7, exp7, _) = encode(vec![Segment::byte(vec![b'B'; 120])], EcLevel::M); // dim 45
+    let curved7 = transform::cylinder(&base7, 0.6, Axis::Vertical);
+    assert_decodes(&curved7, &exp7, "dim45 cylinder0.6");
+}
+
+#[test]
+fn nonplanar_ripple_and_fold_dewarp() {
+    // The headline non-planar cases: surfaces a *single* homography — even the corner-swept
+    // one — provably cannot sample, so they decode only through the multi-anchor thin-plate
+    // spline. (Verified out-of-band by disabling the TPS path: with it off, none of the
+    // asserts below decode; with it on, all do.)
+
+    // Rippled paper: roughly one sine cycle across the symbol, amplitude 10 px (~1.7
+    // modules) — a bend the finder-triangle homography cannot track, but the interior
+    // alignment anchors pin the spline to.
+    for (payload, level) in mesh_cases() {
+        let (base, expected, dim) = encode(payload, level);
+        let wl = (dim * SCALE) as f32 * 1.5;
+        let waved = transform::wave(&base, 10.0, wl, Axis::Vertical);
+        assert_decodes(&waved, &expected, &format!("dim{dim} ripple"));
+    }
+
+    // A dihedral crease through the middle: two planar halves meeting at an angle no one
+    // homography spans. The spline bridges the fold because it has anchors on both faces.
+    let (base7, exp7, _) = encode(vec![Segment::byte(vec![b'B'; 120])], EcLevel::M); // dim 45
+    let folded7 = transform::fold(&base7, 0.5, 40.0, Axis::Vertical);
+    assert_decodes(&folded7, &exp7, "dim45 fold40");
+
+    let (base16, exp16, _) = encode(vec![Segment::byte(vec![b'D'; 440])], EcLevel::M); // dim 81
+    let folded16 = transform::fold(&base16, 0.5, 25.0, Axis::Vertical);
+    assert_decodes(&folded16, &exp16, "dim81 fold25");
 }
 
 /// Real camera photo of a QR on a curved bottle sticker. Gated on the `cli` feature so it

@@ -14,6 +14,8 @@
 //!   per-blob bounding boxes, centroids and areas.
 //! - [`homography`] — a 3×3 [`Homography`] solved from four point correspondences,
 //!   with forward mapping and inversion.
+//! - [`tps`] — a [`ThinPlateSpline`] non-planar warp (and a general linear solver) that
+//!   interpolates a smooth curved surface through scattered anchors a homography cannot.
 //! - `line` — least-squares line fitting and a seeded [`ransac_line`] fitter for
 //!   locating code borders.
 //! - `sample` — [`sample_grid`], the sub-pixel bilinear grid reader that turns a
@@ -35,6 +37,7 @@ pub mod line;
 pub mod rng;
 pub mod sample;
 pub mod threshold;
+pub mod tps;
 
 pub use binary::BinaryImage;
 pub use components::{BoundingBox, Component, Connectivity, connected_components};
@@ -47,3 +50,4 @@ pub use sample::{sample_bilinear, sample_grid, sample_grid_binary};
 pub use threshold::{
     adaptive_binarize_bradley, adaptive_binarize_sauvola, otsu_binarize, otsu_threshold,
 };
+pub use tps::{ThinPlateSpline, solve_linear_system};

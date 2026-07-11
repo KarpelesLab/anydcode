@@ -255,6 +255,16 @@ impl Symbology {
                 | UpcE
                 | Ean2
                 | Ean5
+                | Itf
+                | Std2of5
+                | Iata2of5
+                | Matrix2of5
+                | Codabar
+                | MsiPlessey
+                | Plessey
+                | Telepen
+                | Pharmacode
+                | PharmacodeTwoTrack
                 | DataBarOmni
                 | DataBarLimited
         )

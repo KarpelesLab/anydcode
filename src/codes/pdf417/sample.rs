@@ -39,6 +39,9 @@
 //! - **Noise:** additive σ up to ~25 luminance (global Otsu is essentially immune to
 //!   noise of this magnitude on a bi-level render).
 //! - **Brightness / contrast:** wide range; Otsu adapts to the histogram.
+//! - **Uneven lighting:** the global-Otsu pass is followed by an adaptive (Bradley
+//!   local-mean) binarization fallback, so a symbol under a lighting gradient or glare
+//!   that a single global threshold cannot separate still locates and decodes.
 //!
 //! Out of scope, and deliberately not asserted: **perspective tilt** (the affine model
 //! does not correct keystoning, and a finder-less stacked code offers no interior anchor
@@ -54,7 +57,7 @@ use crate::imgproc::homography::Homography;
 use crate::imgproc::line::{Line, ransac_line};
 use crate::imgproc::rng::Prng;
 use crate::imgproc::sample::sample_bilinear;
-use crate::imgproc::threshold::otsu_threshold;
+use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_threshold};
 use crate::output::{BitMatrix, Encoding};
 use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
@@ -91,7 +94,7 @@ impl Pdf417Scanner {
 
 impl Detect for Pdf417Scanner {
     fn detect(&self, frame: &GrayFrame<'_>, _hints: &Hints) -> Vec<Candidate> {
-        match locate(frame) {
+        match locate_any(frame) {
             Some(loc) => vec![Candidate {
                 location: loc.as_location(),
                 symbology: Some(Symbology::Pdf417),
@@ -114,18 +117,33 @@ impl Analyze for Pdf417Scanner {
 
 /// Locate, sample and structurally decode the PDF417 symbol in `frame`.
 ///
-/// Returns `None` if no symbol is found or the sampled grid does not decode.
+/// Returns `None` if no symbol is found or the sampled grid does not decode. Global
+/// Otsu is tried first (exact on clean renders); if it does not decode, an adaptive
+/// local binarization is tried as a fallback for unevenly-lit real captures.
 pub fn scan(frame: &GrayFrame<'_>) -> Option<Symbol> {
-    let matrix = sample_grid(frame)?;
+    scan_with(frame, &Binary::from_frame(frame))
+        .or_else(|| scan_with(frame, &Binary::adaptive(frame)))
+}
+
+/// Locate, sample and decode under one already-built binarization.
+fn scan_with(frame: &GrayFrame<'_>, bin: &Binary) -> Option<Symbol> {
+    let matrix = locate(frame, bin)?.sample(frame);
     Pdf417Decoder::new().decode(&Encoding::Matrix(matrix)).ok()
 }
 
 /// Locate the PDF417 symbol in `frame` and sample it to a clean [`BitMatrix`].
 ///
 /// This is the geometry-recovery half of [`scan`], exposed so tests can assert the
-/// sampled grid directly (e.g. pixel-exact recovery of an upright render).
+/// sampled grid directly (e.g. pixel-exact recovery of an upright render). Uses the
+/// global-Otsu binarization, falling back to the adaptive one only if that fails to
+/// locate the guards.
 pub fn sample_grid(frame: &GrayFrame<'_>) -> Option<BitMatrix> {
-    Some(locate(frame)?.sample(frame))
+    locate_any(frame).map(|loc| loc.sample(frame))
+}
+
+/// Locate under global Otsu, falling back to adaptive binarization.
+fn locate_any(frame: &GrayFrame<'_>) -> Option<Located> {
+    locate(frame, &Binary::from_frame(frame)).or_else(|| locate(frame, &Binary::adaptive(frame)))
 }
 
 // ===================================================================================
@@ -156,6 +174,24 @@ impl Binary {
             width: w,
             height: h,
             threshold,
+        }
+    }
+
+    /// Adaptive (Bradley local-mean) binarization, used as a fallback when the global
+    /// Otsu pass fails: it survives the lighting gradients and glare of real captures
+    /// that wipe out a single global threshold. The sampling threshold stays the global
+    /// Otsu value (module centres are read against it), only the guard-detection bitmap
+    /// changes.
+    fn adaptive(frame: &GrayFrame<'_>) -> Binary {
+        let w = frame.width();
+        let h = frame.height();
+        let radius = (w.min(h) / 8).clamp(8, 50);
+        let img = adaptive_binarize_bradley(frame, radius, 0.10);
+        Binary {
+            bits: img.bits().to_vec(),
+            width: w,
+            height: h,
+            threshold: otsu_threshold(frame),
         }
     }
 
@@ -424,18 +460,16 @@ fn median(values: &[f32]) -> f32 {
 /// Minimum number of rows that must carry both guards for a confident location.
 const MIN_ANCHOR_ROWS: usize = 6;
 
-/// Full location pipeline for `frame`.
-fn locate(frame: &GrayFrame<'_>) -> Option<Located> {
+/// Full location pipeline for `frame` under a supplied binarization `bin`.
+fn locate(frame: &GrayFrame<'_>, bin: &Binary) -> Option<Located> {
     if frame.width() < 40 || frame.height() < 9 {
         return None;
     }
-    let bin = Binary::from_frame(frame);
-
     let mut left_pts = Vec::new();
     let mut right_pts = Vec::new();
     let mut start_units = Vec::new();
     for y in 0..bin.height {
-        let runs = encode_row(&bin, y);
+        let runs = encode_row(bin, y);
         if let Some((lx, unit)) = find_start(&runs) {
             left_pts.push(Point::new(lx, y as f32 + 0.5));
             start_units.push(unit);
@@ -468,8 +502,8 @@ fn locate(frame: &GrayFrame<'_>) -> Option<Located> {
     // pattern's 8-bar is centred ~3.5 modules right of the left edge; the stop pattern's
     // 7-bar ~14.5 modules left of the right edge.
     let interior = centroid(&[centroid(&left_in), centroid(&right_in)]);
-    let (tl0, bl0) = guard_corners(&bin, &left_line, &left_in, interior, unit_along, 3.5);
-    let (tr0, br0) = guard_corners(&bin, &right_line, &right_in, interior, unit_along, 14.5);
+    let (tl0, bl0) = guard_corners(bin, &left_line, &left_in, interior, unit_along, 3.5);
+    let (tr0, br0) = guard_corners(bin, &right_line, &right_in, interior, unit_along, 14.5);
 
     // Build a clean parallelogram from the two edge midpoints and a single shared height
     // along the averaged edge direction. Per-corner walk noise (±1 px in where a bar's

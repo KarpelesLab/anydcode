@@ -21,16 +21,44 @@
 //! its fourth corner falls back to the parallelogram rule — exact under any affine
 //! transform (rotation, scale, shear) but not perspective. Strong perspective, and any
 //! perspective on version 1, are out of scope.
+//!
+//! ## Real-world captures
+//!
+//! Camera photos rarely binarize cleanly under one global threshold, so several extra
+//! layers make the front-end robust to them (see `tests/real_world.rs` for the asserted
+//! envelope — uneven lighting, glare, blur, mild curvature):
+//!
+//! - **Binarization ladder** — global Otsu first (exact and cheap on clean renders),
+//!   then adaptive Bradley/Sauvola local thresholds that survive lighting gradients and
+//!   glare. Each pass is tried in turn until a grid decodes.
+//! - **Dual-axis finder scan** — the frame is run-length swept both by rows *and* by
+//!   columns, recovering a finder whose signature is spoiled along one axis by blur.
+//! - **Synthesized third finder** — when only two strong finders survive (heavy blur can
+//!   destroy the top-right pattern's rings entirely), the missing corner is reconstructed
+//!   geometrically and locked onto the real (blurred) finder by template correlation.
+//! - **Local module sampling** — each module centre is classified against a local-mean
+//!   window (from an integral image), not one global cutoff, so a gradient across the
+//!   symbol does not flip modules.
+//! - **Interior fourth-corner sweep** — a decode-validated fallback that anchors the
+//!   homography on the interior bottom-right alignment position and sweeps it, bowing the
+//!   grid to follow the curvature of a label on a bottle or can. Reached only when every
+//!   direct hypothesis has failed, so clean renders never pay for it.
 
 use super::QrDecoder;
 use super::matrix::QUIET_ZONE;
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
+use crate::imgproc::binary::BinaryImage;
+use crate::imgproc::integral::IntegralImage;
+use crate::imgproc::sample::sample_bilinear;
+use crate::imgproc::threshold::{
+    adaptive_binarize_bradley, adaptive_binarize_sauvola, otsu_threshold,
+};
 use crate::output::BitMatrix;
 use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
-use crate::traits::{Analyze, Decode, Detect};
+use crate::traits::{Analyze, Detect};
 use crate::transform::Projection;
 
 /// Image-based QR scanner: finds, samples and decodes a QR symbol in a [`GrayFrame`].
@@ -46,14 +74,14 @@ impl QrScanner {
 
 impl Detect for QrScanner {
     fn detect(&self, frame: &GrayFrame<'_>, _hints: &Hints) -> Vec<Candidate> {
-        match locate(frame) {
-            Ok(loc) => vec![Candidate {
+        match locate_any(frame) {
+            Some(loc) => vec![Candidate {
                 location: loc.as_location(),
                 symbology: Some(crate::symbology::Symbology::QrCode),
                 fingerprint: None,
                 known: None,
             }],
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         }
     }
 }
@@ -68,87 +96,237 @@ impl Analyze for QrScanner {
 }
 
 /// Locate, sample and structurally decode the QR symbol in `frame`.
+///
+/// Real camera photos rarely binarize cleanly under one global threshold (glare,
+/// uneven lighting, blur, curved surfaces), so this walks a small ladder of
+/// binarizations — global Otsu first, then adaptive local ones — and, within each,
+/// several finder-triple hypotheses. The first grid that survives Reed–Solomon wins;
+/// clean synthetic renders still decode on the very first (global) pass.
 pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
-    let matrix = sample_grid(frame)?;
-    QrDecoder::new().decode(&crate::output::Encoding::Matrix(matrix))
+    let integral = IntegralImage::from_frame(frame);
+    let decoder = QrDecoder::new();
+    let mut last = Error::undecodable("no QR symbol found");
+    // Located hypotheses that decoded neither directly, kept for the fourth-corner
+    // refinement fallback below.
+    let mut pending: Vec<Located> = Vec::new();
+    for pass in 0.. {
+        let Some(bin) = binarize(frame, pass) else {
+            break;
+        };
+        for located in candidates(frame, &bin) {
+            let thr = located.threshold(&integral);
+            let matrix = located.sample(frame, &thr);
+            match decoder.decode_matrix(&matrix) {
+                Ok(sym) => return Ok(sym),
+                Err(e) => {
+                    last = e;
+                    if located.dimension > 21 && pending.len() < REFINE_HYPOTHESES {
+                        pending.push(located);
+                    }
+                }
+            }
+        }
+    }
+    // Fallback for curved/tilted captures whose bottom-right corner the affine
+    // parallelogram places wrongly and whose alignment pattern is too degraded to
+    // detect: sweep that free corner and let Reed–Solomon accept the geometry that
+    // reads. Reached only when every direct hypothesis failed, so clean renders never
+    // pay for it.
+    for located in &pending {
+        if let Some(sym) = refine_fourth_corner(frame, located, &integral, &decoder) {
+            return Ok(sym);
+        }
+    }
+    Err(last)
+}
+
+/// Located hypotheses (dim > 21) retained for the fourth-corner refinement fallback.
+const REFINE_HYPOTHESES: usize = 4;
+
+/// Re-decode `located` while searching for the position of its bottom-right **alignment
+/// pattern** — the interior fiducial at grid `(dim-6.5, dim-6.5)`.
+///
+/// The three finder corners are trusted; anchoring the homography on an *interior* point
+/// (rather than the outer corner) lets it bow to follow the curvature of a label on a
+/// bottle or can, which an affine/parallelogram fit cannot. The pattern is often too
+/// blurred to detect by its cross-section, so instead of trusting a single detection we
+/// sweep a neighbourhood of the affine-predicted position and let Reed–Solomon accept
+/// the placement that reads. Reached only when every direct hypothesis failed.
+fn refine_fourth_corner(
+    frame: &GrayFrame<'_>,
+    located: &Located,
+    integral: &IntegralImage,
+    decoder: &QrDecoder,
+) -> Option<Symbol> {
+    let [tl, tr, _, bl] = located.corners;
+    let dim = located.dimension;
+    let d = dim as f64;
+    let ms = located.module_size.max(1.0);
+    // Homography src uses the alignment centre (grid dim-6.5) as its third correspondence.
+    let src = [
+        (3.5, 3.5),
+        (d - 3.5, 3.5),
+        (d - 6.5, d - 6.5),
+        (3.5, d - 3.5),
+    ];
+    // Affine prediction of that alignment centre, then a sub-module sweep around it.
+    let u = (d - 10.0) as f32 / (d - 7.0) as f32;
+    let ex = tl.x + u * (tr.x - tl.x) + u * (bl.x - tl.x);
+    let ey = tl.y + u * (tr.y - tl.y) + u * (bl.y - tl.y);
+    // Try a couple of module-classification thresholds: the local-mean window and a
+    // global Otsu cutoff. Blur and curvature can make either the better discriminator.
+    let radius = (ms * 2.0).round().clamp(2.0, 64.0) as usize;
+    let thresholds = [
+        ModuleThreshold::Local { integral, radius },
+        ModuleThreshold::Global(located.threshold),
+    ];
+    let reach = ms * 3.0;
+    let step = (ms * 0.4).clamp(0.75, 3.0);
+    let n = (reach / step) as i32;
+    for thr in &thresholds {
+        for gy in -n..=n {
+            for gx in -n..=n {
+                let ax = ex + gx as f32 * step;
+                let ay = ey + gy as f32 * step;
+                let dst = [
+                    (tl.x as f64, tl.y as f64),
+                    (tr.x as f64, tr.y as f64),
+                    (ax as f64, ay as f64),
+                    (bl.x as f64, bl.y as f64),
+                ];
+                let projection = Projection::quad_to_quad(src, dst);
+                let trial = Located {
+                    projection,
+                    dimension: dim,
+                    threshold: located.threshold,
+                    local: located.local,
+                    corners: located.corners,
+                    module_size: located.module_size,
+                };
+                let matrix = trial.sample(frame, thr);
+                if let Ok(sym) = decoder.decode_matrix(&matrix) {
+                    return Some(sym);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Locate the QR symbol in `frame` and sample it to a clean [`BitMatrix`].
+///
+/// Tries the same binarization/finder ladder as [`scan`] and returns the grid of the
+/// first hypothesis that decodes; if none decode it returns the first that merely
+/// located (still useful for inspection). Errors only when no finders are found at all.
 pub fn sample_grid(frame: &GrayFrame<'_>) -> Result<BitMatrix> {
-    let located = locate(frame)?;
-    Ok(located.sample(frame))
+    let integral = IntegralImage::from_frame(frame);
+    let decoder = QrDecoder::new();
+    let mut first: Option<BitMatrix> = None;
+    for pass in 0.. {
+        let Some(bin) = binarize(frame, pass) else {
+            break;
+        };
+        for located in candidates(frame, &bin) {
+            let thr = located.threshold(&integral);
+            let matrix = located.sample(frame, &thr);
+            if decoder.decode_matrix(&matrix).is_ok() {
+                return Ok(matrix);
+            }
+            if first.is_none() {
+                first = Some(matrix);
+            }
+        }
+    }
+    first.ok_or_else(|| Error::undecodable("no QR finder patterns found"))
+}
+
+/// Geometry-only location for the cheap detection pass: the first hypothesis that
+/// locates under any binarization in the ladder.
+fn locate_any(frame: &GrayFrame<'_>) -> Option<Located> {
+    for pass in 0.. {
+        let bin = binarize(frame, pass)?;
+        if let Some(located) = candidates(frame, &bin).into_iter().next() {
+            return Some(located);
+        }
+    }
+    None
 }
 
 // ===================================================================================
 // Binarization
 // ===================================================================================
 
-/// A binarized frame: `true` = dark module.
+/// A binarized frame used for finder detection and geometry: `true` = dark module.
+///
+/// `local` records whether the binarization was adaptive (local). Adaptive passes also
+/// drive *local* module sampling; the global pass keeps the plain global threshold, so
+/// clean synthetic renders sample identically to before.
 struct Binary {
-    bits: Vec<bool>,
-    width: usize,
-    height: usize,
+    img: BinaryImage,
+    /// Global Otsu threshold of the frame, kept for reporting and the global-sample path.
     threshold: u8,
+    /// `true` when produced by an adaptive (local) method.
+    local: bool,
 }
 
 impl Binary {
-    fn from_frame(frame: &GrayFrame<'_>) -> Binary {
-        let w = frame.width();
-        let h = frame.height();
-        let threshold = otsu_threshold(frame);
-        let mut bits = vec![false; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                bits[y * w + x] = frame.get_unchecked(x, y) <= threshold;
-            }
-        }
-        Binary {
-            bits,
-            width: w,
-            height: h,
-            threshold,
-        }
+    #[inline]
+    fn dark(&self, x: usize, y: usize) -> bool {
+        self.img.get(x, y)
     }
 
     #[inline]
-    fn dark(&self, x: usize, y: usize) -> bool {
-        self.bits[y * self.width + x]
+    fn width(&self) -> usize {
+        self.img.width()
+    }
+
+    #[inline]
+    fn height(&self) -> usize {
+        self.img.height()
     }
 }
 
-/// Otsu's method: the global luminance threshold maximizing between-class variance.
-fn otsu_threshold(frame: &GrayFrame<'_>) -> u8 {
-    let mut hist = [0u64; 256];
-    for y in 0..frame.height() {
-        for x in 0..frame.width() {
-            hist[frame.get_unchecked(x, y) as usize] += 1;
+/// Build the `pass`-th binarization in the robustness ladder, or `None` once exhausted.
+///
+/// Pass 0 is plain global Otsu — cheap and exact on evenly-lit renders, so the whole
+/// synthetic test-suite decodes here unchanged. Passes 1+ are adaptive/local methods
+/// (Bradley local-mean at two window sizes, then Sauvola) which survive glare, lighting
+/// gradients and the mild contrast loss of blur on real photos.
+fn binarize(frame: &GrayFrame<'_>, pass: usize) -> Option<Binary> {
+    let threshold = otsu_threshold(frame);
+    let small = frame.width().min(frame.height());
+    // Adaptive window ≈ a handful of modules wide; two sizes cover a range of symbol
+    // scales within the frame.
+    let r_small = (small / 12).clamp(6, 40);
+    let r_large = (small / 6).clamp(10, 80);
+    let img = match pass {
+        0 => {
+            let w = frame.width();
+            let h = frame.height();
+            let mut bin = BinaryImage::new(w, h);
+            for y in 0..h {
+                for x in 0..w {
+                    if frame.get_unchecked(x, y) <= threshold {
+                        bin.set(x, y, true);
+                    }
+                }
+            }
+            return Some(Binary {
+                img: bin,
+                threshold,
+                local: false,
+            });
         }
-    }
-    let total: u64 = (frame.width() * frame.height()) as u64;
-    let sum: f64 = (0..256).map(|i| i as f64 * hist[i] as f64).sum();
-    let mut sum_b = 0.0;
-    let mut w_b = 0u64;
-    let mut max_var = -1.0;
-    let mut threshold = 127u8;
-    for (t, &count) in hist.iter().enumerate() {
-        w_b += count;
-        if w_b == 0 {
-            continue;
-        }
-        let w_f = total - w_b;
-        if w_f == 0 {
-            break;
-        }
-        sum_b += t as f64 * count as f64;
-        let m_b = sum_b / w_b as f64;
-        let m_f = (sum - sum_b) / w_f as f64;
-        let var = w_b as f64 * w_f as f64 * (m_b - m_f) * (m_b - m_f);
-        if var > max_var {
-            max_var = var;
-            threshold = t as u8;
-        }
-    }
-    threshold
+        1 => adaptive_binarize_bradley(frame, r_small, 0.08),
+        2 => adaptive_binarize_bradley(frame, r_large, 0.08),
+        3 => adaptive_binarize_sauvola(frame, r_small, 0.2, 128.0),
+        _ => return None,
+    };
+    Some(Binary {
+        img,
+        threshold,
+        local: true,
+    })
 }
 
 // ===================================================================================
@@ -172,7 +350,11 @@ fn found_pattern_cross(counts: [i32; 5]) -> Option<f32> {
         return None;
     }
     let module = total as f32 / 7.0;
-    let max_var = module / 2.0;
+    // Blur softens edges and adjacent dark data modules can bleed into the outer rings,
+    // so the ratios are matched with generous slack: ~0.7 module on each narrow ring and
+    // ~2.1 modules on the wide centre run. Reed–Solomon plus the geometric triple check
+    // reject the extra false positives this admits.
+    let max_var = module * 0.7;
     let ok = (counts[0] as f32 - module).abs() < max_var
         && (counts[1] as f32 - module).abs() < max_var
         && (counts[2] as f32 - 3.0 * module).abs() < 3.0 * max_var
@@ -240,7 +422,7 @@ fn run_center(counts: [i32; 5], end: i32) -> f32 {
 
 /// Vertical finder cross-check through column `cx`, returning the refined center-`y`.
 fn cross_check_vertical(bin: &Binary, cx: usize, start: usize) -> Option<f32> {
-    let (counts, end) = walk_run(bin.height as i32, start as i32, |k| {
+    let (counts, end) = walk_run(bin.height() as i32, start as i32, |k| {
         bin.dark(cx, k as usize)
     })?;
     found_pattern_cross(counts)?;
@@ -249,7 +431,9 @@ fn cross_check_vertical(bin: &Binary, cx: usize, start: usize) -> Option<f32> {
 
 /// Horizontal finder cross-check through row `cy`, returning the refined center-`x`.
 fn cross_check_horizontal(bin: &Binary, cy: usize, start: usize) -> Option<f32> {
-    let (counts, end) = walk_run(bin.width as i32, start as i32, |k| bin.dark(k as usize, cy))?;
+    let (counts, end) = walk_run(bin.width() as i32, start as i32, |k| {
+        bin.dark(k as usize, cy)
+    })?;
     found_pattern_cross(counts)?;
     Some(run_center(counts, end))
 }
@@ -274,53 +458,94 @@ fn add_center(centers: &mut Vec<Finder>, x: f32, y: f32, module_size: f32) {
     });
 }
 
+/// Run-length encode one line, invoking `emit(run_start, [c0..c4])` for every window of
+/// five consecutive runs that begins on a dark run — `start` is the pixel index where
+/// the middle (centre) run begins.
+fn scan_line_runs(len: usize, dark: impl Fn(usize) -> bool, mut emit: impl FnMut(usize, [i32; 5])) {
+    let mut runs: Vec<(bool, usize, i32)> = Vec::new();
+    let mut cur = dark(0);
+    let mut start = 0usize;
+    for p in 1..len {
+        let d = dark(p);
+        if d != cur {
+            runs.push((cur, start, (p - start) as i32));
+            cur = d;
+            start = p;
+        }
+    }
+    runs.push((cur, start, (len - start) as i32));
+    if runs.len() < 5 {
+        return;
+    }
+    for i in 0..=runs.len() - 5 {
+        if !runs[i].0 {
+            continue; // pattern must start on a dark run
+        }
+        let counts = [
+            runs[i].2,
+            runs[i + 1].2,
+            runs[i + 2].2,
+            runs[i + 3].2,
+            runs[i + 4].2,
+        ];
+        let center = &runs[i + 2];
+        emit(center.1 + (center.2 as usize) / 2, counts);
+    }
+}
+
 /// Scan the binarized frame for finder patterns and return their clustered centers.
+///
+/// The frame is swept **both** row-by-row and column-by-column. A blurred finder whose
+/// horizontal profile is spoiled by neighbouring dark data (common for the top-right
+/// pattern, whose inner side abuts the payload) is often still clean along the vertical,
+/// and vice-versa, so scanning both axes recovers finders a single-axis sweep misses.
+/// Hits from either axis are merged by [`add_center`].
 fn find_finders(bin: &Binary) -> Vec<Finder> {
     let mut centers: Vec<Finder> = Vec::new();
-    let w = bin.width;
-    for y in 0..bin.height {
-        // Run-length encode the row as (dark, start, len).
-        let mut runs: Vec<(bool, usize, i32)> = Vec::new();
-        let mut cur = bin.dark(0, y);
-        let mut start = 0usize;
-        for x in 1..w {
-            let d = bin.dark(x, y);
-            if d != cur {
-                runs.push((cur, start, (x - start) as i32));
-                cur = d;
-                start = x;
-            }
-        }
-        runs.push((cur, start, (w - start) as i32));
+    let (w, h) = (bin.width(), bin.height());
 
-        if runs.len() < 5 {
-            continue;
-        }
-        for i in 0..=runs.len() - 5 {
-            if !runs[i].0 {
-                continue; // pattern must start on a dark run
-            }
-            let counts = [
-                runs[i].2,
-                runs[i + 1].2,
-                runs[i + 2].2,
-                runs[i + 3].2,
-                runs[i + 4].2,
-            ];
-            let Some(module) = found_pattern_cross(counts) else {
-                continue;
-            };
-            let center = &runs[i + 2];
-            let cx = center.1 + (center.2 as usize) / 2;
-            let Some(cy) = cross_check_vertical(bin, cx, y) else {
-                continue;
-            };
-            let cy_row = cy.round().clamp(0.0, (bin.height - 1) as f32) as usize;
-            let Some(cx_ref) = cross_check_horizontal(bin, cy_row, cx) else {
-                continue;
-            };
-            add_center(&mut centers, cx_ref, cy, module);
-        }
+    // Row sweep: candidate centre pixel is (mid, y); refine vertically then horizontally.
+    for y in 0..h {
+        scan_line_runs(
+            w,
+            |x| bin.dark(x, y),
+            |mid, counts| {
+                if found_pattern_cross(counts).is_none() {
+                    return;
+                }
+                let Some(cy) = cross_check_vertical(bin, mid, y) else {
+                    return;
+                };
+                let cy_row = cy.round().clamp(0.0, (h - 1) as f32) as usize;
+                let Some(cx) = cross_check_horizontal(bin, cy_row, mid) else {
+                    return;
+                };
+                let module = found_pattern_cross(counts).unwrap();
+                add_center(&mut centers, cx, cy, module);
+            },
+        );
+    }
+
+    // Column sweep: candidate centre pixel is (x, mid); refine horizontally then vertically.
+    for x in 0..w {
+        scan_line_runs(
+            h,
+            |y| bin.dark(x, y),
+            |mid, counts| {
+                if found_pattern_cross(counts).is_none() {
+                    return;
+                }
+                let Some(cx) = cross_check_horizontal(bin, mid, x) else {
+                    return;
+                };
+                let cx_col = cx.round().clamp(0.0, (w - 1) as f32) as usize;
+                let Some(cy) = cross_check_vertical(bin, cx_col, mid) else {
+                    return;
+                };
+                let module = found_pattern_cross(counts).unwrap();
+                add_center(&mut centers, cx, cy, module);
+            },
+        );
     }
     centers
 }
@@ -334,8 +559,23 @@ struct Located {
     projection: Projection,
     dimension: usize,
     threshold: u8,
+    local: bool,
     corners: [Point; 4],
     module_size: f32,
+}
+
+/// How a module centre is classified dark/light during sampling.
+enum ModuleThreshold<'a> {
+    /// One global cutoff — used for the clean/global-Otsu pass so evenly-lit renders
+    /// sample exactly as before.
+    Global(u8),
+    /// Compare the sampled luminance against the local mean of a window of `radius`
+    /// pixels (Bradley-style), read in O(1) from `integral`. Robust to lighting
+    /// gradients and glare across the symbol.
+    Local {
+        integral: &'a IntegralImage,
+        radius: usize,
+    },
 }
 
 impl Located {
@@ -352,14 +592,30 @@ impl Located {
         }
     }
 
+    /// Choose how to threshold module centres for this hypothesis. Global for the
+    /// global-Otsu pass; a local-mean window (sized to the detected module) otherwise.
+    fn threshold<'a>(&self, integral: &'a IntegralImage) -> ModuleThreshold<'a> {
+        if self.local {
+            // Window a couple of modules across, so it always spans both dark and light
+            // modules and its mean lands between them.
+            let radius = (self.module_size * 2.0).round().clamp(2.0, 64.0) as usize;
+            ModuleThreshold::Local { integral, radius }
+        } else {
+            ModuleThreshold::Global(self.threshold)
+        }
+    }
+
     /// Sample every module center into a clean [`BitMatrix`].
-    fn sample(&self, frame: &GrayFrame<'_>) -> BitMatrix {
+    fn sample(&self, frame: &GrayFrame<'_>, thr: &ModuleThreshold<'_>) -> BitMatrix {
         let dim = self.dimension;
+        // Average a few taps within the module footprint so blur and single-pixel
+        // noise do not flip a module.
+        let tap = (self.module_size * 0.25).clamp(0.5, 8.0) as f64;
         let mut matrix = BitMatrix::new(dim, dim, QUIET_ZONE);
         for my in 0..dim {
             for mx in 0..dim {
                 let (px, py) = self.projection.map(mx as f64 + 0.5, my as f64 + 0.5);
-                if sample_dark(frame, px, py, self.threshold) {
+                if sample_dark(frame, px, py, tap, thr) {
                     matrix.set(mx, my, true);
                 }
             }
@@ -368,30 +624,35 @@ impl Located {
     }
 }
 
-/// Sample a 3×3 neighborhood around `(px, py)` and decide dark vs light against the
-/// binarization threshold — averaging suppresses single-pixel noise.
-fn sample_dark(frame: &GrayFrame<'_>, px: f64, py: f64, threshold: u8) -> bool {
-    let cx = px.round() as i32;
-    let cy = py.round() as i32;
-    let mut sum = 0u32;
-    let mut n = 0u32;
-    for dy in -1..=1 {
-        for dx in -1..=1 {
-            let x = cx + dx;
-            let y = cy + dy;
-            if x >= 0
-                && y >= 0
-                && let Some(v) = frame.get(x as usize, y as usize)
-            {
-                sum += v as u32;
-                n += 1;
-            }
+/// Decide dark vs light at module centre `(px, py)`.
+///
+/// Luminance is the mean of five bilinear taps (centre plus four offset by `tap`),
+/// which survives blur and noise. It is then compared either to a fixed global cutoff
+/// or to the local-neighbourhood mean (Bradley), which tracks lighting gradients.
+fn sample_dark(
+    frame: &GrayFrame<'_>,
+    px: f64,
+    py: f64,
+    tap: f64,
+    thr: &ModuleThreshold<'_>,
+) -> bool {
+    let lum = (sample_bilinear(frame, px, py)
+        + sample_bilinear(frame, px - tap, py)
+        + sample_bilinear(frame, px + tap, py)
+        + sample_bilinear(frame, px, py - tap)
+        + sample_bilinear(frame, px, py + tap))
+        / 5.0;
+    match *thr {
+        ModuleThreshold::Global(t) => lum <= f64::from(t),
+        ModuleThreshold::Local { integral, radius } => {
+            let cx = (px.round().max(0.0) as usize).min(integral.width().saturating_sub(1));
+            let cy = (py.round().max(0.0) as usize).min(integral.height().saturating_sub(1));
+            let (sum, count) = integral.window_sum_count(cx, cy, radius);
+            let mean = sum as f64 / count.max(1) as f64;
+            // Dark when meaningfully below the local mean.
+            lum < mean - 4.0 && lum < mean * 0.98
         }
     }
-    if n == 0 {
-        return false;
-    }
-    (sum / n) <= threshold as u32
 }
 
 /// Order three finder centers into `[top-left, top-right, bottom-left]` using the
@@ -470,9 +731,9 @@ fn found_alignment_cross(counts: [i32; 5], module: f32) -> Option<f32> {
 fn find_alignment(bin: &Binary, expected: Point, module_size: f32) -> Option<Point> {
     let radius = (module_size * 5.0).ceil() as i32;
     let x0 = (expected.x as i32 - radius).max(0) as usize;
-    let x1 = ((expected.x as i32 + radius) as usize).min(bin.width - 1);
+    let x1 = ((expected.x as i32 + radius) as usize).min(bin.width() - 1);
     let y0 = (expected.y as i32 - radius).max(0) as usize;
-    let y1 = ((expected.y as i32 + radius) as usize).min(bin.height - 1);
+    let y1 = ((expected.y as i32 + radius) as usize).min(bin.height() - 1);
     if x1 <= x0 + 4 {
         return None;
     }
@@ -512,7 +773,7 @@ fn find_alignment(bin: &Binary, expected: Point, module_size: f32) -> Option<Poi
             let cxi = center.1 + (center.2 as usize) / 2;
             // Confirm the same 1:1:1:1:1 signature vertically through the center.
             let Some((vc, vend)) =
-                walk_run(bin.height as i32, y as i32, |k| bin.dark(cxi, k as usize))
+                walk_run(bin.height() as i32, y as i32, |k| bin.dark(cxi, k as usize))
             else {
                 continue;
             };
@@ -553,7 +814,7 @@ fn directional_module_size(bin: &Binary, from: Point, to: Point) -> Option<f32> 
         let px = from.x + ux * dist;
         let py = from.y + uy * dist;
         let (ix, iy) = (px.round() as i32, py.round() as i32);
-        if ix < 0 || iy < 0 || ix >= bin.width as i32 || iy >= bin.height as i32 {
+        if ix < 0 || iy < 0 || ix >= bin.width() as i32 || iy >= bin.height() as i32 {
             return None;
         }
         let cur = bin.dark(ix as usize, iy as usize);
@@ -576,36 +837,239 @@ fn snap_dimension(estimate: f32) -> Option<usize> {
     (dim >= 21).then_some(dim)
 }
 
-/// Full location pipeline for `frame`.
-fn locate(frame: &GrayFrame<'_>) -> Result<Located> {
-    if frame.width() < 21 || frame.height() < 21 {
-        return Err(Error::undecodable("frame too small for a QR symbol"));
+/// Whether module `(i, j)` of a 7×7 finder pattern is dark: the outer ring plus the
+/// central 3×3 block are dark; the ring between them is light.
+fn finder_module_dark(i: usize, j: usize) -> bool {
+    let ring = i == 0 || i == 6 || j == 0 || j == 6;
+    let center = (2..=4).contains(&i) && (2..=4).contains(&j);
+    ring || center
+}
+
+/// Correlation of the 7×7 finder template centred at pixel `(cx, cy)` with the frame,
+/// given per-module step vectors `ax` (columns) and `ay` (rows). Returns the mean
+/// luminance of the template's light modules minus that of its dark modules — larger is
+/// a better match. Blur leaves this low-frequency signal intact, so it localizes a
+/// finder whose run-length signature is gone.
+fn finder_template_score(
+    frame: &GrayFrame<'_>,
+    cx: f32,
+    cy: f32,
+    ax: (f32, f32),
+    ay: (f32, f32),
+) -> f32 {
+    let (mut light, mut dark) = (0.0f32, 0.0f32);
+    let (mut nl, mut nd) = (0.0f32, 0.0f32);
+    for j in 0..7usize {
+        for i in 0..7usize {
+            let fi = i as f32 - 3.0;
+            let fj = j as f32 - 3.0;
+            let px = cx + fi * ax.0 + fj * ay.0;
+            let py = cy + fi * ax.1 + fj * ay.1;
+            let lum = sample_bilinear(frame, px as f64, py as f64) as f32;
+            if finder_module_dark(i, j) {
+                dark += lum;
+                nd += 1.0;
+            } else {
+                light += lum;
+                nl += 1.0;
+            }
+        }
     }
-    let bin = Binary::from_frame(frame);
-    let mut centers = find_finders(&bin);
-    if centers.len() < 3 {
-        return Err(Error::undecodable(
-            "fewer than three QR finder patterns found",
-        ));
+    light / nl.max(1.0) - dark / nd.max(1.0)
+}
+
+/// Refine a synthesized finder centre `guess` by template correlation against the frame.
+///
+/// `vertex` is the right-angle finder and `arm` the finder at the far end of one side,
+/// so the symbol's module axes near `guess` are the unit directions `vertex→arm` (rows)
+/// and `vertex→guess` (columns), each one module long. A small sub-pixel search around
+/// `guess` maximizes [`finder_template_score`], snapping the guessed corner onto the
+/// real (blurred) finder and thereby correcting the module pitch.
+fn refine_finder(frame: &GrayFrame<'_>, vertex: Finder, arm: Finder, guess: Finder) -> Finder {
+    let ms = vertex.module_size.max(1.0);
+    let unit = |dx: f32, dy: f32| {
+        let l = (dx * dx + dy * dy).sqrt().max(1e-3);
+        (dx / l, dy / l)
+    };
+    let (uyx, uyy) = unit(arm.x - vertex.x, arm.y - vertex.y);
+    let (uxx, uxy) = unit(guess.x - vertex.x, guess.y - vertex.y);
+    let ax = (uxx * ms, uxy * ms);
+    let ay = (uyx * ms, uyy * ms);
+
+    let reach = 2.0 * ms;
+    let step = 0.5f32;
+    let steps = (reach / step) as i32;
+    let mut best = guess;
+    let mut best_score = f32::MIN;
+    for oy in -steps..=steps {
+        for ox in -steps..=steps {
+            let cx = guess.x + ox as f32 * step;
+            let cy = guess.y + oy as f32 * step;
+            let s = finder_template_score(frame, cx, cy, ax, ay);
+            if s > best_score {
+                best_score = s;
+                best = Finder {
+                    x: cx,
+                    y: cy,
+                    module_size: ms,
+                    count: guess.count,
+                };
+            }
+        }
     }
-    // Prefer the highest-confidence clusters.
+    best
+}
+
+/// Strongest finder clusters retained per binarization (caps the triple combinatorics).
+const MAX_FINDERS: usize = 8;
+/// Located hypotheses returned per binarization, best-scoring first.
+const MAX_TRIPLES: usize = 24;
+/// Minimum cluster hit-count for a finder used to *synthesize* a missing third pattern.
+const SYNTH_MIN_COUNT: u32 = 3;
+/// Score penalty applied to synthesized triples so genuine triples are decoded first.
+const SYNTH_PENALTY: f32 = 10.0;
+
+/// Enumerate located hypotheses for one binarization, most finder-like first.
+///
+/// Real photos throw off spurious finder-like blobs (data clusters, glare edges) and,
+/// worse, can *destroy* one finder's 1:1:3:1:1 signature entirely: heavy blur on a small
+/// symbol merges the top-right pattern's white ring into the adjacent payload, so it is
+/// never detected however the frame is binarized. We therefore (1) score every plausible
+/// triple among the detected finders and, (2) when two strong finders survive, synthesize
+/// the geometrically-implied third corner (a right isosceles construction, both
+/// chiralities) so a symbol with one ruined finder still gets a grid. The caller decodes
+/// the ranked list until one passes Reed–Solomon; clean renders decode on the first
+/// (genuine) triple, so synthesized hypotheses cost nothing there.
+fn candidates(frame: &GrayFrame<'_>, bin: &Binary) -> Vec<Located> {
+    if bin.width() < 21 || bin.height() < 21 {
+        return Vec::new();
+    }
+    let mut centers = find_finders(bin);
     centers.sort_by_key(|f| std::cmp::Reverse(f.count));
-    let (tl, tr, bl, module_size) = pick_three(&centers)?;
+    centers.truncate(MAX_FINDERS);
+
+    // Scored candidate triples (real detections first, then synthesized ones).
+    let mut triples: Vec<(f32, [Finder; 3])> = Vec::new();
+
+    let n = centers.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            for k in (j + 1)..n {
+                if let Some(score) = triple_score(centers[i], centers[j], centers[k]) {
+                    triples.push((score, [centers[i], centers[j], centers[k]]));
+                }
+            }
+        }
+    }
+
+    // Synthesize a third finder from each reliable pair. `a` is treated as the
+    // right-angle vertex; the missing arm end is `a + rot±90°(b - a)`.
+    let strong: Vec<Finder> = centers
+        .iter()
+        .filter(|f| f.count >= SYNTH_MIN_COUNT)
+        .take(5)
+        .copied()
+        .collect();
+    for a in &strong {
+        for b in &strong {
+            if std::ptr::eq(a, b) {
+                continue;
+            }
+            for &sign in &[1.0f32, -1.0] {
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let c = Finder {
+                    x: a.x - sign * dy,
+                    y: a.y + sign * dx,
+                    module_size: a.module_size,
+                    count: 1,
+                };
+                // Skip if a real finder already sits where we would synthesize one — the
+                // genuine triple already covers that layout.
+                if centers.iter().any(|f| {
+                    (f.x - c.x).abs() <= f.module_size && (f.y - c.y).abs() <= f.module_size
+                }) {
+                    continue;
+                }
+                // The square construction is only a first guess: on a tilted or curved
+                // capture the true corner is not exactly square. Lock it onto the real
+                // (possibly blurred) finder by template correlation, which fixes the
+                // module pitch a wrong corner would otherwise skew.
+                let c = refine_finder(frame, *a, *b, c);
+                if let Some(score) = triple_score(*a, *b, c) {
+                    triples.push((score + SYNTH_PENALTY, [*a, *b, c]));
+                }
+            }
+        }
+    }
+
+    triples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out = Vec::new();
+    for (_, tri) in triples.into_iter().take(MAX_TRIPLES) {
+        if let Some(located) = build_located(bin, tri[0], tri[1], tri[2]) {
+            out.push(located);
+        }
+    }
+    out
+}
+
+/// Score a finder triple by how much it resembles a QR's three corner patterns — the
+/// two arms from the right-angle vertex should be near-perpendicular, of similar
+/// length, and the three finders should agree on module size. Returns `None` for
+/// implausible triples; lower scores are more finder-like.
+fn triple_score(a: Finder, b: Finder, c: Finder) -> Option<f32> {
+    let ([tl, tr, bl], ms) = order_finders(a, b, c);
+    if ms <= 0.0 {
+        return None;
+    }
+    let (v1x, v1y) = (tr.x - tl.x, tr.y - tl.y);
+    let (v2x, v2y) = (bl.x - tl.x, bl.y - tl.y);
+    let l1 = (v1x * v1x + v1y * v1y).sqrt();
+    let l2 = (v2x * v2x + v2y * v2y).sqrt();
+    // Both arms must be several modules long (a QR spans dim-7 ≥ 14 modules; be lenient).
+    if l1 < ms * 6.0 || l2 < ms * 6.0 {
+        return None;
+    }
+    // Similar arm lengths (square symbol; allow perspective/curvature slack).
+    let ratio = (l1 / l2).max(l2 / l1);
+    if ratio > 2.0 {
+        return None;
+    }
+    // Near-perpendicular arms.
+    let cos = (v1x * v2x + v1y * v2y) / (l1 * l2);
+    if cos.abs() > 0.45 {
+        return None;
+    }
+    // Module sizes should roughly agree across the three finders.
+    let (mn, mx) = [a.module_size, b.module_size, c.module_size]
+        .iter()
+        .fold((f32::MAX, 0.0f32), |(mn, mx), &m| (mn.min(m), mx.max(m)));
+    if mn <= 0.0 || mx / mn > 3.0 {
+        return None;
+    }
+    // Prefer square, perpendicular, high-confidence triples.
+    let count = (a.count + b.count + c.count) as f32;
+    Some(cos.abs() * 2.0 + ratio.ln() - 0.02 * count)
+}
+
+/// Build the full grid→pixel hypothesis for a chosen finder triple, or `None` if the
+/// implied dimension is invalid.
+fn build_located(bin: &Binary, a: Finder, b: Finder, c: Finder) -> Option<Located> {
+    let ([tl, tr, bl], module_size) = order_finders(a, b, c);
 
     // Estimate the symbol dimension from the finder-center spacing. The centers sit
     // 3.5 modules in from each edge, so the TL→TR / TL→BL spans are (dim - 7) modules.
     // Measuring module size *along* each span (not from an axis-aligned run) keeps the
     // estimate correct under arbitrary rotation, since spacing and module size then
     // scale together.
-    let ms_h = directional_module_size(&bin, tl, tr).unwrap_or(module_size);
-    let ms_v = directional_module_size(&bin, tl, bl).unwrap_or(module_size);
+    let ms_h = directional_module_size(bin, tl, tr).unwrap_or(module_size);
+    let ms_v = directional_module_size(bin, tl, bl).unwrap_or(module_size);
     let dist_tr = tl.distance(tr);
     let dist_bl = tl.distance(bl);
     let est_h = dist_tr / ms_h + 7.0;
     let est_v = dist_bl / ms_v + 7.0;
     let module_size = (ms_h + ms_v) / 2.0;
-    let dimension =
-        snap_dimension((est_h + est_v) / 2.0).ok_or_else(|| Error::undecodable("bad QR size"))?;
+    let dimension = snap_dimension((est_h + est_v) / 2.0)?;
 
     let d = dimension as f64;
 
@@ -618,7 +1082,7 @@ fn locate(frame: &GrayFrame<'_>) -> Result<Located> {
         let u = (d - 10.0) / (d - 7.0);
         let ex = tl.x + u as f32 * (tr.x - tl.x) + u as f32 * (bl.x - tl.x);
         let ey = tl.y + u as f32 * (tr.y - tl.y) + u as f32 * (bl.y - tl.y);
-        if let Some(align) = find_alignment(&bin, Point::new(ex, ey), module_size) {
+        if let Some(align) = find_alignment(bin, Point::new(ex, ey), module_size) {
             let src = [
                 (3.5, 3.5),
                 (d - 3.5, 3.5),
@@ -643,24 +1107,12 @@ fn locate(frame: &GrayFrame<'_>) -> Result<Located> {
     // Outline corners for reporting use the geometric bottom-right (parallelogram).
     let br_corner = Point::new(tr.x + bl.x - tl.x, tr.y + bl.y - tl.y);
 
-    Ok(Located {
+    Some(Located {
         projection,
         dimension,
         threshold: bin.threshold,
+        local: bin.local,
         corners: [tl, tr, br_corner, bl],
         module_size,
     })
-}
-
-/// Choose the three best finder clusters, ordered as `[top-left, top-right,
-/// bottom-left]`, from the count-sorted candidate list.
-fn pick_three(centers: &[Finder]) -> Result<(Point, Point, Point, f32)> {
-    // Take up to the strongest clusters, preferring those seen more than once.
-    let strong: Vec<Finder> = centers.iter().filter(|f| f.count >= 2).copied().collect();
-    let pool: &[Finder] = if strong.len() >= 3 { &strong } else { centers };
-    if pool.len() < 3 {
-        return Err(Error::undecodable("insufficient finder patterns"));
-    }
-    let (pts, module_size) = order_finders(pool[0], pool[1], pool[2]);
-    Ok((pts[0], pts[1], pts[2], module_size))
 }

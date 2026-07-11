@@ -33,12 +33,12 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 |-----------|:------:|:------:|:------:|
 | QR Code (v1–40, all EC levels & masks) | ✅ | ✅ | ✅¹ |
 | Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ✅³ |
-| Aztec (compact + full range, all modes) | ✅ | ✅ | ⬜ |
-| Aztec Runes | ⬜ | ⬜ | ⬜ |
+| Aztec (compact + full range, all modes) · Aztec Runes | ✅ | ✅ | ⬜ |
 | Micro QR Code (M1–M4) | ✅ | ✅ | ⬜ |
 | Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ⬜ |
 | MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
-| Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
+| Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
+| Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
 
 ### 2D — stacked
 
@@ -62,7 +62,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Telepen | ✅ | ✅ | ✅² |
 | Pharmacode (1- & 2-track) | ✅ | ✅ | ⬜ |
 | GS1 DataBar Omni (RSS-14) · Limited · Expanded | ✅ | ✅ | ⬜ |
-| DX Film Edge | ⬜ | ⬜ | ⬜ |
+| DX Film Edge | ✅ | ✅ | ⬜ |
 
 ### Postal (height-modulated)
 

@@ -245,6 +245,8 @@ impl Symbology {
                 | MicroQrCode
                 | RectMicroQrCode
                 | Aztec
+                | AztecRunes
+                | HanXin
                 | DataMatrix
                 | MaxiCode
                 | Pdf417
@@ -277,6 +279,7 @@ impl Symbology {
                 | IntelligentMail
                 | RoyalMail
                 | KixCode
+                | DxFilmEdge
         )
     }
 

@@ -9,8 +9,9 @@ repository = "https://github.com/KarpelesLab/anydcode"
 authors = ["Karpelès Lab Inc."]
 keywords = ["barcode", "qrcode", "decode", "encode", "scanner"]
 categories = ["encoding", "multimedia::images"]
-# Keep the published crate lean: the demo page and CI live in the repo, not the crate.
-exclude = ["/web", "/.github"]
+# Keep the published crate lean: the demo page, CI and test fixtures live in the
+# repo, not the crate.
+exclude = ["/web", "/.github", "/testdata"]
 
 [features]
 # The `anyd` command-line tool. Off by default so the library stays

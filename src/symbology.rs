@@ -250,6 +250,7 @@ impl Symbology {
                 | DataMatrix
                 | MaxiCode
                 | Pdf417
+                | MicroPdf417
                 | Code128
                 | Gs1_128
                 | Code39

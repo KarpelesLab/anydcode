@@ -242,6 +242,8 @@ impl Symbology {
         matches!(
             self,
             QrCode
+                | MicroQrCode
+                | RectMicroQrCode
                 | Aztec
                 | DataMatrix
                 | MaxiCode

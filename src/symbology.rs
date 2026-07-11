@@ -243,6 +243,7 @@ impl Symbology {
             self,
             QrCode
                 | DataMatrix
+                | Pdf417
                 | Code128
                 | Gs1_128
                 | Code39

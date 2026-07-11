@@ -18,17 +18,57 @@ for the widest possible symbology coverage while preserving every variation of a
 
 ## Status
 
-The full symbology catalog is **modeled** (`Symbology`), but implementations land
-incrementally. Query `Symbology::is_implemented()` at runtime.
+The full symbology catalog is **modeled** in the `Symbology` enum, but
+implementations land incrementally. Query `Symbology::is_implemented()` at runtime.
+Legend: ✅ done · 🚧 in progress · ⬜ planned.
+
+### 2D — matrix
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| QR Code (v1–40, all EC levels & masks) | ✅ | ✅ (structural) | ⬜ |
-| Micro/rMQR, Aztec, Data Matrix, PDF417, MaxiCode, … | ⬜ | ⬜ | ⬜ |
-| EAN/UPC, Code 128, Code 39/93, ITF, Codabar, DataBar, … | ⬜ | ⬜ | ⬜ |
+| QR Code (v1–40, all EC levels & masks) | ✅ | ✅¹ | ⬜ |
+| Micro QR Code | ⬜ | ⬜ | ⬜ |
+| Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
+| Aztec · Aztec Runes | ⬜ | ⬜ | ⬜ |
+| Data Matrix (ECC 200) | ⬜ | ⬜ | ⬜ |
+| MaxiCode | ⬜ | ⬜ | ⬜ |
+| Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
 
-"Structural" decode consumes an already-sampled module grid; image sampling /
-detection front-ends are the next milestone.
+### 2D — stacked
+
+| Symbology | Encode | Decode | Detect |
+|-----------|:------:|:------:|:------:|
+| PDF417 · MicroPDF417 | ⬜ | ⬜ | ⬜ |
+| Code 16K · Code 49 · Codablock F | ⬜ | ⬜ | ⬜ |
+| GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ⬜ | ⬜ | ⬜ |
+
+### 1D — linear
+
+| Symbology | Encode | Decode | Detect |
+|-----------|:------:|:------:|:------:|
+| EAN-13 · EAN-8 · UPC-A · UPC-E | ⬜ | ⬜ | ⬜ |
+| UPC/EAN add-ons: EAN-2 · EAN-5 | ⬜ | ⬜ | ⬜ |
+| Code 128 · GS1-128 | ⬜ | ⬜ | ⬜ |
+| Code 39 · Code 93 · Code 11 | ⬜ | ⬜ | ⬜ |
+| ITF · Standard / IATA / Matrix 2 of 5 | ⬜ | ⬜ | ⬜ |
+| Codabar · MSI Plessey · Plessey | ⬜ | ⬜ | ⬜ |
+| Telepen · Pharmacode (1- & 2-track) · DX Film Edge | ⬜ | ⬜ | ⬜ |
+| GS1 DataBar Omni (RSS-14) · Limited · Expanded | ⬜ | ⬜ | ⬜ |
+
+### Postal (height-modulated)
+
+| Symbology | Encode | Decode | Detect |
+|-----------|:------:|:------:|:------:|
+| POSTNET · PLANET · Intelligent Mail | ⬜ | ⬜ | ⬜ |
+| Royal Mail (RM4SCC) · Mailmark · Dutch KIX | ⬜ | ⬜ | ⬜ |
+| Australia Post · Japan Post | ⬜ | ⬜ | ⬜ |
+
+¹ QR decode is currently **structural** — it consumes an already-sampled module
+grid. Image sampling / detection front-ends are the next milestone.
+
+> **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
+> DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes
+> called "Coda"/NW-7. These are aliases for the same `Symbology` variants above.
 
 ## Example: QR round-trip
 

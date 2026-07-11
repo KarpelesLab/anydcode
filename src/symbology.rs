@@ -244,6 +244,7 @@ impl Symbology {
             QrCode
                 | Aztec
                 | DataMatrix
+                | MaxiCode
                 | Pdf417
                 | Code128
                 | Gs1_128

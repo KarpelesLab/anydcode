@@ -31,7 +31,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Aztec (compact + full range, all modes) | ✅ | ✅ | ⬜ |
 | Aztec Runes | ⬜ | ⬜ | ⬜ |
 | Micro QR Code · Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
-| MaxiCode · Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
+| MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
+| Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
 
 ### 2D — stacked
 

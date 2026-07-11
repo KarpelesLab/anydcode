@@ -45,13 +45,15 @@ pub mod geometry;
 pub mod image;
 pub mod output;
 pub mod pipeline;
+pub mod render;
 pub mod segment;
 pub mod symbol;
 pub mod symbology;
 pub mod traits;
+pub mod transform;
 
 pub use error::{Error, Result};
-pub use image::GrayFrame;
+pub use image::{GrayFrame, GrayImage};
 pub use segment::{Mode, Segment};
 pub use symbol::{Symbol, SymbolMeta};
 pub use symbology::{Dimension, Symbology};

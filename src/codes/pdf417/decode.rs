@@ -78,6 +78,7 @@ impl Pdf417Decoder {
             rows,
             columns: cols,
             ec_level,
+            variant: super::Pdf417Variant::Standard,
         };
         Ok(Symbol::new(
             Symbology::Pdf417,

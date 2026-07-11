@@ -8,10 +8,10 @@
 //!   ([`Symbology::Postnet`]) and **PLANET** ([`Symbology::Planet`]).
 //! - **4-state** (each bar is *full*, *ascender*, *descender* or *tracker*):
 //!   USPS **Intelligent Mail** ([`Symbology::IntelligentMail`], IMb / OneCode),
-//!   Royal Mail **RM4SCC** ([`Symbology::RoyalMail`]) and Dutch **KIX**
-//!   ([`Symbology::KixCode`]).
-//!
-//! Australia Post, Japan Post and Mailmark remain [`Error::Unsupported`].
+//!   Royal Mail **RM4SCC** ([`Symbology::RoyalMail`]), Dutch **KIX**
+//!   ([`Symbology::KixCode`]), **Australia Post** ([`Symbology::AustraliaPost`]),
+//!   **Japan Post** ([`Symbology::JapanPost`]) and Royal Mail **Mailmark**
+//!   ([`Symbology::Mailmark`]).
 //!
 //! ## Output representation & BitMatrix cell convention
 //!
@@ -53,22 +53,38 @@
 //!   digit *routing code* (an empty segment when there is no routing code).
 //! - RM4SCC/KIX: one [`Segment::alphanumeric`] over the `0-9 A-Z` alphabet (no
 //!   check character; KIX has none by definition).
+//! - Australia Post: a [`Segment::numeric`] of the 8-digit DPID, then an
+//!   optional Customer Information segment ([`Segment::numeric`] for a digit
+//!   field, [`Segment::byte`] for a graphic-set field). The FCC and Reed–Solomon
+//!   bars are recomputed on encode.
+//! - Japan Post: one [`Segment::alphanumeric`] of the upper-cased address string
+//!   (`0-9 - A-Z`); the mod-19 check character is recomputed.
+//! - Mailmark: one [`Segment::alphanumeric`] of the canonical (space-padded)
+//!   field string; the Reed–Solomon bars are recomputed.
 //!
 //! [`Symbology::Postnet`]: crate::symbology::Symbology::Postnet
 //! [`Symbology::Planet`]: crate::symbology::Symbology::Planet
 //! [`Symbology::IntelligentMail`]: crate::symbology::Symbology::IntelligentMail
 //! [`Symbology::RoyalMail`]: crate::symbology::Symbology::RoyalMail
 //! [`Symbology::KixCode`]: crate::symbology::Symbology::KixCode
+//! [`Symbology::AustraliaPost`]: crate::symbology::Symbology::AustraliaPost
+//! [`Symbology::JapanPost`]: crate::symbology::Symbology::JapanPost
+//! [`Symbology::Mailmark`]: crate::symbology::Symbology::Mailmark
 //! [`Error::Unsupported`]: crate::error::Error::Unsupported
+//! [`Segment::byte`]: crate::segment::Segment::byte
 //! [`Encoding::Matrix`]: crate::output::Encoding::Matrix
 //! [`LinearPattern`]: crate::output::LinearPattern
 //! [`Segment`]: crate::segment::Segment
 //! [`Segment::numeric`]: crate::segment::Segment::numeric
 //! [`Segment::alphanumeric`]: crate::segment::Segment::alphanumeric
 
+mod auspost;
 mod imb;
+mod japanpost;
+mod mailmark;
 mod postnet;
 mod rm4scc;
+mod rs;
 
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
@@ -139,6 +155,12 @@ pub enum PostalVariant {
     RoyalMail,
     /// Dutch KIX / PostNL (4-state, no checksum or framing bars).
     KixCode,
+    /// Australia Post 4-State Customer Barcode (37 / 52 / 67 bars).
+    AustraliaPost,
+    /// Japan Post 4-State Customer Barcode (67 bars).
+    JapanPost,
+    /// Royal Mail Mailmark 4-state (Barcode C: 66 bars, Barcode L: 78 bars).
+    Mailmark,
 }
 
 impl PostalVariant {
@@ -150,6 +172,9 @@ impl PostalVariant {
             PostalVariant::IntelligentMail => Symbology::IntelligentMail,
             PostalVariant::RoyalMail => Symbology::RoyalMail,
             PostalVariant::KixCode => Symbology::KixCode,
+            PostalVariant::AustraliaPost => Symbology::AustraliaPost,
+            PostalVariant::JapanPost => Symbology::JapanPost,
+            PostalVariant::Mailmark => Symbology::Mailmark,
         }
     }
 
@@ -161,6 +186,9 @@ impl PostalVariant {
             Symbology::IntelligentMail => PostalVariant::IntelligentMail,
             Symbology::RoyalMail => PostalVariant::RoyalMail,
             Symbology::KixCode => PostalVariant::KixCode,
+            Symbology::AustraliaPost => PostalVariant::AustraliaPost,
+            Symbology::JapanPost => PostalVariant::JapanPost,
+            Symbology::Mailmark => PostalVariant::Mailmark,
             _ => return None,
         })
     }
@@ -246,6 +274,61 @@ impl PostalEncoder {
             data.as_bytes().to_vec(),
         ))
     }
+
+    /// Build an Australia Post 4-State symbol from an up-to-8-digit DPID (sorting
+    /// code, zero-padded to 8) and an optional Customer Information field.
+    ///
+    /// The Customer Information may be digits (encoded via the N table) or the
+    /// graphic set `0-9 A-Z a-z space #` (encoded via the C table); the format
+    /// (Standard / Customer 2 / Customer 3) and the FCC are chosen automatically.
+    /// A Customer Information field of purely upper-case letters is inherently
+    /// ambiguous with a digit field and decodes back as numeric.
+    pub fn build_auspost(&self, dpid: &str, custinfo: &str) -> Result<Symbol> {
+        if dpid.len() > 8 || !dpid.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::invalid_data(
+                "Australia Post DPID must be up to 8 digits",
+            ));
+        }
+        let mut padded = vec![b'0'; 8 - dpid.len()];
+        padded.extend_from_slice(dpid.as_bytes());
+        // Validate the whole field by encoding once (also picks the format).
+        auspost::encode(&padded, custinfo.as_bytes())?;
+
+        let mut segments = vec![Segment::numeric(padded)];
+        if !custinfo.is_empty() {
+            let seg = if custinfo.bytes().all(|b| b.is_ascii_digit()) {
+                Segment::numeric(custinfo.as_bytes().to_vec())
+            } else {
+                Segment::byte(custinfo.as_bytes().to_vec())
+            };
+            segments.push(seg);
+        }
+        Ok(Symbol::new(
+            Symbology::AustraliaPost,
+            segments,
+            SymbolMeta::Postal(PostalMeta::new(PostalVariant::AustraliaPost)),
+        ))
+    }
+
+    /// Build a Japan Post 4-State symbol from an address string over digits,
+    /// `-` and `A-Z`. The mod-19 check character is computed on encode.
+    pub fn build_japanpost(&self, data: &str) -> Result<Symbol> {
+        japanpost::validate(data.as_bytes())?;
+        Ok(alnum_symbol(
+            PostalVariant::JapanPost,
+            data.as_bytes().to_vec(),
+        ))
+    }
+
+    /// Build a Royal Mail Mailmark 4-State symbol (Barcode C or L) from its field
+    /// string (14–26 characters of alphanumerics and space; space-padded to the
+    /// canonical 22 or 26). The Reed–Solomon bars are computed on encode.
+    pub fn build_mailmark(&self, data: &str) -> Result<Symbol> {
+        let canonical = mailmark::canonical(data.as_bytes())?;
+        // Validate the fields by encoding once.
+        mailmark::encode(&canonical)?;
+        Ok(alnum_symbol(PostalVariant::Mailmark, canonical))
+    }
 }
 
 impl Encode for PostalEncoder {
@@ -271,6 +354,12 @@ impl Encode for PostalEncoder {
             }
             PostalVariant::RoyalMail => rm4scc::encode(false, &alnum_data(symbol)?)?,
             PostalVariant::KixCode => rm4scc::encode(true, &alnum_data(symbol)?)?,
+            PostalVariant::AustraliaPost => {
+                let (dpid, custinfo) = auspost::fields(&symbol.segments)?;
+                auspost::encode(&dpid, &custinfo)?
+            }
+            PostalVariant::JapanPost => japanpost::encode(&alnum_data(symbol)?)?,
+            PostalVariant::Mailmark => mailmark::encode(&alnum_data(symbol)?)?,
         };
         Ok(Encoding::Matrix(bars_to_matrix(&bars)))
     }
@@ -307,6 +396,28 @@ impl Decode for PostalDecoder {
             // Only the IMb uses exactly 65 bars.
             let (variant, segments) = imb::decode(&bars)?;
             return Ok(build_symbol(variant, segments));
+        }
+        // Specific 4-state codes are tried before the generic RM4SCC/KIX layouts:
+        // they share bar counts (Australia Post 52 with KIX; Mailmark 66/78 with
+        // RM4SCC; Australia Post and Japan Post both use 67) but each validates
+        // its own framing and Reed–Solomon / checksum, so a mismatch falls
+        // through to the next candidate.
+        if four_state {
+            if matches!(n, 37 | 52 | 67)
+                && let Ok((variant, segments)) = auspost::decode(&bars)
+            {
+                return Ok(build_symbol(variant, segments));
+            }
+            if n == 67
+                && let Ok((variant, data)) = japanpost::decode(&bars)
+            {
+                return Ok(build_symbol(variant, vec![Segment::alphanumeric(data)]));
+            }
+            if matches!(n, 66 | 78)
+                && let Ok((variant, data)) = mailmark::decode(&bars)
+            {
+                return Ok(build_symbol(variant, vec![Segment::alphanumeric(data)]));
+            }
         }
         if !four_state && n >= 7 && (n - 2) % 5 == 0 {
             // POSTNET / PLANET: 2-state, tall framing bars, groups of five.

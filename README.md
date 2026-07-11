@@ -26,19 +26,18 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| QR Code (v1–40, all EC levels & masks) | ✅ | ✅¹ | ⬜ |
-| Micro QR Code | ⬜ | ⬜ | ⬜ |
-| Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
-| Aztec · Aztec Runes | ⬜ | ⬜ | ⬜ |
-| Data Matrix (ECC 200) | ⬜ | ⬜ | ⬜ |
-| MaxiCode | ⬜ | ⬜ | ⬜ |
-| Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
+| QR Code (v1–40, all EC levels & masks) | ✅ | ✅ | ✅¹ |
+| Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ⬜ |
+| Aztec · Aztec Runes | 🚧 | 🚧 | ⬜ |
+| Micro QR Code · Rectangular Micro QR (rMQR) | ⬜ | ⬜ | ⬜ |
+| MaxiCode · Han Xin · Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
 
 ### 2D — stacked
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| PDF417 · MicroPDF417 | ⬜ | ⬜ | ⬜ |
+| PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ⬜ |
+| MicroPDF417 | ⬜ | ⬜ | ⬜ |
 | Code 16K · Code 49 · Codablock F | ⬜ | ⬜ | ⬜ |
 | GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ⬜ | ⬜ | ⬜ |
 
@@ -46,14 +45,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| EAN-13 · EAN-8 · UPC-A · UPC-E | ⬜ | ⬜ | ⬜ |
-| UPC/EAN add-ons: EAN-2 · EAN-5 | ⬜ | ⬜ | ⬜ |
-| Code 128 · GS1-128 | ⬜ | ⬜ | ⬜ |
-| Code 39 · Code 93 · Code 11 | ⬜ | ⬜ | ⬜ |
-| ITF · Standard / IATA / Matrix 2 of 5 | ⬜ | ⬜ | ⬜ |
-| Codabar · MSI Plessey · Plessey | ⬜ | ⬜ | ⬜ |
-| Telepen · Pharmacode (1- & 2-track) · DX Film Edge | ⬜ | ⬜ | ⬜ |
-| GS1 DataBar Omni (RSS-14) · Limited · Expanded | ⬜ | ⬜ | ⬜ |
+| EAN-13 · EAN-8 · UPC-A · UPC-E | ✅ | ✅ | ✅² |
+| UPC/EAN add-ons: EAN-2 · EAN-5 | ✅ | ✅ | ✅² |
+| Code 128 · GS1-128 | ✅ | ✅ | ✅² |
+| Code 39 · Code 93 · Code 11 | ✅ | ✅ | ✅² |
+| ITF · Standard / IATA / Matrix 2 of 5 | ✅ | ✅ | ✅² |
+| Codabar · MSI Plessey · Plessey | ✅ | ✅ | ✅² |
+| Telepen | ✅ | ✅ | ✅² |
+| Pharmacode (1- & 2-track) | ✅ | ✅ | ⬜ |
+| GS1 DataBar Omni (RSS-14) · Limited | ✅ | ✅ | ⬜ |
+| GS1 DataBar Expanded · DX Film Edge | ⬜ | ⬜ | ⬜ |
 
 ### Postal (height-modulated)
 
@@ -63,8 +64,16 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Royal Mail (RM4SCC) · Mailmark · Dutch KIX | ⬜ | ⬜ | ⬜ |
 | Australia Post · Japan Post | ⬜ | ⬜ | ⬜ |
 
-¹ QR decode is currently **structural** — it consumes an already-sampled module
-grid. Image sampling / detection front-ends are the next milestone.
+¹ QR ships a full image sampler: Otsu binarization → finder-pattern detection →
+perspective recovery (via the bottom-right alignment pattern) → sub-pixel grid
+sampling → decode. Robust to any-angle rotation, moderate tilt, blur and noise
+(envelope documented in `tests/harness_image.rs`).
+
+² 1D detection is the shared **`scan1d`** luminance front-end (edge detection →
+run-length → normalized `LinearPattern`), feeding each symbology's decoder. The
+end-to-end pixel→symbol path is verified for Code 128, Code 39 and EAN-13 in
+`tests/scan1d_pipeline.rs`; it applies to any standard bar/space linear code.
+DataBar (finder-pattern based) and Pharmacode need dedicated samplers.
 
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes
@@ -94,14 +103,26 @@ Symbol  ─── the lossless currency: segments + symbology-specific meta
   ├─ Encode ──▶ Encoding (BitMatrix for 2D, LinearPattern for 1D)
   └─ Decode ◀── Encoding
 
+Image pipeline (pixels → symbol):
+  GrayFrame ─▶ [ imgproc: binarize · homography · grid-sample ]  ─▶ BitMatrix ─▶ Decode   (2D)
+  GrayFrame ─▶ [ scan1d: edge-detect · run-length · quantize   ]  ─▶ LinearPattern ─▶ Decode (1D)
+
 Live video:  GrayFrame ──▶ Detect ──▶ Candidate ──▶ Analyze ──▶ Symbol
                               ▲                          │
                               └────── Hints ◀────────────┘  (skip known codes)
 ```
 
-Correctness for QR is anchored to the ISO/IEC 18004 worked example (the numeric
-`"01234567"` V1-M codewords and EC bytes are asserted in the test suite), plus
-exhaustive round-trip tests across modes, versions and EC levels.
+Supporting modules: **`imgproc`** (Otsu/adaptive binarization, connected components,
+4-point homography, sub-pixel grid sampling — the 2D sampler toolkit), **`scan1d`**
+(generic 1D luminance front-end), **`render`** (Encoding → grayscale) and
+**`transform`** (rotation/perspective/blur/noise) for the test harness.
+
+Correctness is anchored to independent reference vectors, not self-consistency: the
+ISO/IEC 18004 QR example, the ISO/IEC 16022 Data Matrix example, ISO/IEC 15438 +
+ZXing vectors for PDF417, BWIPP-rendered patterns for DataBar, and documented
+check-digit/pattern references for the 1D codes — plus exhaustive encode→decode→
+re-encode identity tests, and full image-pipeline tests (encode → render → transform
+→ sample → decode) for QR and the 1D front-end.
 
 ## License
 

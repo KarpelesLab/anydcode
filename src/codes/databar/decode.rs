@@ -33,12 +33,8 @@ impl Decode for DataBarDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
             Encoding::Linear(p) => p,
-            // Stacked DataBar (a matrix) is not implemented.
-            Encoding::Matrix(_) => {
-                return Err(Error::Unsupported {
-                    what: "GS1 DataBar stacked decoding",
-                });
-            }
+            // Stacked DataBar variants are matrices; the stacked module decodes them.
+            Encoding::Matrix(m) => return super::stacked::decode(m),
         };
         let widths = run_lengths(&pattern.modules)?;
         match widths.len() {
@@ -134,7 +130,7 @@ fn match_omn_finder(pat: &[i32; 5]) -> Option<usize> {
         .position(|f| f.iter().zip(pat).all(|(&a, &b)| a as i32 == b))
 }
 
-fn decode_omni(tw: &[i32]) -> Result<Symbol> {
+pub(super) fn decode_omni(tw: &[i32]) -> Result<Symbol> {
     // Reconstruct the four data characters (some stored reversed) and finders.
     let mut dw = [[0i32; 8]; 4];
     for i in 0..8 {

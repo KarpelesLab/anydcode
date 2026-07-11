@@ -255,7 +255,12 @@ fn digit_or_fnc1(c: u8) -> u32 {
 
 /// Build the fully padded binary string for a reduced element string. Its length
 /// is a multiple of 12 (one 12-bit symbol character per group).
-fn build_binary(reduced: &[u8]) -> Result<Vec<bool>> {
+///
+/// `characters_per_row` is 0 for the linear symbol; for Expanded Stacked it is the
+/// number of symbol characters per row (twice the column-pair count), which triggers
+/// the ISO/IEC 24724:2011 §7.2.8 rule that pads a would-be single-character last row
+/// out to a full column pair.
+fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> {
     let mut bits: Vec<bool> = Vec::new();
     bits.push(false); // linkage flag: standalone (non-composite)
 
@@ -302,7 +307,7 @@ fn build_binary(reduced: &[u8]) -> Result<Vec<bool>> {
         (GfMode::Numeric, None)
     };
 
-    let mut symbol_characters = sym_chars_for(bits.len());
+    let mut symbol_characters = finalize_sym_chars(bits.len(), characters_per_row);
     let mut remainder = 12 * (symbol_characters - 1) - bits.len();
 
     if let Some(ld) = last_digit {
@@ -312,7 +317,7 @@ fn build_binary(reduced: &[u8]) -> Result<Vec<bool>> {
         } else {
             push_bits(&mut bits, (ld - b'0') as u32 * 11 + 10 + 8, 7);
         }
-        symbol_characters = sym_chars_for(bits.len());
+        symbol_characters = finalize_sym_chars(bits.len(), characters_per_row);
         remainder = 12 * (symbol_characters - 1) - bits.len();
     }
 
@@ -343,10 +348,21 @@ fn build_binary(reduced: &[u8]) -> Result<Vec<bool>> {
 }
 
 /// Number of symbol characters (data + check) holding `bp` bits after padding to a
-/// 12-bit boundary, clamped to the minimum of 4.
+/// 12-bit boundary, before the minimum-of-4 clamp.
 fn sym_chars_for(bp: usize) -> usize {
     let remainder = (12 - bp % 12) % 12;
-    ((bp + remainder) / 12 + 1).max(4)
+    (bp + remainder) / 12 + 1
+}
+
+/// The final symbol-character count for `bp` bits: the raw count, then the Expanded
+/// Stacked column-pair padding (ISO/IEC 24724:2011 §7.2.8) when `characters_per_row`
+/// is non-zero, then the minimum of 4 (§7.2.5.5).
+fn finalize_sym_chars(bp: usize, characters_per_row: usize) -> usize {
+    let mut sc = sym_chars_for(bp);
+    if characters_per_row != 0 && sc % characters_per_row == 1 {
+        sc += 1;
+    }
+    sc.max(4)
 }
 
 /// Parse 3 ASCII digits into a value 0..=999.
@@ -411,12 +427,28 @@ fn checksum(char_ws: &[[i32; 8]]) -> i32 {
     sum
 }
 
-/// Assemble the full element-width sequence for a reduced element string.
-pub(super) fn element_widths(reduced: &[u8]) -> Result<Vec<i32>> {
+/// The core element-width sequence of a reduced element string, together with the
+/// derived symbol dimensions. The four guard elements (the first two and last two
+/// slots of the `pattern_width` array) are left `0`; [`element_widths`] sets them for
+/// the linear symbol, while the stacked builder places its own per-row guards.
+pub(super) struct ExpElements {
+    /// The `pattern_width` element widths (guard slots zeroed).
+    pub elements: Vec<i32>,
+    /// Number of data characters (excludes the check character).
+    pub data_chars: usize,
+    /// Number of codeblocks (`codeblocks = ceil(symbol_chars / 2)`).
+    pub codeblocks: usize,
+    /// Total element count of the linear layout.
+    pub pattern_width: usize,
+}
+
+/// Assemble the core element array (guards zeroed) for a reduced element string,
+/// applying the Expanded Stacked column-pair padding when `characters_per_row != 0`.
+pub(super) fn expanded_elements(reduced: &[u8], characters_per_row: usize) -> Result<ExpElements> {
     if reduced.is_empty() {
         return Err(Error::invalid_data("DataBar Expanded payload is empty"));
     }
-    let bits = build_binary(reduced)?;
+    let bits = build_binary(reduced, characters_per_row)?;
     let data_chars = bits.len() / 12;
 
     let mut char_ws: Vec<[i32; 8]> = Vec::with_capacity(data_chars);
@@ -464,12 +496,27 @@ pub(super) fn element_widths(reduced: &[u8]) -> Result<Vec<i32>> {
         }
         i += 2;
     }
+    Ok(ExpElements {
+        elements: el,
+        data_chars,
+        codeblocks,
+        pattern_width,
+    })
+}
+
+/// Assemble the full linear element-width sequence for a reduced element string.
+pub(super) fn element_widths(reduced: &[u8]) -> Result<Vec<i32>> {
+    let ExpElements {
+        mut elements,
+        pattern_width,
+        ..
+    } = expanded_elements(reduced, 0)?;
     // Guards.
-    el[0] = 1;
-    el[1] = 1;
-    el[pattern_width - 2] = 1;
-    el[pattern_width - 1] = 1;
-    Ok(el)
+    elements[0] = 1;
+    elements[1] = 1;
+    elements[pattern_width - 2] = 1;
+    elements[pattern_width - 1] = 1;
+    Ok(elements)
 }
 
 /// Encode a DataBar Expanded symbol into its linear module pattern.
@@ -480,7 +527,7 @@ pub(super) fn encode(symbol: &Symbol) -> Result<Encoding> {
 }
 
 /// Concatenate the reduced element string from a symbol's data segments.
-fn extract_reduced(segments: &[Segment]) -> Result<Vec<u8>> {
+pub(super) fn extract_reduced(segments: &[Segment]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     for seg in segments {
         match seg.mode {

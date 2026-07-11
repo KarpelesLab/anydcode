@@ -61,6 +61,51 @@ impl DataBarEncoder {
         ))
     }
 
+    /// Build a GS1 DataBar Stacked symbol (the two-row form of DataBar-14) from a
+    /// GTIN (13 or 14 digits). The payload is the canonical 14-digit GTIN.
+    pub fn build_stacked(&self, gtin: &[u8]) -> Result<Symbol> {
+        let canonical = normalize_gtin(gtin, DataBarVariant::Stacked)?;
+        Ok(Symbol::new(
+            Symbology::DataBarStacked,
+            vec![Segment::numeric(canonical.to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Stacked)),
+        ))
+    }
+
+    /// Build a GS1 DataBar Stacked Omnidirectional symbol from a GTIN (13 or 14
+    /// digits). The payload is the canonical 14-digit GTIN.
+    pub fn build_stacked_omni(&self, gtin: &[u8]) -> Result<Symbol> {
+        let canonical = normalize_gtin(gtin, DataBarVariant::StackedOmni)?;
+        Ok(Symbol::new(
+            Symbology::DataBarStackedOmni,
+            vec![Segment::numeric(canonical.to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::StackedOmni)),
+        ))
+    }
+
+    /// Build a GS1 DataBar Expanded Stacked symbol from a reduced GS1 element string,
+    /// placing `columns_per_row` column pairs (codeblocks) on each stacked row.
+    ///
+    /// `columns_per_row` must be in `1..=11` (ISO/IEC 24724:2011 §7.2.8); the common
+    /// default is 2. See [`DataBarEncoder::build_expanded`] for the payload format.
+    pub fn build_expanded_stacked(&self, gs1: &[u8], columns_per_row: usize) -> Result<Symbol> {
+        if !(1..=11).contains(&columns_per_row) {
+            return Err(Error::invalid_parameter(
+                "DataBar Expanded Stacked columns_per_row must be in 1..=11",
+            ));
+        }
+        // Validate up front by attempting the stacked encodation, and canonicalise
+        // the column count to the number actually placed on the first row: a symbol
+        // with fewer codeblocks than requested columns is a single row whose module
+        // matrix (and therefore the decoded metadata) cannot distinguish the two.
+        let effective = super::stacked::effective_columns(gs1, columns_per_row)?;
+        Ok(Symbol::new(
+            Symbology::DataBarExpandedStacked,
+            vec![Segment::byte(gs1.to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::expanded_stacked(effective)),
+        ))
+    }
+
     /// Build a GS1 DataBar Expanded symbol from a reduced GS1 element string.
     ///
     /// `gs1` is the Application Identifier data in *reduced* form: AI numbers and
@@ -97,23 +142,44 @@ impl Encode for DataBarEncoder {
                 if matches!(
                     symbol.meta,
                     SymbolMeta::DataBar(DataBarMeta {
-                        variant: DataBarVariant::Expanded
+                        variant: DataBarVariant::Expanded,
+                        ..
                     })
                 ) =>
             {
                 super::expanded::encode(symbol)
             }
+            Symbology::DataBarStacked if is_variant(symbol, DataBarVariant::Stacked) => {
+                let val = gtin_value(symbol, DataBarVariant::Stacked)?;
+                Ok(super::stacked::encode_stacked(&omn_total_widths(val)))
+            }
+            Symbology::DataBarStackedOmni if is_variant(symbol, DataBarVariant::StackedOmni) => {
+                let val = gtin_value(symbol, DataBarVariant::StackedOmni)?;
+                Ok(super::stacked::encode_stacked_omni(&omn_total_widths(val)))
+            }
+            Symbology::DataBarExpandedStacked
+                if is_variant(symbol, DataBarVariant::ExpandedStacked) =>
+            {
+                super::stacked::encode_expanded_stacked(symbol)
+            }
+            // A DataBar symbology tagged with a metadata variant that does not match
+            // it is a malformed/unsupported combination.
             Symbology::DataBarExpanded
             | Symbology::DataBarStacked
             | Symbology::DataBarStackedOmni
             | Symbology::DataBarExpandedStacked => Err(Error::Unsupported {
-                what: "GS1 DataBar stacked encoding, or Expanded without Expanded metadata",
+                what: "GS1 DataBar symbology without matching variant metadata",
             }),
             _ => Err(Error::invalid_parameter(
                 "DataBarEncoder given a non-DataBar symbol",
             )),
         }
     }
+}
+
+/// True if the symbol carries DataBar metadata of the given variant.
+fn is_variant(symbol: &Symbol, variant: DataBarVariant) -> bool {
+    matches!(symbol.meta, SymbolMeta::DataBar(DataBarMeta { variant: v, .. }) if v == variant)
 }
 
 /// Expand an element-width sequence into modules, starting with a light element
@@ -296,6 +362,18 @@ pub(super) fn omn_total_widths(val: u64) -> [i32; 46] {
         tw[i + 31] = OMN_FINDER[c_right][4 - i] as i32;
     }
     tw
+}
+
+/// The right finder-pattern index (`c_right`, 0..=8) encoded in an Omnidirectional
+/// element-width sequence. Used by the Stacked Omnidirectional separator, whose
+/// finder-value-3 special case (ISO/IEC 24724:2011 §5.3.2.2) applies when it is 3.
+pub(super) fn omn_right_finder_index(tw: &[i32; 46]) -> usize {
+    let mut finder_right = [tw[31], tw[32], tw[33], tw[34], tw[35]];
+    finder_right.reverse();
+    OMN_FINDER
+        .iter()
+        .position(|f| f.iter().zip(&finder_right).all(|(&a, &b)| a as i32 == b))
+        .unwrap_or(0)
 }
 
 // ======== Limited ========

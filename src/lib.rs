@@ -43,6 +43,7 @@ pub mod codes;
 pub mod error;
 pub mod geometry;
 pub mod image;
+pub mod imgproc;
 pub mod output;
 pub mod pipeline;
 pub mod segment;

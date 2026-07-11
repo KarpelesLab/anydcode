@@ -38,7 +38,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
-| PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ⬜ |
+| PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ✅⁴ |
 | MicroPDF417 | ⬜ | ⬜ | ⬜ |
 | Code 16K · Code 49 · Codablock F | ⬜ | ⬜ | ⬜ |
 | GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ⬜ | ⬜ | ⬜ |
@@ -82,6 +82,11 @@ DataBar (finder-pattern based) and Pharmacode need dedicated samplers.
 sampling, with symbol size and grid chirality confirmed by Reed–Solomon. Robust to
 any-angle rotation, scale, blur/noise and (size-graded) tilt; envelope in
 `tests/datamatrix_image.rs`.
+
+⁴ PDF417 (finder-less) is located by its start/stop guard columns → RANSAC edge fit →
+affine grid sampling → RS-corrected decode. Handles upright, rotation ≤±10°, scale,
+blur and noise; perspective keystoning is out of scope (no interior anchor). Envelope
+in `tests/pdf417_image.rs`.
 
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes

@@ -45,6 +45,7 @@ pub mod geometry;
 pub mod image;
 pub mod output;
 pub mod pipeline;
+pub mod scan1d;
 pub mod segment;
 pub mod symbol;
 pub mod symbology;

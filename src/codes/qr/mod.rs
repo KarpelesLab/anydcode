@@ -14,10 +14,12 @@ mod decode;
 mod encode;
 pub mod gf;
 mod matrix;
+mod sample;
 mod tables;
 
 pub use decode::QrDecoder;
 pub use encode::QrEncoder;
+pub use sample::{QrScanner, sample_grid, scan};
 
 /// QR error-correction level, in ascending order of recovery capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

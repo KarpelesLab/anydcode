@@ -37,6 +37,7 @@ impl AztecEncoder {
         let meta = AztecMeta {
             compact,
             layers: layers as u8,
+            rune: false,
         };
         Ok(Symbol::new(
             Symbology::Aztec,
@@ -49,14 +50,33 @@ impl AztecEncoder {
     pub fn build_text(&self, text: &str) -> Result<Symbol> {
         self.build(vec![Segment::byte(text.as_bytes().to_vec())])
     }
+
+    /// Build the [`Symbol`] for an Aztec Rune encoding the single byte `value`
+    /// (ISO/IEC 24778 Annex A). The payload is the one byte; the matrix is a fixed
+    /// 11×11 grid.
+    pub fn build_rune(&self, value: u8) -> Symbol {
+        super::rune::rune_symbol(value)
+    }
 }
 
 impl Encode for AztecEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
-        if symbol.symbology != Symbology::Aztec {
-            return Err(Error::invalid_parameter(
-                "AztecEncoder given a non-Aztec symbol",
-            ));
+        match symbol.symbology {
+            Symbology::Aztec => {}
+            Symbology::AztecRunes => {
+                let data = flatten(&symbol.segments)?;
+                let [value] = data[..] else {
+                    return Err(Error::invalid_parameter(
+                        "Aztec Rune payload must be a single byte",
+                    ));
+                };
+                return Ok(Encoding::Matrix(super::rune::render_rune(value)));
+            }
+            _ => {
+                return Err(Error::invalid_parameter(
+                    "AztecEncoder given a non-Aztec symbol",
+                ));
+            }
         }
         let meta = match &symbol.meta {
             SymbolMeta::Aztec(m) => m,

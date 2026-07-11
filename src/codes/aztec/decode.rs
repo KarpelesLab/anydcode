@@ -34,6 +34,12 @@ impl AztecDecoder {
         if m.height() != size {
             return Err(Error::undecodable("Aztec grid is not square"));
         }
+        // An 11×11 grid is an Aztec Rune: a compact finder with no data layers, the
+        // ring around the bullseye carrying a single RS-protected byte.
+        if size == super::rune::RUNE_SIZE {
+            let value = super::rune::decode_rune(m)?;
+            return Ok(super::rune::rune_symbol(value));
+        }
         let (compact, layers) = detect_size(size, m)?;
         let layout = Layout::new(compact, layers);
 
@@ -90,6 +96,7 @@ impl AztecDecoder {
         let meta = AztecMeta {
             compact,
             layers: layers as u8,
+            rune: false,
         };
         Ok(Symbol::new(
             Symbology::Aztec,

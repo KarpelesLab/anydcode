@@ -1,0 +1,19 @@
+[package]
+name = "anydcode"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "From-scratch encoding and decoding of 1D and 2D barcodes with lossless round-trip and live-video detection"
+repository = "https://github.com/KarpelesLab/anydcode"
+authors = ["Karpelès Lab Inc."]
+keywords = ["barcode", "qrcode", "decode", "encode", "scanner"]
+categories = ["encoding", "multimedia::images"]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = "warn"
+
+[dev-dependencies]

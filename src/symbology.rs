@@ -247,6 +247,7 @@ impl Symbology {
                 | Aztec
                 | AztecRunes
                 | HanXin
+                | DotCode
                 | DataMatrix
                 | MaxiCode
                 | Pdf417

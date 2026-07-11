@@ -38,7 +38,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ⬜ |
 | MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
 | Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
-| Grid Matrix · DotCode | ⬜ | ⬜ | ⬜ |
+| DotCode | ✅ | ✅ | ⬜ |
+| Grid Matrix | ⬜ | ⬜ | ⬜ |
 
 ### 2D — stacked
 

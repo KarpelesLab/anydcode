@@ -248,6 +248,7 @@ impl Symbology {
                 | AztecRunes
                 | HanXin
                 | DotCode
+                | GridMatrix
                 | DataMatrix
                 | MaxiCode
                 | Pdf417
@@ -281,6 +282,9 @@ impl Symbology {
                 | IntelligentMail
                 | RoyalMail
                 | KixCode
+                | Mailmark
+                | AustraliaPost
+                | JapanPost
                 | DxFilmEdge
         )
     }

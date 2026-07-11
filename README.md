@@ -38,8 +38,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ⬜ |
 | MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
 | Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
-| DotCode | ✅ | ✅ | ⬜ |
-| Grid Matrix | ⬜ | ⬜ | ⬜ |
+| DotCode (GF(113) RS) | ✅ | ✅ | ⬜ |
+| Grid Matrix (all 13 versions) | ✅ | ✅ | ⬜ |
 
 ### 2D — stacked
 
@@ -71,7 +71,8 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 |-----------|:------:|:------:|:------:|
 | POSTNET · PLANET · Intelligent Mail (IMb) | ✅ | ✅ | ⬜ |
 | Royal Mail (RM4SCC) · Dutch KIX | ✅ | ✅ | ⬜ |
-| Mailmark · Australia Post · Japan Post | ⬜ | ⬜ | ⬜ |
+| Royal Mail Mailmark (Barcode C & L) | ✅ | ✅ | ⬜ |
+| Australia Post 4-State · Japan Post 4-State | ✅ | ✅ | ⬜ |
 
 ¹ QR ships a full image sampler: Otsu binarization → finder-pattern detection →
 perspective recovery (via the bottom-right alignment pattern) → sub-pixel grid

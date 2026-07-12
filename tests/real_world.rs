@@ -386,3 +386,39 @@ fn real_scene_locate_then_decode_ean() {
         "wrong payload from the located barcode"
     );
 }
+
+/// Real camera photo of an EAN-13 on a *curved, glossy gold bottle* — a 256×96 crop with
+/// module pitch ≈ 2.3 px, optical blur and mild cylinder curvature. The hard-quantized
+/// [`anyd::scan1d::scan_lines`] path cannot read it: blur merges the single-module start,
+/// centre and end guards, and different scanlines corrupt different modules, so no
+/// integer-module grid matches. The width-ratio edge path ([`anyd::codes::ean::scan`])
+/// does: it classifies each digit from its four element widths normalized to that digit's
+/// own local 7-module width (tolerating the curvature's varying pitch) off the fine
+/// peak-based edges, then votes across every scanline. This is the regression guarding
+/// that robust real-capture 1D decode.
+#[cfg(feature = "cli")]
+#[test]
+fn real_scene_curved_ean_edge_decode() {
+    use anyd::GrayFrame;
+    use anyd::scan1d::ScanOptions;
+
+    let bytes = std::fs::read("testdata/real_scene_ean_curved.png").expect("read fixture");
+    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma: Vec<u8> = rgba
+        .data
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+        .collect();
+    let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
+
+    // The full scan1d -> EAN edge path must recover the GTIN off this real capture.
+    let sym = anyd::codes::ean::scan(&frame, &ScanOptions::default())
+        .expect("curved bottle EAN-13 must decode via the width-ratio edge path");
+    assert_eq!(
+        sym.text().as_deref(),
+        Some("4901085663356"),
+        "wrong payload from the curved-bottle capture"
+    );
+    assert_eq!(sym.symbology, anyd::Symbology::Ean13);
+}

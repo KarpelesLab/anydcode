@@ -6,7 +6,10 @@
 //! - `tables`  — L/G/R element patterns, parity tables, guards, check digits and
 //!   the UPC-E ⟷ UPC-A expansion.
 //! - `encode`  — [`Symbol`] → [`LinearPattern`].
-//! - `decode`  — [`LinearPattern`] → [`Symbol`].
+//! - `decode`  — [`LinearPattern`] → [`Symbol`] (structural, from a clean module grid).
+//! - `edge`    — [`Symbol`] from per-scanline sub-pixel run *widths* ([`scan`],
+//!   [`decode_edges`]), the robust path for curved, blurred camera captures where hard
+//!   quantization merges the single-module guards and elements.
 //!
 //! ## Lossless representation
 //!
@@ -39,10 +42,12 @@
 //! [`Symbology::Ean5`]: crate::Symbology::Ean5
 
 mod decode;
+mod edge;
 mod encode;
 mod tables;
 
 pub use decode::EanDecoder;
+pub use edge::{decode_edges, scan};
 pub use encode::EanEncoder;
 
 /// Which member of the EAN/UPC family a [`crate::Symbol`] represents.

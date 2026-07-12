@@ -437,7 +437,13 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     }
 
     // 1D front-end: scan lines, then try the checksummed linear decoders.
-    let candidates = anyd::scan1d::scan_lines(&frame, &anyd::scan1d::ScanOptions::default());
+    let scan_opts = anyd::scan1d::ScanOptions::default();
+    // EAN/UPC: the width-ratio edge path reads curved, blurred camera captures that the
+    // quantized grid cannot, and votes across scanlines for a robust result.
+    if let Some(s) = anyd::codes::ean::scan(&frame, &scan_opts) {
+        record(s);
+    }
+    let candidates = anyd::scan1d::scan_lines(&frame, &scan_opts);
     let linear: Vec<Box<dyn Decode>> = vec![
         Box::new(anyd::codes::code128::Code128Decoder::new()),
         Box::new(anyd::codes::ean::EanDecoder::new()),

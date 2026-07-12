@@ -97,6 +97,16 @@ impl Default for ScanOptions {
 pub struct LinearCandidate {
     /// The recovered module pattern, ready to feed any linear [`Decode`]r.
     pub pattern: LinearPattern,
+    /// Sub-pixel transition positions along the scan line, in pixels. Consecutive
+    /// pairs bound the bar/space runs (the first run is a bar). Unlike
+    /// [`LinearCandidate::pattern`] these are *not* quantized to an integer module
+    /// grid, so a width-ratio decoder can resolve thin (~1 module) features — guards
+    /// and single-module elements — that hard quantization merges under blur.
+    pub edges: Vec<f32>,
+    /// Leading light-margin width in pixels (the quiet zone before the first bar).
+    pub lead_px: f32,
+    /// Trailing light-margin width in pixels (the quiet zone after the last bar).
+    pub trail_px: f32,
     /// Scanline geometry: a thin band along the scan line spanning the bar region.
     pub location: Location,
     /// Confidence in `[0, 1]`: how cleanly the runs quantized to integer modules,
@@ -109,6 +119,64 @@ pub struct LinearCandidate {
 /// Candidates are sorted by descending [`LinearCandidate::confidence`], deduplicated
 /// by identical module pattern, and truncated to [`ScanOptions::max_candidates`].
 pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
+    let mut found = scan_all(frame, opts);
+    dedupe(&mut found, opts.max_candidates);
+    found
+}
+
+/// Prominence thresholds (as a fraction of the scanline amplitude) used by the fine
+/// peak-based extractor behind [`scan_edges`]. A low value resolves the shallow dips
+/// that heavy blur leaves at thin (~1 module) features; a higher one rejects noise on
+/// cleaner captures. Every level is tried; a width-ratio decoder validates by checksum.
+const FINE_PROMINENCE: &[f32] = &[0.06, 0.11];
+
+/// Scan `frame` and return per-scanline candidates carrying **fine** sub-pixel
+/// [`LinearCandidate::edges`], without the dedup and truncation [`scan_lines`] applies.
+///
+/// Unlike [`scan_lines`] (whose edges come from a hysteresis run finder tuned for the
+/// quantized [`LinearPattern`] path), these edges come from a peak-based extractor that
+/// resolves sub-threshold thin features — the single-module guards and elements that
+/// blur otherwise merges. Two scanlines that hard-quantize to the same pattern can still
+/// carry materially different edges, and blur corrupts *different* thin features on
+/// different lines, so a width-ratio decoder (e.g. EAN/UPC) wants to try every one and
+/// vote. Ordered by descending [`LinearCandidate::confidence`].
+pub fn scan_edges(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
+    let w = frame.width();
+    let h = frame.height();
+    if w < 4 || h == 0 {
+        return Vec::new();
+    }
+    let mut found: Vec<LinearCandidate> = Vec::new();
+    let count = opts.scan_count.max(1);
+    for i in 0..count {
+        let frac = if count == 1 {
+            0.5
+        } else {
+            0.1 + 0.8 * (i as f32) / ((count - 1) as f32)
+        };
+        let cy = frac * (h.saturating_sub(1)) as f32;
+        for &deg in &opts.angles_deg {
+            let tan = (deg.to_radians()).tan();
+            let profile = sample_profile(frame, cy, tan, opts.smooth_radius);
+            for &prom in FINE_PROMINENCE {
+                if let Some(cand) =
+                    analyze_profile_fine(&profile, cy, tan, deg, w, opts.min_runs, prom)
+                {
+                    found.push(cand);
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
+    found
+}
+
+/// Run every scan position/angle and collect the raw candidates (no dedup/sort).
+fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
     let w = frame.width();
     let h = frame.height();
     if w < 4 || h == 0 {
@@ -135,8 +203,6 @@ pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandid
             }
         }
     }
-
-    dedupe(&mut found, opts.max_candidates);
     found
 }
 
@@ -384,6 +450,136 @@ fn local_crossing(profile: &[f32], left: f32, right: f32, lthr: f32, approx: f32
     best.unwrap_or(approx)
 }
 
+/// A three-tap box smooth (radius 1) used to steady peak detection against per-pixel
+/// noise without eroding the ~2 px features the fine extractor must keep.
+fn smooth3(profile: &[f32]) -> Vec<f32> {
+    let n = profile.len();
+    (0..n)
+        .map(|i| {
+            let a = profile[i.saturating_sub(1)];
+            let c = profile[(i + 1).min(n - 1)];
+            (a + profile[i] + c) / 3.0
+        })
+        .collect()
+}
+
+/// Fine run extraction by peak detection. Where [`extract_runs`] uses a hysteresis band
+/// that merges thin low-contrast features, this locates every local extremum, prunes the
+/// ones whose prominence falls below `prom` × amplitude, and places a sub-pixel edge at
+/// the local-midpoint crossing between each surviving adjacent pair. Sub-threshold dips
+/// (a blurred single-module bar between two spaces) therefore survive as their own run,
+/// which is what lets a width-ratio decoder recover guards and single-module elements.
+fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
+    let n = profile.len();
+    if n < 8 {
+        return None;
+    }
+    let (low, high) = levels(profile);
+    let amplitude = high - low;
+    if amplitude < MIN_AMPLITUDE {
+        return None;
+    }
+    let thr = (low + high) / 2.0;
+    // Must begin and end in a light quiet zone.
+    if profile[0] < thr || profile[n - 1] < thr {
+        return None;
+    }
+
+    // Collect extrema (position, value, kind: +1 max / -1 min) from trend reversals,
+    // bracketed by virtual light peaks at both ends so the flat quiet zones (which carry
+    // no detected peak of their own) still bound the first and last edge.
+    let sm = smooth3(profile);
+    let mut ext: Vec<(usize, f32, i8)> = vec![(0, profile[0], 1)];
+    let mut dir: i8 = 0;
+    for i in 1..n {
+        let dv = sm[i] - sm[i - 1];
+        let nd = if dv > 0.0 {
+            1
+        } else if dv < 0.0 {
+            -1
+        } else {
+            dir
+        };
+        if dir != 0 && nd != dir {
+            ext.push((i - 1, sm[i - 1], dir));
+        }
+        dir = nd;
+    }
+    ext.push((n - 1, profile[n - 1], 1));
+
+    // Collapse consecutive same-kind extrema, keeping the more extreme.
+    let mut j = 1;
+    while j < ext.len() {
+        if ext[j].2 == ext[j - 1].2 {
+            let keep_prev = if ext[j].2 > 0 {
+                ext[j - 1].1 >= ext[j].1
+            } else {
+                ext[j - 1].1 <= ext[j].1
+            };
+            ext.remove(if keep_prev { j } else { j - 1 });
+        } else {
+            j += 1;
+        }
+    }
+
+    // Prune the lowest-prominence extremum until every interior swing clears the floor.
+    let min_prom = amplitude * prom;
+    loop {
+        if ext.len() < 3 {
+            return None;
+        }
+        let mut worst: Option<(usize, f32)> = None;
+        for k in 1..ext.len() - 1 {
+            let p = (ext[k].1 - ext[k - 1].1)
+                .abs()
+                .min((ext[k].1 - ext[k + 1].1).abs());
+            if p < min_prom && worst.is_none_or(|(_, wp)| p < wp) {
+                worst = Some((k, p));
+            }
+        }
+        let Some((k, _)) = worst else { break };
+        ext.remove(k);
+        // Removing k leaves its two neighbours the same kind: keep the more extreme.
+        if k < ext.len() && ext[k - 1].2 == ext[k].2 {
+            let keep_prev = if ext[k].2 > 0 {
+                ext[k - 1].1 >= ext[k].1
+            } else {
+                ext[k - 1].1 <= ext[k].1
+            };
+            ext.remove(if keep_prev { k } else { k - 1 });
+        }
+    }
+    // Place a sub-pixel edge at the local-midpoint crossing between each adjacent pair.
+    let mut edges: Vec<f32> = Vec::with_capacity(ext.len().saturating_sub(1));
+    for w in ext.windows(2) {
+        let (p0, v0, _) = w[0];
+        let (p1, v1, _) = w[1];
+        let mid = (v0 + v1) / 2.0;
+        let mut pos = (p0 as f32 + p1 as f32) / 2.0;
+        for i in (p0 + 1)..=p1 {
+            let a = profile[i - 1];
+            let b = profile[i];
+            if (a - mid) * (b - mid) <= 0.0 && (a - b).abs() > 1e-6 {
+                pos = (i - 1) as f32 + (mid - a) / (b - a);
+                break;
+            }
+        }
+        edges.push(pos);
+    }
+    if edges.len() < 2 || !edges.len().is_multiple_of(2) {
+        return None;
+    }
+
+    let lead_px = edges[0];
+    let trail_px = ((n - 1) as f32) - edges[edges.len() - 1];
+    Some(Runs {
+        edges,
+        amplitude,
+        lead_px,
+        trail_px,
+    })
+}
+
 // --- Module quantization ---------------------------------------------------
 
 /// A quantized pattern plus the estimated narrow-module pixel width and a
@@ -474,6 +670,39 @@ fn analyze_profile(
     let location = build_location(&runs, cy, tan, deg, width, q.module_px);
     Some(LinearCandidate {
         pattern: q.pattern,
+        edges: runs.edges,
+        lead_px: runs.lead_px,
+        trail_px: runs.trail_px,
+        location,
+        confidence,
+    })
+}
+
+/// Like [`analyze_profile`] but using the fine peak-based [`extract_runs_fine`] at the
+/// given prominence, so the resulting candidate's [`LinearCandidate::edges`] resolve
+/// thin features. The quantized [`LinearCandidate::pattern`] is still filled (from the
+/// same fine edges) so the candidate remains a drop-in for [`try_decode`].
+fn analyze_profile_fine(
+    profile: &[f32],
+    cy: f32,
+    tan: f32,
+    deg: f32,
+    width: usize,
+    min_runs: usize,
+    prom: f32,
+) -> Option<LinearCandidate> {
+    let runs = extract_runs_fine(profile, prom)?;
+    let q = quantize(&runs, min_runs)?;
+
+    let amp_factor = (runs.amplitude / 128.0).clamp(0.0, 1.0);
+    let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
+
+    let location = build_location(&runs, cy, tan, deg, width, q.module_px);
+    Some(LinearCandidate {
+        pattern: q.pattern,
+        edges: runs.edges,
+        lead_px: runs.lead_px,
+        trail_px: runs.trail_px,
         location,
         confidence,
     })

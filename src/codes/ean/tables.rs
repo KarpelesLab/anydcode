@@ -76,6 +76,31 @@ pub fn match_right(m: &[bool]) -> Option<u8> {
     (0..10u8).find(|&d| m == r_code(d))
 }
 
+/// Run-length the four elements of a 7-module EAN/UPC digit code (always exactly four
+/// runs), as module counts. Used by the edge/width-ratio decoder.
+fn widths7(code: [bool; 7]) -> [u8; 4] {
+    let mut out = [0u8; 4];
+    let mut idx = 0;
+    let mut cur = code[0];
+    for &b in &code {
+        if b == cur {
+            out[idx] += 1;
+        } else {
+            idx += 1;
+            out[idx] = 1;
+            cur = b;
+        }
+    }
+    out
+}
+
+/// Element widths (module counts, summing to 7) of the L-code for digit `d`, ordered
+/// space,bar,space,bar. The G-code widths are these reversed and the R-code widths are
+/// identical (complementing a bit string preserves its run lengths).
+pub fn l_widths(d: u8) -> [u8; 4] {
+    widths7(l_code(d))
+}
+
 // ---- Guard and delineator patterns (`true` = bar) --------------------------
 
 /// Normal start/end guard: `101`.

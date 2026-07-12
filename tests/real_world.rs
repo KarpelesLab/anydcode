@@ -422,3 +422,31 @@ fn real_scene_curved_ean_edge_decode() {
     );
     assert_eq!(sym.symbology, anyd::Symbology::Ean13);
 }
+
+/// A region of the same capture holding only printed text and artwork — no barcode.
+/// The edge decoder is deliberately permissive per scanline (it must recover blurred
+/// codes), so individual lines occasionally satisfy a checksum by chance, most often as
+/// UPC-E. The cross-scanline consensus floor in [`anyd::codes::ean::scan`] must reject
+/// those: a live camera pointed at packaging would otherwise flash phantom barcodes over
+/// plain text. This pins that guard against the real texture that first exposed it.
+#[cfg(feature = "cli")]
+#[test]
+fn real_scene_text_is_not_a_barcode() {
+    use anyd::GrayFrame;
+    use anyd::scan1d::ScanOptions;
+
+    let bytes = std::fs::read("testdata/real_scene_text.png").expect("read fixture");
+    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma: Vec<u8> = rgba
+        .data
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+        .collect();
+    let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
+
+    assert!(
+        anyd::codes::ean::scan(&frame, &ScanOptions::default()).is_none(),
+        "consensus floor must reject stray checksum-passing misreads on plain text"
+    );
+}

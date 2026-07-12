@@ -58,3 +58,7 @@ required-features = ["cli"]
 [[example]]
 name = "scan1ddebug"
 required-features = ["cli"]
+
+[[example]]
+name = "eanvotedebug"
+required-features = ["cli"]

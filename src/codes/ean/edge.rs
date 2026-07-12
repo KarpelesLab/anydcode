@@ -223,11 +223,21 @@ where
     (0..=max_off).step_by(2).find_map(|o| f(&w[o..o + len]))
 }
 
+/// Minimum scanlines that must agree on a value before it is reported. A genuine
+/// barcode is crossed by dozens of clean scanlines; unstructured texture (printed text,
+/// artwork) yields only a stray line or two that happen to slip past a checksum — most
+/// dangerously as UPC-E, whose eight digits are cheap to satisfy by chance.
+const MIN_CONSENSUS_VOTES: usize = 3;
+/// The winning value must additionally out-poll the runner-up by this factor, so a
+/// scanline set split between two readings is treated as unresolved rather than guessed.
+const DOMINANCE: usize = 2;
+
 /// Robustly read an EAN/UPC symbol from a frame by decoding every fine scanline
-/// ([`scan_edges`]) and taking the value that the most scanlines agree on. Consensus
-/// across scanlines is what makes a curved, blurred capture — where each individual line
-/// corrupts different thin features — decode reliably, and it also suppresses the rare
-/// false positive a single noisy line might slip past the checksum.
+/// ([`scan_edges`]) and taking the value the most scanlines agree on — provided that
+/// value clears a consensus floor and clearly out-polls any competitor. Consensus across
+/// scanlines is what makes a curved, blurred capture — where each individual line
+/// corrupts different thin features — decode reliably; the floor and dominance test are
+/// what stop a lone checksum-passing misread on non-barcode texture from being reported.
 pub fn scan(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Option<Symbol> {
     let mut tally: Vec<(String, usize, Symbol)> = Vec::new();
     for cand in scan_edges(frame, opts) {
@@ -243,8 +253,11 @@ pub fn scan(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Option<Symbol> {
             tally.push((key, 1, sym));
         }
     }
-    tally
-        .into_iter()
-        .max_by_key(|(_, n, _)| *n)
-        .map(|(_, _, s)| s)
+    tally.sort_by_key(|(_, n, _)| core::cmp::Reverse(*n));
+    let top = tally.first().map(|(_, n, _)| *n).unwrap_or(0);
+    let runner_up = tally.get(1).map(|(_, n, _)| *n).unwrap_or(0);
+    if top < MIN_CONSENSUS_VOTES || top < DOMINANCE * runner_up {
+        return None;
+    }
+    tally.into_iter().next().map(|(_, _, s)| s)
 }

@@ -614,14 +614,23 @@ document.getElementById('cam-capture').onclick = () => {
   scratch.width = pw; scratch.height = ph;
   const sctx = scratch.getContext('2d', { willReadFrequently: true });
   sctx.drawImage(video, 0, 0, pw, ph);
+  // Composite the HUD exactly as drawn on screen (processed-resolution, so scale 1:1)
+  // so the saved PNG shows what you actually see — the tracked reticles and locks, not
+  // the raw locator hits.
+  const rbox = b => ({ x0: Math.round(b.x0), y0: Math.round(b.y0), x1: Math.round(b.x1), y1: Math.round(b.y1) });
+  renderHUD(sctx, pw, ph, acquiring, lastDecoded, 1, 1, performance.now());
   // Reuse the live pipeline's already-computed state (off-thread) — never re-decode
   // synchronously here, which would freeze the UI on a busy 1080p frame.
   const report = {
     capturedAt: new Date().toISOString(),
     video: { width: vw, height: vh },
     processed: { width: pw, height: ph },
-    locate: liveCands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
-    decode: lastDecoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box || null })),
+    // What the HUD actually draws: candidate tracks that survived the noise filter.
+    tracked: acquiring.map(t => ({ box: rbox(t.box), hits: t.hits })),
+    decode: lastDecoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box ? rbox(r.box) : null })),
+    // Raw locator output for reference (pre display-filter; favours recall, so noisy).
+    rawLocateCount: liveCands.length,
+    rawLocate: liveCands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
     userAgent: navigator.userAgent,
   };
   const n = (window.__capN = (window.__capN || 0) + 1);
@@ -631,7 +640,7 @@ document.getElementById('cam-capture').onclick = () => {
     `captured frame ${pw}×${ph} — ${liveCands.length} located, ${lastDecoded.length} decoded (saved PNG + JSON)`;
 };
 
-let liveCands = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;
+let liveCands = [], acquiring = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;
 function loop(ts) {
   if (!running) { return; }
   requestAnimationFrame(loop);
@@ -688,7 +697,7 @@ function loop(ts) {
   // Ease located-candidate tracks too, and only surface the ones that have persisted
   // past the noise threshold — this is what the acquiring reticles are drawn from.
   for (const t of candTracks) t.box = boxLerp(t.box, t.target, 0.35);
-  const acquiring = candTracks.filter(t => t.hits >= CAND_MIN_HITS);
+  acquiring = candTracks.filter(t => t.hits >= CAND_MIN_HITS);
   document.getElementById('cam-result').textContent =
     lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
 

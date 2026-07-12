@@ -394,6 +394,30 @@ const iou = (a, b) => {
   return uni > 0 ? inter / uni : 0;
 };
 
+// Located candidates favour recall, so each frame reports transient boxes on text,
+// hands and background clutter. Rather than draw every raw hit — which strobes — we
+// track candidates across locate cycles and only surface one once it has been seen in a
+// few consecutive frames (a real object persists; single-frame noise does not).
+let candTracks = []; // { box, target, lastSeen, hits }
+const CAND_MIN_HITS = 3;    // consecutive locate cycles before a candidate is drawn
+const CAND_HOLD_MS = 260;   // drop a track not re-located within this window
+const CAND_IOU = 0.25;      // overlap needed to treat two hits as the same object
+function updateCandTracks(cands, now) {
+  const boxes = cands.map(c => bbox(c.corners));
+  const used = new Set();
+  for (const b of boxes) {
+    let best = -1, bestIou = CAND_IOU;
+    for (let i = 0; i < candTracks.length; i++) {
+      if (used.has(i)) continue;
+      const j = iou(candTracks[i].target, b);
+      if (j > bestIou) { bestIou = j; best = i; }
+    }
+    if (best >= 0) { const t = candTracks[best]; t.target = b; t.lastSeen = now; t.hits++; used.add(best); }
+    else candTracks.push({ box: b, target: b, lastSeen: now, hits: 1 });
+  }
+  candTracks = candTracks.filter(t => now - t.lastSeen <= CAND_HOLD_MS);
+}
+
 // Decoding runs in a background worker (its own wasm instance) so the heavy sampler
 // can never block the UI thread — the live overlay stays smooth even when a scan is
 // slow. The main thread only sends a frame when the worker is free. It reuses the
@@ -539,9 +563,9 @@ function renderHUD(ctx, W, H, cands, decoded, sx, sy, ts) {
   viewportFrame(ctx, W, H);
 
   const dboxes = decoded.filter(r => r.box).map(r => r.box);
-  // acquiring: faint pulsing ticks on located-but-unresolved candidates
+  // acquiring: faint pulsing ticks on persisted located-but-unresolved candidates
   for (const c of cands) {
-    const b = bbox(c.corners);
+    const b = c.box;
     if (dboxes.some(d => boxesOverlap(d, b))) continue;
     const pulse = REDUCED ? 0.22 : 0.14 + 0.12 * (0.5 + 0.5 * Math.sin(ts / 420));
     reticle(ctx, b.x0 * sx, b.y0 * sy, (b.x1 - b.x0) * sx, (b.y1 - b.y0) * sy, HUD.acquire, 5, pulse, 9);
@@ -572,7 +596,7 @@ document.getElementById('cam-btn').onclick = async () => {
   document.getElementById('cam-btn').disabled = true;
   document.getElementById('cam-stop').disabled = false;
   document.getElementById('cam-capture').disabled = false;
-  running = true; workerBusy = false; lastSent = 0; decodedTracks.clear(); requestAnimationFrame(loop);
+  running = true; workerBusy = false; lastSent = 0; decodedTracks.clear(); candTracks = []; requestAnimationFrame(loop);
 };
 document.getElementById('cam-stop').onclick = () => {
   running = false; stream && stream.getTracks().forEach(t => t.stop());
@@ -632,6 +656,7 @@ function loop(ts) {
     });
     lastMs = performance.now() - t0;
     liveScale = [pw, ph];
+    updateCandTracks(liveCands, ts);
     // Track: steer each decoded code toward the located candidate that best overlaps it,
     // so the lock follows the code across camera movement between the sparse re-decodes.
     // A locate match also refreshes the track's liveness — locate only fires on
@@ -660,6 +685,10 @@ function loop(ts) {
   for (const tr of decodedTracks.values()) if (tr.target) tr.box = boxLerp(tr.box, tr.target, 0.3);
   for (const [k, tr] of decodedTracks) if (ts - tr.lastSeen > DECODE_HOLD_MS) decodedTracks.delete(k);
   lastDecoded = [...decodedTracks.values()];
+  // Ease located-candidate tracks too, and only surface the ones that have persisted
+  // past the noise threshold — this is what the acquiring reticles are drawn from.
+  for (const t of candTracks) t.box = boxLerp(t.box, t.target, 0.35);
+  const acquiring = candTracks.filter(t => t.hits >= CAND_MIN_HITS);
   document.getElementById('cam-result').textContent =
     lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
 
@@ -667,9 +696,9 @@ function loop(ts) {
   overlay.width = video.clientWidth; overlay.height = video.clientHeight;
   const octx = overlay.getContext('2d');
   octx.clearRect(0, 0, overlay.width, overlay.height);
-  renderHUD(octx, overlay.width, overlay.height, liveCands, lastDecoded, overlay.width / liveScale[0], overlay.height / liveScale[1], ts);
+  renderHUD(octx, overlay.width, overlay.height, acquiring, lastDecoded, overlay.width / liveScale[0], overlay.height / liveScale[1], ts);
   document.getElementById('cam-stat').innerHTML =
-    `◈ tracking <b>${liveCands.length}</b> · locked <b>${lastDecoded.length}</b> · scan <b>${lastMs.toFixed(1)}ms</b>`;
+    `◈ tracking <b>${acquiring.length}</b> · locked <b>${lastDecoded.length}</b> · scan <b>${lastMs.toFixed(1)}ms</b>`;
 }
 
 // ---- file decode ----

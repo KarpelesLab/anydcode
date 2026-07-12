@@ -46,3 +46,7 @@ harness = false
 [[example]]
 name = "qrdebug"
 required-features = ["cli"]
+
+[[example]]
+name = "degrade"
+required-features = ["cli"]

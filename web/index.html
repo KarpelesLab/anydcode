@@ -100,6 +100,7 @@
     <p class="sub" style="margin-bottom:.5rem">Locates every code's <em>position</em> each frame (no decode), then decodes periodically — the two-stage pipeline a live feed needs.</p>
     <button id="cam-btn">Start camera</button>
     <button id="cam-stop" class="secondary" disabled>Stop</button>
+    <button id="cam-capture" class="secondary" disabled title="Save the exact frame the decoder sees + a JSON of what was detected">Capture frame + data</button>
     <div class="stat hud" id="cam-stat"></div>
     <div class="stage" id="cam-stage" hidden>
       <video id="cam-video" playsinline muted></video>
@@ -431,18 +432,53 @@ function renderHUD(ctx, W, H, cands, decoded, sx, sy, ts) {
 
 document.getElementById('cam-btn').onclick = async () => {
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
   } catch (e) { document.getElementById('cam-stat').textContent = 'Camera error: ' + e.message; return; }
   video.srcObject = stream; await video.play();
   document.getElementById('cam-stage').hidden = false;
   document.getElementById('cam-btn').disabled = true;
   document.getElementById('cam-stop').disabled = false;
+  document.getElementById('cam-capture').disabled = false;
   running = true; requestAnimationFrame(loop);
 };
 document.getElementById('cam-stop').onclick = () => {
   running = false; stream && stream.getTracks().forEach(t => t.stop());
   document.getElementById('cam-btn').disabled = false;
   document.getElementById('cam-stop').disabled = true;
+  document.getElementById('cam-capture').disabled = true;
+};
+
+// Capture the exact frame the decoder sees + a JSON of the detection state, so a
+// missed scan becomes a reproducible bug report (hand both files back).
+document.getElementById('cam-capture').onclick = () => {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw) return;
+  const pw = Math.min(vw, 1920), ph = Math.round(pw * vh / vw);
+  scratch.width = pw; scratch.height = ph;
+  const sctx = scratch.getContext('2d', { willReadFrequently: true });
+  sctx.drawImage(video, 0, 0, pw, ph);
+  const img = sctx.getImageData(0, 0, pw, ph);
+  const frameArea = pw * ph;
+  const cands = locate(img).filter(c => { const b = bbox(c.corners); return (b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * frameArea; });
+  const seen = new Set(), decoded = [];
+  const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); decoded.push({ ...r, box }); } };
+  decode(img).forEach(r => add(r, null));
+  for (const c of cands) { const b = bbox(c.corners); const crop = cropRGBA(img, b.x0 - 16, b.y0 - 16, b.x1 + 16, b.y1 + 16); if (crop) decode(crop).forEach(r => add(r, b)); }
+  const report = {
+    capturedAt: new Date().toISOString(),
+    video: { width: vw, height: vh },
+    processed: { width: pw, height: ph },
+    locate: cands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
+    decode: decoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box || null })),
+    userAgent: navigator.userAgent,
+  };
+  const n = (window.__capN = (window.__capN || 0) + 1);
+  scratch.toBlob(b => dl(`anyd-capture-${n}.png`, b));
+  setTimeout(() => dl(`anyd-capture-${n}.json`, new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })), 300);
+  document.getElementById('cam-result').textContent =
+    `captured frame ${pw}×${ph} — ${cands.length} located, ${decoded.length} decoded (saved PNG + JSON)`;
 };
 
 function loop(ts) {

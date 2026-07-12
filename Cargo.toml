@@ -50,3 +50,7 @@ required-features = ["cli"]
 [[example]]
 name = "degrade"
 required-features = ["cli"]
+
+[[example]]
+name = "locdebug"
+required-features = ["cli"]

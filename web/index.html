@@ -370,6 +370,18 @@ const overlay = document.getElementById('cam-overlay');
 const scratch = document.createElement('canvas');
 let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false;
 
+// Decoded codes persist for a short window after their last confirmation instead of
+// vanishing the instant one frame fails to re-read them. A hand-held camera only
+// re-decodes a given code on a fraction of frames (the crop must be well-framed *and*
+// the decode must succeed), so without this hold the lock strobes on and off. Each
+// track keeps a position-smoothed box so the slate does not jitter frame to frame.
+const decodedTracks = new Map(); // "symbology|text" -> { symbology, text, box, lastSeen }
+const DECODE_HOLD_MS = 1400;
+const boxLerp = (a, b, t = 0.35) => !a ? b : !b ? a : {
+  x0: a.x0 + (b.x0 - a.x0) * t, y0: a.y0 + (b.y0 - a.y0) * t,
+  x1: a.x1 + (b.x1 - a.x1) * t, y1: a.y1 + (b.y1 - a.y1) * t,
+};
+
 // Decoding runs in a background worker (its own wasm instance) so the heavy sampler
 // can never block the UI thread — the live overlay stays smooth even when a scan is
 // slow. The main thread only sends a frame when the worker is free. It reuses the
@@ -397,9 +409,16 @@ self.onmessage = async (e) => {
 `;
 const decodeWorker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
 decodeWorker.onmessage = (e) => {
-  lastDecoded = e.data; workerBusy = false;
-  document.getElementById('cam-result').textContent =
-    lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
+  workerBusy = false;
+  const now = performance.now();
+  // Merge this batch into the persistent tracks: refresh a code that is still visible,
+  // register a newly seen one. Expiry happens in the render loop by DECODE_HOLD_MS.
+  for (const r of e.data) {
+    const key = r.symbology + '|' + r.text;
+    const tr = decodedTracks.get(key);
+    if (tr) { tr.lastSeen = now; if (r.box) tr.box = boxLerp(tr.box, r.box); }
+    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, lastSeen: now });
+  }
 };
 
 function bbox(corners) {
@@ -541,7 +560,7 @@ document.getElementById('cam-btn').onclick = async () => {
   document.getElementById('cam-btn').disabled = true;
   document.getElementById('cam-stop').disabled = false;
   document.getElementById('cam-capture').disabled = false;
-  running = true; workerBusy = false; lastSent = 0; requestAnimationFrame(loop);
+  running = true; workerBusy = false; lastSent = 0; decodedTracks.clear(); requestAnimationFrame(loop);
 };
 document.getElementById('cam-stop').onclick = () => {
   running = false; stream && stream.getTracks().forEach(t => t.stop());
@@ -610,6 +629,13 @@ function loop(ts) {
       decodeWorker.postMessage({ width: pw, height: ph, luma, crops }, [luma.buffer]);
     }
   }
+
+  // Expire held tracks and rebuild the decoded view every frame, so a lock fades only
+  // after the code has truly been gone for DECODE_HOLD_MS — not on a single dropped read.
+  for (const [k, tr] of decodedTracks) if (ts - tr.lastSeen > DECODE_HOLD_MS) decodedTracks.delete(k);
+  lastDecoded = [...decodedTracks.values()];
+  document.getElementById('cam-result').textContent =
+    lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
 
   // HUD every frame (cheap: canvas only) for a smooth reticle/scan animation.
   overlay.width = video.clientWidth; overlay.height = video.clientHeight;

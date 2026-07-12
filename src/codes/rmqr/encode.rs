@@ -6,7 +6,7 @@
 
 use super::matrix::Canvas;
 use super::tables::{char_count_bits, info, mode_value};
-use super::{RmqrEcLevel, RmqrMeta, RmqrSize};
+use super::{RmqrEcLevel, RmqrMeta, RmqrSize, SizeStrategy};
 use crate::codes::qr::gf;
 use crate::error::{Error, Result};
 use crate::output::Encoding;
@@ -26,9 +26,20 @@ impl RmqrEncoder {
     }
 
     /// Build a reproducible [`Symbol`] from `segments` at EC `level`, choosing the
-    /// smallest-area fitting size.
+    /// smallest-area fitting size ([`SizeStrategy::Balanced`]).
     pub fn build(&self, segments: Vec<Segment>, level: RmqrEcLevel) -> Result<Symbol> {
-        let size = choose_size(&segments, level)?;
+        self.build_with(segments, level, SizeStrategy::Balanced)
+    }
+
+    /// Build a reproducible [`Symbol`], choosing the fitting size per `strategy`
+    /// (flat-and-wide, tall-and-narrow, or most-compact).
+    pub fn build_with(
+        &self,
+        segments: Vec<Segment>,
+        level: RmqrEcLevel,
+        strategy: SizeStrategy,
+    ) -> Result<Symbol> {
+        let size = choose_size(&segments, level, strategy)?;
         let meta = RmqrMeta {
             size,
             ec_level: level,
@@ -43,6 +54,20 @@ impl RmqrEncoder {
     /// Convenience: build a symbol from UTF-8 `text` as a single byte segment.
     pub fn build_text(&self, text: &str, level: RmqrEcLevel) -> Result<Symbol> {
         self.build(vec![Segment::byte(text.as_bytes().to_vec())], level)
+    }
+
+    /// Convenience: [`build_with`](Self::build_with) from UTF-8 `text`.
+    pub fn build_text_with(
+        &self,
+        text: &str,
+        level: RmqrEcLevel,
+        strategy: SizeStrategy,
+    ) -> Result<Symbol> {
+        self.build_with(
+            vec![Segment::byte(text.as_bytes().to_vec())],
+            level,
+            strategy,
+        )
     }
 }
 
@@ -186,21 +211,35 @@ fn segments_bit_len(segments: &[Segment], size: RmqrSize) -> Option<usize> {
 }
 
 /// The smallest-area size (at `level`) whose data capacity holds `segments`.
-fn choose_size(segments: &[Segment], level: RmqrEcLevel) -> Result<RmqrSize> {
-    let mut best: Option<(RmqrSize, usize)> = None;
+fn choose_size(
+    segments: &[Segment],
+    level: RmqrEcLevel,
+    strategy: SizeStrategy,
+) -> Result<RmqrSize> {
+    let mut best: Option<RmqrSize> = None;
     for size in RmqrSize::all() {
         let cap = info(size).data_bit_capacity(level);
         if let Some(len) = segments_bit_len(segments, size)
             && len <= cap
+            && best.is_none_or(|b| prefers(size, b, strategy))
         {
-            let area = size.width() * size.height();
-            if best.as_ref().is_none_or(|&(_, a)| area < a) {
-                best = Some((size, area));
-            }
+            best = Some(size);
         }
     }
-    best.map(|(s, _)| s)
-        .ok_or_else(|| Error::capacity("data does not fit any rMQR size at this EC level"))
+    best.ok_or_else(|| Error::capacity("data does not fit any rMQR size at this EC level"))
+}
+
+/// Whether `a` is preferred over the current best `b` under `strategy`. Every
+/// strategy uses smaller area as the tie-breaker so the result stays compact.
+fn prefers(a: RmqrSize, b: RmqrSize, strategy: SizeStrategy) -> bool {
+    let area = |s: RmqrSize| s.width() * s.height();
+    match strategy {
+        SizeStrategy::Balanced => area(a) < area(b),
+        SizeStrategy::MinHeight => (a.height(), area(a)) < (b.height(), area(b)),
+        SizeStrategy::MaxHeight => {
+            a.height() > b.height() || (a.height() == b.height() && area(a) < area(b))
+        }
+    }
 }
 
 /// Build the full interleaved codeword bit stream (data + EC + remainder).

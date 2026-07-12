@@ -79,6 +79,20 @@ pub enum RmqrEcLevel {
     H,
 }
 
+/// How [`RmqrEncoder::build_with`](crate::codes::rmqr::RmqrEncoder::build_with)
+/// chooses among the rMQR sizes that fit the data. rMQR spans flat-and-wide to
+/// tall-and-narrow form factors, so the caller can pick the shape for the space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeStrategy {
+    /// Smallest total module area — the most compact fitting symbol (default).
+    #[default]
+    Balanced,
+    /// Prefer the shortest (flattest, widest) fitting symbol.
+    MinHeight,
+    /// Prefer the tallest (narrowest) fitting symbol.
+    MaxHeight,
+}
+
 /// rMQR-specific parameters needed to re-encode a symbol identically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RmqrMeta {

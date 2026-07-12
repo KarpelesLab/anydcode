@@ -238,3 +238,29 @@ fn wrong_size_matrix_is_undecodable() {
     let m = BitMatrix::new(40, 8, 2);
     assert!(RmqrDecoder::new().decode(&Encoding::Matrix(m)).is_err());
 }
+
+#[test]
+fn size_strategy_picks_shape() {
+    use anyd::codes::rmqr::{RmqrEcLevel, RmqrEncoder, SizeStrategy};
+    use anyd::output::Encoding;
+    use anyd::traits::Encode;
+    let e = RmqrEncoder::new();
+    let dims = |s| {
+        let sym = e
+            .build_text_with("HELLO WORLD 12345", RmqrEcLevel::M, s)
+            .unwrap();
+        match e.encode(&sym).unwrap() {
+            Encoding::Matrix(m) => (m.width(), m.height()),
+            _ => unreachable!(),
+        }
+    };
+    let (_, bh) = dims(SizeStrategy::Balanced);
+    let (_, minh) = dims(SizeStrategy::MinHeight);
+    let (_, maxh) = dims(SizeStrategy::MaxHeight);
+    // min-height must be the shortest, max-height the tallest, all valid rMQR heights.
+    assert!(minh <= bh && bh <= maxh);
+    assert!(minh < maxh, "strategies should differ ({minh} vs {maxh})");
+    for h in [minh, bh, maxh] {
+        assert!([7, 9, 11, 13, 15, 17].contains(&h));
+    }
+}

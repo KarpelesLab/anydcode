@@ -18,7 +18,7 @@
 use crate::GrayFrame;
 use crate::output::Encoding;
 use crate::segment::Segment;
-use crate::traits::{Decode, Encode};
+use crate::traits::Encode;
 
 /// Allocate `len` bytes in wasm memory and return the pointer (caller fills it).
 #[unsafe(no_mangle)]
@@ -100,50 +100,19 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         Err(_) => return export(b"[]".to_vec()),
     };
 
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut push = |sym: crate::Symbol| {
-        let name = sym.symbology.to_string();
-        let text = sym.text().unwrap_or_default();
-        if !out.iter().any(|(n, t)| *n == name && *t == text) {
-            out.push((name, text));
-        }
-    };
-
-    if let Ok(s) = crate::codes::qr::scan(&frame) {
-        push(s);
-    }
-    if let Ok(s) = crate::codes::datamatrix::scan(&frame) {
-        push(s);
-    }
-    if let Some(s) = crate::codes::pdf417::scan(&frame) {
-        push(s);
-    }
-    let candidates = crate::scan1d::scan_lines(&frame, &crate::scan1d::ScanOptions::default());
-    let linear: [Box<dyn Decode>; 6] = [
-        Box::new(crate::codes::code128::Code128Decoder::new()),
-        Box::new(crate::codes::ean::EanDecoder::new()),
-        Box::new(crate::codes::code93::Code93Decoder::new()),
-        Box::new(crate::codes::code39::Code39Decoder::new()),
-        Box::new(crate::codes::itf::ItfDecoder::new()),
-        Box::new(crate::codes::codabar::CodabarDecoder::new()),
-    ];
-    for cand in &candidates {
-        for dec in &linear {
-            if let Some(s) = crate::scan1d::try_decode(cand, dec.as_ref()) {
-                push(s);
-            }
-        }
-    }
+    // Same shared decode entry point as the CLI (`crate::pipeline::scan_all`), so the
+    // demo and the command line always agree on what a frame decodes to.
+    let out = crate::pipeline::scan_all(&frame);
 
     let mut json = String::from("[");
-    for (i, (name, text)) in out.iter().enumerate() {
+    for (i, sym) in out.iter().enumerate() {
         if i > 0 {
             json.push(',');
         }
         json.push_str("{\"symbology\":");
-        json_str(&mut json, name);
+        json_str(&mut json, &sym.symbology.to_string());
         json.push_str(",\"text\":");
-        json_str(&mut json, text);
+        json_str(&mut json, &sym.text().unwrap_or_default());
         json.push('}');
     }
     json.push(']');

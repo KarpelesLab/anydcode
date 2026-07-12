@@ -124,8 +124,14 @@
 let wasm;
 const mem = () => new Uint8Array(wasm.memory.buffer);
 
+// Load the wasm with a per-load cache-buster. GitHub Pages and the browser cache
+// `.wasm` aggressively (and a blob worker's fetch ignores a hard refresh), so without
+// this a freshly deployed build would keep running the visitor's stale copy. The main
+// thread and the decode worker share this exact URL so they instantiate the same build.
+const WASM_URL = new URL('anyd.wasm?v=' + Date.now(), location.href).href;
+
 async function init() {
-  const res = await fetch('anyd.wasm');
+  const res = await fetch(WASM_URL);
   const { instance } = await WebAssembly.instantiateStreaming(res, {});
   wasm = instance.exports;
 }
@@ -366,8 +372,8 @@ let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false;
 
 // Decoding runs in a background worker (its own wasm instance) so the heavy sampler
 // can never block the UI thread — the live overlay stays smooth even when a scan is
-// slow. The main thread only sends a frame when the worker is free.
-const WASM_URL = new URL('anyd.wasm', location.href).href;
+// slow. The main thread only sends a frame when the worker is free. It reuses the
+// cache-busted WASM_URL defined above so the worker loads the same fresh build.
 const workerSrc = `
 let w; const mem = () => new Uint8Array(w.memory.buffer);
 const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });

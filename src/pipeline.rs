@@ -76,3 +76,67 @@ impl Hints {
         self.previous.iter().find(|k| k.fingerprint == Some(fp))
     }
 }
+
+/// Decode **every** symbology this library can read from a full (already-binarizable)
+/// luminance frame, returning one [`Symbol`] per distinct code found.
+///
+/// This is the single analysis entry point shared by every front-end — the `anyd` CLI,
+/// the WebAssembly `decode` export, and callers embedding the library — so they can never
+/// drift out of sync over which decoders run or in what order. It runs the 2D image
+/// samplers (QR, Data Matrix, PDF417) and the 1D pipeline (the width-ratio EAN/UPC edge
+/// reader that handles curved, blurred camera captures, plus the quantized `scan1d`
+/// front-end feeding the remaining checksummed linear decoders), de-duplicated by
+/// `(symbology, text)`. It never returns an error: a frame with no code yields an empty
+/// vec. Intended for a located crop or a whole still image; on a live stream, gate it
+/// behind [`crate::detect::locate`] and decode only the regions it returns.
+pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    use crate::traits::Decode;
+
+    let mut found: Vec<Symbol> = Vec::new();
+    let mut push = |sym: Symbol| {
+        let key = (sym.symbology, sym.text().unwrap_or_default());
+        if !found
+            .iter()
+            .any(|s| (s.symbology, s.text().unwrap_or_default()) == key)
+        {
+            found.push(sym);
+        }
+    };
+
+    // 2D image samplers.
+    if let Ok(s) = crate::codes::qr::scan(frame) {
+        push(s);
+    }
+    if let Ok(s) = crate::codes::datamatrix::scan(frame) {
+        push(s);
+    }
+    if let Some(s) = crate::codes::pdf417::scan(frame) {
+        push(s);
+    }
+
+    // 1D front-end. The EAN/UPC edge reader (width ratios, voted across scanlines) reads
+    // curved/blurred captures the quantized grid cannot; the quantized `scan1d` path then
+    // feeds the remaining checksummed linear decoders.
+    let scan_opts = crate::scan1d::ScanOptions::default();
+    if let Some(s) = crate::codes::ean::scan(frame, &scan_opts) {
+        push(s);
+    }
+    let candidates = crate::scan1d::scan_lines(frame, &scan_opts);
+    let linear: [Box<dyn Decode>; 6] = [
+        Box::new(crate::codes::code128::Code128Decoder::new()),
+        Box::new(crate::codes::ean::EanDecoder::new()),
+        Box::new(crate::codes::code93::Code93Decoder::new()),
+        Box::new(crate::codes::code39::Code39Decoder::new()),
+        Box::new(crate::codes::itf::ItfDecoder::new()),
+        Box::new(crate::codes::codabar::CodabarDecoder::new()),
+    ];
+    for cand in &candidates {
+        for dec in &linear {
+            if let Some(s) = crate::scan1d::try_decode(cand, dec.as_ref()) {
+                push(s);
+            }
+        }
+    }
+
+    found
+}

@@ -450,3 +450,37 @@ fn real_scene_text_is_not_a_barcode() {
         "consensus floor must reject stray checksum-passing misreads on plain text"
     );
 }
+
+/// The shared [`anyd::pipeline::scan_all`] entry point — the one both the CLI and the
+/// WebAssembly demo call — must read a real QR capture. `testdata/real_scene_qr.png` is
+/// the located crop of an omron package QR from a hand-held frame. This guards the
+/// consolidated decode path so a front-end can never again ship a decoder list that has
+/// drifted from what actually works (the demo previously ran a hand-copied list missing
+/// the current 1D reader).
+#[cfg(feature = "cli")]
+#[test]
+fn real_scene_qr_via_scan_all() {
+    use anyd::GrayFrame;
+
+    let bytes = std::fs::read("testdata/real_scene_qr.png").expect("read fixture");
+    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma: Vec<u8> = rgba
+        .data
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+        .collect();
+    let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
+
+    let found = anyd::pipeline::scan_all(&frame);
+    let qr = found
+        .iter()
+        .find(|s| s.symbology == anyd::Symbology::QrCode)
+        .expect("scan_all must read the QR capture");
+    assert_eq!(
+        qr.text().as_deref(),
+        Some(
+            "https://www.omronconnect.com/devices/?utm_source=qrcode&utm_medium=package&utm_campaign=mc-6800b"
+        ),
+    );
+}

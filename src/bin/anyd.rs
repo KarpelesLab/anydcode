@@ -20,7 +20,7 @@ use anyd::output::Encoding;
 use anyd::render::render;
 use anyd::segment::Segment;
 use anyd::symbology::Symbology;
-use anyd::traits::{Decode, Encode};
+use anyd::traits::Encode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -416,54 +416,15 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         .collect();
     let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;
 
-    let mut found: Vec<(String, Symbol)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut record = |sym: Symbol| {
-        let key = (sym.symbology, sym.text().unwrap_or_default());
-        if seen.insert(key) {
-            found.push((sym.symbology.to_string(), sym));
-        }
-    };
-
-    // 2D samplers.
-    if let Ok(s) = anyd::codes::qr::scan(&frame) {
-        record(s);
-    }
-    if let Ok(s) = anyd::codes::datamatrix::scan(&frame) {
-        record(s);
-    }
-    if let Some(s) = anyd::codes::pdf417::scan(&frame) {
-        record(s);
-    }
-
-    // 1D front-end: scan lines, then try the checksummed linear decoders.
-    let scan_opts = anyd::scan1d::ScanOptions::default();
-    // EAN/UPC: the width-ratio edge path reads curved, blurred camera captures that the
-    // quantized grid cannot, and votes across scanlines for a robust result.
-    if let Some(s) = anyd::codes::ean::scan(&frame, &scan_opts) {
-        record(s);
-    }
-    let candidates = anyd::scan1d::scan_lines(&frame, &scan_opts);
-    let linear: Vec<Box<dyn Decode>> = vec![
-        Box::new(anyd::codes::code128::Code128Decoder::new()),
-        Box::new(anyd::codes::ean::EanDecoder::new()),
-        Box::new(anyd::codes::code93::Code93Decoder::new()),
-        Box::new(anyd::codes::code39::Code39Decoder::new()),
-        Box::new(anyd::codes::itf::ItfDecoder::new()),
-        Box::new(anyd::codes::codabar::CodabarDecoder::new()),
-    ];
-    for cand in &candidates {
-        for dec in &linear {
-            if let Some(s) = anyd::scan1d::try_decode(cand, dec.as_ref()) {
-                record(s);
-            }
-        }
-    }
+    // One shared decode entry point (see `anyd::pipeline::scan_all`) drives every
+    // front-end, so the CLI and the WebAssembly demo can never disagree on what decodes.
+    let found = anyd::pipeline::scan_all(&frame);
 
     if found.is_empty() {
         return Err("no barcode found in image".into());
     }
-    for (name, sym) in &found {
+    for sym in &found {
+        let name = sym.symbology.to_string();
         match sym.text() {
             Some(t) => println!("{name}: {t}"),
             None => println!("{name}: <binary> {}", hex(&sym.payload_bytes())),

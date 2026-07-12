@@ -300,7 +300,39 @@ selectSym('qr');
 const video = document.getElementById('cam-video');
 const overlay = document.getElementById('cam-overlay');
 const scratch = document.createElement('canvas');
-let stream, running = false, lastDecode = 0, lastDecoded = [];
+let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false;
+
+// Decoding runs in a background worker (its own wasm instance) so the heavy sampler
+// can never block the UI thread — the live overlay stays smooth even when a scan is
+// slow. The main thread only sends a frame when the worker is free.
+const WASM_URL = new URL('anyd.wasm', location.href).href;
+const workerSrc = `
+let w; const mem = () => new Uint8Array(w.memory.buffer);
+const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
+function wr(b){ const p = w.alloc(b.length); mem().set(b, p); return p; }
+function take(pk){ const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn); const o = mem().slice(ptr, ptr + len); w.dealloc(ptr, len); return o; }
+function decLuma(cw, ch, luma){ const p = wr(luma); const pk = w.decode(cw, ch, p); w.dealloc(p, luma.length); return JSON.parse(new TextDecoder().decode(take(pk)) || '[]'); }
+self.onmessage = async (e) => {
+  await ready;
+  const { width, height, luma, crops } = e.data;
+  const seen = new Set(), found = [];
+  const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ symbology: r.symbology, text: r.text, box }); } };
+  for (const b of crops.slice(0, 6)) {
+    const x0 = Math.max(0, b.x0 | 0), y0 = Math.max(0, b.y0 | 0), x1 = Math.min(width, Math.ceil(b.x1)), y1 = Math.min(height, Math.ceil(b.y1));
+    const cw = x1 - x0, ch = y1 - y0; if (cw < 12 || ch < 12) continue;
+    const crop = new Uint8Array(cw * ch);
+    for (let y = 0; y < ch; y++) { const s = (y0 + y) * width + x0; crop.set(luma.subarray(s, s + cw), y * cw); }
+    for (const r of decLuma(cw, ch, crop)) add(r, b);
+  }
+  self.postMessage(found);
+};
+`;
+const decodeWorker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
+decodeWorker.onmessage = (e) => {
+  lastDecoded = e.data; workerBusy = false;
+  document.getElementById('cam-result').textContent =
+    lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
+};
 
 function bbox(corners) {
   const xs = corners.map(p => p[0]), ys = corners.map(p => p[1]);
@@ -441,7 +473,7 @@ document.getElementById('cam-btn').onclick = async () => {
   document.getElementById('cam-btn').disabled = true;
   document.getElementById('cam-stop').disabled = false;
   document.getElementById('cam-capture').disabled = false;
-  running = true; requestAnimationFrame(loop);
+  running = true; workerBusy = false; lastSent = 0; requestAnimationFrame(loop);
 };
 document.getElementById('cam-stop').onclick = () => {
   running = false; stream && stream.getTracks().forEach(t => t.stop());
@@ -481,55 +513,48 @@ document.getElementById('cam-capture').onclick = () => {
     `captured frame ${pw}×${ph} — ${cands.length} located, ${decoded.length} decoded (saved PNG + JSON)`;
 };
 
+let liveCands = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;
 function loop(ts) {
-  if (!running) return;
+  if (!running) { return; }
+  requestAnimationFrame(loop);
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (vw) {
-    // Process at (capped) native resolution — small codes need the pixels: a QR that
-    // is ~30px in a 480px frame is invisible to both the locator and the sampler.
-    // 1080p passes through at full res (locate is ~1.8 ms there).
-    const pw = Math.min(vw, 1920), ph = Math.round(pw * vh / vw);
+  if (!vw) return;
+  const pw = Math.min(vw, 1920), ph = Math.round(pw * vh / vw);
+
+  // Grab + locate at ~30 fps (getImageData at 1080p is the heavy main-thread step);
+  // the HUD still renders every frame below, so the overlay stays smooth.
+  if (ts - lastLocate > 33) {
+    lastLocate = ts;
     scratch.width = pw; scratch.height = ph;
     const sctx = scratch.getContext('2d', { willReadFrequently: true });
     sctx.drawImage(video, 0, 0, pw, ph);
     const img = sctx.getImageData(0, 0, pw, ph);
     const frameArea = pw * ph;
-
     const t0 = performance.now();
     // Drop background-sized boxes: a code is a bounded object, not half the scene.
-    const cands = locate(img).filter(c => {
+    liveCands = locate(img).filter(c => {
       const b = bbox(c.corners);
       return (b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * frameArea;
     });
-    const ms = performance.now() - t0;
-
-    // Periodic decode: the two-stage pipeline — crop each located region and decode it
-    // at full resolution (a small code fills its own crop), plus a whole-frame attempt.
-    if (ts - lastDecode > 300) {
-      lastDecode = ts;
-      const seen = new Set(), found = [];
-      const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ ...r, box }); } };
-      decode(img).forEach(r => add(r, null));
-      for (const c of cands) {
-        if (found.length >= 8) break;
-        const b = bbox(c.corners);
-        const crop = cropRGBA(img, b.x0 - 16, b.y0 - 16, b.x1 + 16, b.y1 + 16);
-        if (crop) decode(crop).forEach(r => add(r, b));
-      }
-      lastDecoded = found;
-      document.getElementById('cam-result').textContent =
-        found.length ? found.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
+    lastMs = performance.now() - t0;
+    liveScale = [pw, ph];
+    // Decode off-thread: send a frame only when the worker is free, so a slow scan
+    // throttles itself and can never stall the UI.
+    if (!workerBusy && ts - lastSent > 120) {
+      lastSent = ts; workerBusy = true;
+      const { luma } = lumaFrom(img);
+      const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16 }; });
+      decodeWorker.postMessage({ width: pw, height: ph, luma, crops }, [luma.buffer]);
     }
-
-    overlay.width = video.clientWidth; overlay.height = video.clientHeight;
-    const octx = overlay.getContext('2d');
-    octx.clearRect(0, 0, overlay.width, overlay.height);
-    renderHUD(octx, overlay.width, overlay.height, cands, lastDecoded, overlay.width / pw, overlay.height / ph, ts);
-
-    document.getElementById('cam-stat').innerHTML =
-      `◈ tracking <b>${cands.length}</b> · locked <b>${lastDecoded.length}</b> · scan <b>${ms.toFixed(1)}ms</b>`;
   }
-  requestAnimationFrame(loop);
+
+  // HUD every frame (cheap: canvas only) for a smooth reticle/scan animation.
+  overlay.width = video.clientWidth; overlay.height = video.clientHeight;
+  const octx = overlay.getContext('2d');
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  renderHUD(octx, overlay.width, overlay.height, liveCands, lastDecoded, overlay.width / liveScale[0], overlay.height / liveScale[1], ts);
+  document.getElementById('cam-stat').innerHTML =
+    `◈ tracking <b>${liveCands.length}</b> · locked <b>${lastDecoded.length}</b> · scan <b>${lastMs.toFixed(1)}ms</b>`;
 }
 
 // ---- file decode ----

@@ -375,11 +375,23 @@ let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false;
 // re-decodes a given code on a fraction of frames (the crop must be well-framed *and*
 // the decode must succeed), so without this hold the lock strobes on and off. Each
 // track keeps a position-smoothed box so the slate does not jitter frame to frame.
-const decodedTracks = new Map(); // "symbology|text" -> { symbology, text, box, lastSeen }
+// Each track carries a `box` (what the HUD draws) that eases toward a `target` (where the
+// code currently is). The value comes from the sparse decode; the position is refreshed
+// every frame from the fast locate pass, so a lock follows the code as the camera moves
+// even between successful reads.
+const decodedTracks = new Map(); // "symbology|text" -> { symbology, text, box, target, lastSeen }
 const DECODE_HOLD_MS = 1400;
 const boxLerp = (a, b, t = 0.35) => !a ? b : !b ? a : {
   x0: a.x0 + (b.x0 - a.x0) * t, y0: a.y0 + (b.y0 - a.y0) * t,
   x1: a.x1 + (b.x1 - a.x1) * t, y1: a.y1 + (b.y1 - a.y1) * t,
+};
+// Intersection-over-union of two boxes: how to match a track to a located candidate.
+const iou = (a, b) => {
+  const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  const inter = ix * iy;
+  const uni = (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter;
+  return uni > 0 ? inter / uni : 0;
 };
 
 // Decoding runs in a background worker (its own wasm instance) so the heavy sampler
@@ -416,8 +428,8 @@ decodeWorker.onmessage = (e) => {
   for (const r of e.data) {
     const key = r.symbology + '|' + r.text;
     const tr = decodedTracks.get(key);
-    if (tr) { tr.lastSeen = now; if (r.box) tr.box = boxLerp(tr.box, r.box); }
-    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, lastSeen: now });
+    if (tr) { tr.lastSeen = now; if (r.box) tr.target = r.box; }
+    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, target: r.box, lastSeen: now });
   }
 };
 
@@ -620,6 +632,18 @@ function loop(ts) {
     });
     lastMs = performance.now() - t0;
     liveScale = [pw, ph];
+    // Track: steer each decoded code toward the located candidate that best overlaps it,
+    // so the lock follows the code across camera movement between the sparse re-decodes.
+    // A locate match also refreshes the track's liveness — locate only fires on
+    // barcode-like texture, so a track fades once the code actually leaves the frame.
+    for (const tr of decodedTracks.values()) {
+      let best = null, bestIou = 0.15;
+      for (const c of liveCands) {
+        const j = iou(tr.target || tr.box, bbox(c.corners));
+        if (j > bestIou) { bestIou = j; best = bbox(c.corners); }
+      }
+      if (best) { tr.target = best; tr.lastSeen = ts; }
+    }
     // Decode off-thread: send a frame only when the worker is free, so a slow scan
     // throttles itself and can never stall the UI.
     if (!workerBusy && ts - lastSent > 120) {
@@ -630,8 +654,10 @@ function loop(ts) {
     }
   }
 
-  // Expire held tracks and rebuild the decoded view every frame, so a lock fades only
-  // after the code has truly been gone for DECODE_HOLD_MS — not on a single dropped read.
+  // Ease each track's drawn box toward its target every frame (smooth follow), then
+  // expire tracks whose code has truly been gone for DECODE_HOLD_MS — not on a single
+  // dropped read.
+  for (const tr of decodedTracks.values()) if (tr.target) tr.box = boxLerp(tr.box, tr.target, 0.3);
   for (const [k, tr] of decodedTracks) if (ts - tr.lastSeen > DECODE_HOLD_MS) decodedTracks.delete(k);
   lastDecoded = [...decodedTracks.values()];
   document.getElementById('cam-result').textContent =

@@ -359,7 +359,15 @@ impl Canvas {
         for i in 8..15 {
             raw2 |= (self.get(8, s - 15 + i) as u16) << i;
         }
-        decode_format(raw1).or_else(|| decode_format(raw2))
+        // Decode both copies and keep the higher-confidence one (fewest corrected
+        // bits). Preferring copy 1 unconditionally — as a plain `or_else` would — can
+        // lock onto a copy that BCH "corrected" to the wrong format when the real code
+        // is damaged there; cross-checking against copy 2 avoids that.
+        match (decode_format_conf(raw1), decode_format_conf(raw2)) {
+            (Some((v1, d1)), Some((v2, d2))) => Some(if d1 <= d2 { v1 } else { v2 }),
+            (Some((v, _)), None) | (None, Some((v, _))) => Some(v),
+            (None, None) => None,
+        }
     }
 }
 
@@ -383,7 +391,15 @@ fn format_bits(level: EcLevel, mask: Mask) -> u16 {
 
 /// Decode a 15-bit format code back to `(level, mask)`, correcting up to the BCH
 /// capacity by nearest-codeword search (Hamming distance ≤ 3).
+#[cfg(test)]
 fn decode_format(raw: u16) -> Option<(EcLevel, Mask)> {
+    decode_format_conf(raw).map(|(v, _)| v)
+}
+
+/// Like [`decode_format`] but also returns the number of corrected bits (the Hamming
+/// distance to the nearest valid format codeword), so callers can compare the
+/// confidence of the two format copies.
+fn decode_format_conf(raw: u16) -> Option<((EcLevel, Mask), u32)> {
     let mut best = None;
     let mut best_dist = u32::MAX;
     for data in 0u16..32 {
@@ -396,7 +412,7 @@ fn decode_format(raw: u16) -> Option<(EcLevel, Mask)> {
             best = Some((level, mask));
         }
     }
-    if best_dist <= 3 { best } else { None }
+    best.filter(|_| best_dist <= 3).map(|v| (v, best_dist))
 }
 
 /// Compute the 18-bit version code (version ≥ 7) with its 12-bit BCH remainder.

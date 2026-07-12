@@ -6,10 +6,19 @@
 //!
 //! The reduced dark mask is split into a grid of square tiles. For each tile we count
 //! horizontal and vertical dark/light transitions in one pass; a tile whose transition
-//! density clears a threshold is "active". Active tiles are grouped by 8-connected
-//! flood fill into regions, and each region's horizontal-vs-vertical transition balance
-//! gives a coarse family guess: strongly one-directional edges read as a 1D barcode,
-//! balanced edges as a 2D matrix.
+//! density clears a threshold is "active". Each active tile is then *labelled* by its
+//! own edge balance before any clustering: a tile whose horizontal and vertical
+//! transition counts are strongly one-directional is a **linear** tile (and remembers
+//! whether horizontal or vertical edges dominate), while a balanced tile is a **matrix**
+//! tile. Flood fill then groups only tiles that share the *same* label into regions.
+//!
+//! Per-tile labelling before clustering is what lets a 1D barcode be pulled out of a
+//! busy scene. A barcode is a compact patch of tiles that all lean the same way
+//! (vertical bars ⇒ horizontal-edge-dominant); the printed text and artwork around it
+//! are edge-dense too, but *isotropic*, so they label as matrix and never merge into the
+//! barcode's component. Labelling the whole active blob at once — the old approach —
+//! averaged the barcode's strong anisotropy away against the surrounding text and lost
+//! the code entirely.
 
 use super::grid::DownGrid;
 
@@ -27,6 +36,21 @@ struct TileStats {
     vtrans: Vec<u32>,
     /// Pixel count per tile (border tiles are smaller).
     area: Vec<u32>,
+}
+
+/// Per-tile classification assigned before clustering. Flood fill only joins tiles that
+/// carry the same label, keeping a directional barcode patch out of the isotropic text
+/// and artwork it sits amongst.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Label {
+    /// Below the edge-density floor: ignored.
+    Inactive,
+    /// Active and horizontal-edge-dominant (upright bars).
+    LinearH,
+    /// Active and vertical-edge-dominant (bars rotated ~90°).
+    LinearV,
+    /// Active but balanced: a 2D matrix or plain scene texture.
+    Matrix,
 }
 
 /// The coarse layout family a region is guessed to belong to.
@@ -111,19 +135,38 @@ pub(crate) fn regions(
     let cols = stats.cols;
     let rows = stats.rows;
 
-    // Activity mask over the tile grid.
-    let active: Vec<bool> = (0..cols * rows)
+    // Per-tile label decided *before* clustering, so a tile's own edge balance — not the
+    // average over a whole merged blob — chooses its family. Flood fill later joins only
+    // tiles that carry the same label.
+    let label: Vec<Label> = (0..cols * rows)
         .map(|i| {
             let a = stats.area[i];
             if a == 0 {
-                return false;
+                return Label::Inactive;
             }
-            let density = (stats.htrans[i] + stats.vtrans[i]) as f32 / a as f32;
-            density >= edge_density
+            let h = stats.htrans[i];
+            let v = stats.vtrans[i];
+            let total = h + v;
+            if total as f32 / (a as f32) < edge_density {
+                return Label::Inactive;
+            }
+            // Anisotropy of this single tile. Vertical bars cross many row scans and few
+            // column scans, so a barcode tile is strongly horizontal-dominant (and a
+            // 90°-rotated one vertical-dominant); text and artwork are balanced.
+            let anisotropy = (h as f32 - v as f32).abs() / total as f32;
+            if anisotropy >= aniso {
+                if h >= v {
+                    Label::LinearH
+                } else {
+                    Label::LinearV
+                }
+            } else {
+                Label::Matrix
+            }
         })
         .collect();
 
-    // 8-connected flood fill over active tiles.
+    // 8-connected flood fill that only merges tiles sharing the start tile's label.
     let mut visited = vec![false; cols * rows];
     let mut stack: Vec<(usize, usize)> = Vec::new();
     let mut out = Vec::new();
@@ -131,7 +174,8 @@ pub(crate) fn regions(
     for sy in 0..rows {
         for sx in 0..cols {
             let start = sy * cols + sx;
-            if !active[start] || visited[start] {
+            let seed = label[start];
+            if seed == Label::Inactive || visited[start] {
                 continue;
             }
             visited[start] = true;
@@ -142,14 +186,9 @@ pub(crate) fn regions(
             let mut min_ty = sy;
             let mut max_ty = sy;
             let mut tiles = 0usize;
-            let mut h_sum = 0u64;
-            let mut v_sum = 0u64;
 
             while let Some((cx, cy)) = stack.pop() {
-                let idx = cy * cols + cx;
                 tiles += 1;
-                h_sum += u64::from(stats.htrans[idx]);
-                v_sum += u64::from(stats.vtrans[idx]);
                 min_tx = min_tx.min(cx);
                 max_tx = max_tx.max(cx);
                 min_ty = min_ty.min(cy);
@@ -162,7 +201,7 @@ pub(crate) fn regions(
                 for ny in y0..=y1 {
                     for nx in x0..=x1 {
                         let nidx = ny * cols + nx;
-                        if active[nidx] && !visited[nidx] {
+                        if !visited[nidx] && label[nidx] == seed {
                             visited[nidx] = true;
                             stack.push((nx, ny));
                         }
@@ -174,24 +213,37 @@ pub(crate) fn regions(
                 continue;
             }
 
-            let total = (h_sum + v_sum) as f32;
-            let anisotropy = if total > 0.0 {
-                (h_sum as f32 - v_sum as f32).abs() / total
-            } else {
-                0.0
-            };
-            let family = if anisotropy >= aniso {
-                Family::Linear
-            } else {
-                Family::Matrix
+            let family = match seed {
+                Label::LinearH | Label::LinearV => Family::Linear,
+                _ => Family::Matrix,
             };
 
+            // A 2D matrix code always extends in both axes; a one-tile-thin strip of
+            // balanced tiles is not one. These strips appear where a barcode's bars
+            // terminate (the row of bar-ends adds vertical edges that cancel the
+            // horizontal dominance) and as thin runs of text — reject them so the
+            // matrix family stays meaningful. Linear codes are legitimately thin.
+            if family == Family::Matrix && (max_tx - min_tx < 1 || max_ty - min_ty < 1) {
+                continue;
+            }
+
             let t = stats.tile;
+            let (mut x0, mut y0) = (min_tx * t, min_ty * t);
+            let (mut x1, mut y1) = ((max_tx + 1) * t, (max_ty + 1) * t);
+            // Barcodes read across their bars, so a linear box needs the quiet zone on
+            // each side of the bars to survive downstream scanning. Grow it one tile out
+            // (matrix codes carry their own quiet zone inside the finder search).
+            if family == Family::Linear {
+                x0 = x0.saturating_sub(t);
+                y0 = y0.saturating_sub(t);
+                x1 += t;
+                y1 += t;
+            }
             out.push(Region {
-                x0: min_tx * t,
-                y0: min_ty * t,
-                x1: ((max_tx + 1) * t).min(grid.width),
-                y1: ((max_ty + 1) * t).min(grid.height),
+                x0,
+                y0,
+                x1: x1.min(grid.width),
+                y1: y1.min(grid.height),
                 family,
             });
         }

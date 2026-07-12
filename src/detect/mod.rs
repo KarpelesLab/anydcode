@@ -18,9 +18,12 @@
 //! 2. **Concentric finders** (`finder`): a run-length row scan with a vertical
 //!    cross-check flags QR/Aztec `1:1:3:1:1` fiducials. These give a high-confidence
 //!    matrix classification and a module-size estimate.
-//! 3. **Texture tiles** (`tiles`): tiles dense with dark/light edges are clustered
-//!    into regions; the horizontal-vs-vertical edge balance separates 1D barcode
-//!    regions from 2D matrix regions, catching every finder-less symbology.
+//! 3. **Texture tiles** (`tiles`): each dense-edged tile is first *labelled* by its own
+//!    horizontal-vs-vertical edge balance — one-directional (a 1D barcode patch) or
+//!    balanced (a 2D matrix) — and only same-label tiles are then clustered into regions.
+//!    Labelling per tile before clustering is what lets a directional barcode be pulled
+//!    out of the isotropic text and artwork it sits amongst, catching every finder-less
+//!    symbology without the barcode dissolving into the surrounding scene.
 //! 4. **Merge + map back**: finder hits upgrade the region they fall in to a matrix
 //!    guess with a real module size; region boxes are scaled back to full resolution and
 //!    returned as [`Candidate`]s, ordered strongest-first and capped at

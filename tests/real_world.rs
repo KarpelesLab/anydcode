@@ -312,3 +312,77 @@ fn real_bottle_photo_front_end() {
     // dewarping improvement can light it up without editing this test.
     let _ = scan(&frame);
 }
+
+/// End-to-end locate → crop → decode on a real captured photo of a 1D barcode, mirroring
+/// exactly what the live demo does per frame. `testdata/real_scene_ean.png` is a
+/// native-resolution region of a camera capture: a gold PET-bottle label with an EAN-13
+/// ("4901085663356") amid dense Japanese text and artwork.
+///
+/// This is the regression for the locator's per-tile labelling fix. Previously the whole
+/// edge-dense scene flood-filled into one frame-spanning matrix blob whose averaged
+/// anisotropy read as 2D, so the locator emitted **no** linear box on the barcode and the
+/// demo had nothing to crop-decode — even though the decoder reads the barcode fine when
+/// handed the right crop. Labelling each tile by its own edge balance before clustering
+/// keeps the barcode's directionally-coherent tiles out of the isotropic text, isolating
+/// it as a linear candidate.
+#[cfg(feature = "cli")]
+#[test]
+fn real_scene_locate_then_decode_ean() {
+    use anyd::GrayFrame;
+    use anyd::detect::{LocateOptions, locate};
+
+    let bytes = std::fs::read("testdata/real_scene_ean.png").expect("read fixture");
+    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma: Vec<u8> = rgba
+        .data
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+        .collect();
+    let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
+
+    // Axis-aligned bounds of a candidate's outline, clamped to the frame.
+    let bounds = |c: &anyd::pipeline::Candidate| {
+        let cs = c.location.outline.corners;
+        let x0 = cs.iter().map(|p| p.x).fold(f32::MAX, f32::min).max(0.0) as usize;
+        let y0 = cs.iter().map(|p| p.y).fold(f32::MAX, f32::min).max(0.0) as usize;
+        let x1 = (cs.iter().map(|p| p.x).fold(0.0, f32::max) as usize).min(w);
+        let y1 = (cs.iter().map(|p| p.y).fold(0.0, f32::max) as usize).min(h);
+        (x0, y0, x1, y1)
+    };
+
+    // The barcode occupies roughly (250,205)-(790,405); its centre is ~(512,295).
+    let (bx, by) = (512usize, 295usize);
+    let cands = locate(&frame, &LocateOptions::default());
+    let bar = cands
+        .iter()
+        .find(|c| {
+            c.symbology.map(|s| s.dimension()) == Some(anyd::Dimension::Linear) && {
+                let (x0, y0, x1, y1) = bounds(c);
+                x0 <= bx && bx < x1 && y0 <= by && by < y1
+            }
+        })
+        .expect("locate() must isolate the barcode as a linear candidate over its centre");
+
+    // Crop the located box and decode it end-to-end, exactly as the demo's worker does.
+    let (x0, y0, x1, y1) = bounds(bar);
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let mut crop = vec![0u8; cw * ch];
+    for y in 0..ch {
+        for x in 0..cw {
+            crop[y * cw + x] = frame.get_unchecked(x0 + x, y0 + y);
+        }
+    }
+    let cframe = GrayFrame::new(&crop, cw, ch).expect("valid crop");
+
+    let lines = anyd::scan1d::scan_lines(&cframe, &anyd::scan1d::ScanOptions::default());
+    let dec = anyd::codes::ean::EanDecoder::new();
+    let text = lines
+        .iter()
+        .find_map(|cand| anyd::scan1d::try_decode(cand, &dec).and_then(|s| s.text()))
+        .expect("the located region must decode as EAN-13");
+    assert_eq!(
+        text, "4901085663356",
+        "wrong payload from the located barcode"
+    );
+}

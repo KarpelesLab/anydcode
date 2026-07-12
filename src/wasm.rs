@@ -243,14 +243,28 @@ fn serialize_encoding(enc: &Encoding) -> Vec<u8> {
     buf
 }
 
-/// Build an [`Encoding`] for a symbology name + UTF-8 data. Covers a representative
-/// set for the demo; unknown names return an error.
+/// Read a boolean-ish option (`on`/`1`/`true`/`yes` are true), defaulting to `def`.
+fn opt_bool(opts: &str, key: &str, def: bool) -> bool {
+    match opt(opts, key) {
+        None => def,
+        Some(v) => matches!(v, "on" | "1" | "true" | "yes"),
+    }
+}
+
+/// Whether an option value means "auto" (absent, empty, or the literal `auto`).
+fn is_auto(v: Option<&str>) -> bool {
+    matches!(v, None | Some("") | Some("auto"))
+}
+
+/// Build an [`Encoding`] for a symbology name + UTF-8 data. Covers every implemented
+/// symbology with its meaningful options; unknown names return an error.
 fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
     use crate::codes::*;
     let b = data.as_bytes();
     let ec = opt(opts, "ec");
     let es = |e: crate::Error| e.to_string();
     match sym {
+        // ---------------- 2D: matrix ----------------
         "qr" => {
             let e = qr::QrEncoder::new();
             e.encode(&e.build_text(data, qr_ec(ec)?).map_err(es)?)
@@ -265,38 +279,179 @@ fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
         }
         "rmqr" => {
             let e = rmqr::RmqrEncoder::new();
-            e.encode(&e.build_text(data, rmqr_ec(ec)?).map_err(es)?)
-                .map_err(es)
+            let s = e
+                .build_text_with(data, rmqr_ec(ec)?, rmqr_size(opt(opts, "size"))?)
+                .map_err(es)?;
+            e.encode(&s).map_err(es)
         }
         "aztec" => {
             let e = aztec::AztecEncoder::new();
             e.encode(&e.build_text(data).map_err(es)?).map_err(es)
         }
+        "aztecrunes" => {
+            let v: u8 = data
+                .trim()
+                .parse()
+                .map_err(|_| "Aztec Rune value must be an integer 0–255".to_string())?;
+            let e = aztec::AztecEncoder::new();
+            e.encode(&e.build_rune(v)).map_err(es)
+        }
         "datamatrix" => {
             let e = datamatrix::DataMatrixEncoder::new();
-            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
-        }
-        "pdf417" => {
-            let e = pdf417::Pdf417Encoder::new();
-            e.encode(&e.build_text(data, pdf417_ec(ec)?).map_err(es)?)
-                .map_err(es)
+            let s = match opt(opts, "size") {
+                o if is_auto(o) => e.build_text(data).map_err(es)?,
+                Some(v) => {
+                    let n: usize = v
+                        .parse()
+                        .map_err(|_| "Data Matrix size must be a number or 'auto'".to_string())?;
+                    e.build_sized(b, n).map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
         }
         "maxicode" => {
             let e = maxicode::MaxiCodeEncoder::new();
-            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
+            let mode: u8 = match opt(opts, "mode") {
+                o if is_auto(o) => 4,
+                Some(v) => v
+                    .parse()
+                    .map_err(|_| "MaxiCode mode must be 2–6".to_string())?,
+                None => unreachable!(),
+            };
+            let s = if (4..=6).contains(&mode) {
+                e.build_mode(b, mode).map_err(es)?
+            } else if mode == 2 || mode == 3 {
+                let parts: Vec<&str> = data.splitn(4, '|').collect();
+                if parts.len() != 4 {
+                    return Err(
+                        "Structured MaxiCode (mode 2/3) needs 'postcode|country|service|message'"
+                            .to_string(),
+                    );
+                }
+                let country: u16 = parts[1]
+                    .trim()
+                    .parse()
+                    .map_err(|_| "MaxiCode country code must be 0–999".to_string())?;
+                let service: u16 = parts[2]
+                    .trim()
+                    .parse()
+                    .map_err(|_| "MaxiCode service class must be 0–999".to_string())?;
+                e.build_structured(mode, parts[0].trim(), country, service, parts[3].as_bytes())
+                    .map_err(es)?
+            } else {
+                return Err("MaxiCode mode must be 2–6".to_string());
+            };
+            e.encode(&s).map_err(es)
         }
-        "code128" => {
-            let e = code128::Code128Encoder::new();
-            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
+        "hanxin" => {
+            let e = hanxin::HanXinEncoder::new();
+            e.encode(&e.build_text(data, hanxin_ec(ec)?).map_err(es)?)
+                .map_err(es)
         }
-        "code39" => {
-            let e = code39::Code39Encoder::new();
-            e.encode(&e.build(b, true, false).map_err(es)?).map_err(es)
+        "dotcode" => {
+            let e = dotcode::DotCodeEncoder::new();
+            let s = match opt(opts, "mode") {
+                Some("gs1") => e.build_gs1_reduced(b).map_err(es)?,
+                _ => e.build_bytes(b).map_err(es)?,
+            };
+            e.encode(&s).map_err(es)
         }
-        "code93" => {
-            let e = code93::Code93Encoder::new();
-            e.encode(&e.build(b, true).map_err(es)?).map_err(es)
+        "gridmatrix" => {
+            let e = gridmatrix::GridMatrixEncoder::new();
+            let ver = opt(opts, "version");
+            let s = match ver {
+                o if is_auto(o) => {
+                    if is_auto(ec) {
+                        e.build_text(data).map_err(es)?
+                    } else {
+                        e.build_with_ec(b, gm_ec(ec)?).map_err(es)?
+                    }
+                }
+                Some(v) => {
+                    let n: u8 = v
+                        .parse()
+                        .map_err(|_| "Grid Matrix version must be 1–13".to_string())?;
+                    let version = gridmatrix::Version::new(n)
+                        .ok_or_else(|| "Grid Matrix version must be 1–13".to_string())?;
+                    let level = if is_auto(ec) {
+                        gridmatrix::EcLevel::L3
+                    } else {
+                        gm_ec(ec)?
+                    };
+                    e.build_sized(b, version, level).map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
         }
+
+        // ---------------- 2D: stacked ----------------
+        "pdf417" => {
+            let e = pdf417::Pdf417Encoder::new();
+            let level = pdf417_ec(ec)?;
+            let s = match opt(opts, "cols") {
+                o if is_auto(o) => e.build_text(data, level).map_err(es)?,
+                Some(v) => {
+                    let n: usize = v
+                        .parse()
+                        .map_err(|_| "PDF417 columns must be 1–30".to_string())?;
+                    e.build_sized(vec![Segment::alphanumeric(b.to_vec())], level, Some(n))
+                        .map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
+        }
+        "micropdf417" => {
+            let e = pdf417::MicroPdf417Encoder::new();
+            let s = match opt(opts, "cols") {
+                o if is_auto(o) => e.build_text(data).map_err(es)?,
+                Some(v) => {
+                    let n: usize = v
+                        .parse()
+                        .map_err(|_| "MicroPDF417 columns must be 1–4".to_string())?;
+                    e.build_sized(vec![Segment::alphanumeric(b.to_vec())], Some(n))
+                        .map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
+        }
+        "code16k" => {
+            let e = code16k::Code16kEncoder::new();
+            let s = match opt(opts, "rows") {
+                o if is_auto(o) => e.build(b).map_err(es)?,
+                Some(v) => {
+                    let n: usize = v
+                        .parse()
+                        .map_err(|_| "Code 16K rows must be 2–16".to_string())?;
+                    e.build_rows(b, Some(n)).map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
+        }
+        "code49" => {
+            let e = code49::Code49Encoder::new();
+            let s = match opt(opts, "rows") {
+                o if is_auto(o) => e.build(b).map_err(es)?,
+                Some(v) => {
+                    let n: usize = v
+                        .parse()
+                        .map_err(|_| "Code 49 rows must be 2–8".to_string())?;
+                    e.build_rows(b, Some(n)).map_err(es)?
+                }
+                None => unreachable!(),
+            };
+            e.encode(&s).map_err(es)
+        }
+        "codablockf" => {
+            let e = codablockf::CodablockFEncoder::new();
+            e.encode(&e.build(b).map_err(es)?).map_err(es)
+        }
+
+        // ---------------- 1D: EAN/UPC ----------------
         "ean13" => {
             let e = ean::EanEncoder::new();
             e.encode(&e.build_ean13(data).map_err(es)?).map_err(es)
@@ -313,15 +468,207 @@ fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
             let e = ean::EanEncoder::new();
             e.encode(&e.build_upce(data).map_err(es)?).map_err(es)
         }
+        "ean2" => {
+            let e = ean::EanEncoder::new();
+            e.encode(&e.build_ean2(data).map_err(es)?).map_err(es)
+        }
+        "ean5" => {
+            let e = ean::EanEncoder::new();
+            e.encode(&e.build_ean5(data).map_err(es)?).map_err(es)
+        }
+
+        // ---------------- 1D: Code 128 / GS1-128 ----------------
+        "code128" => {
+            let e = code128::Code128Encoder::new();
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
+        }
+        "gs1_128" => {
+            let e = code128::Code128Encoder::new();
+            let input: Vec<code128::Code128Input> = b
+                .iter()
+                .map(|&c| {
+                    if c == 0x1D {
+                        code128::Code128Input::Fnc1
+                    } else {
+                        code128::Code128Input::Data(c)
+                    }
+                })
+                .collect();
+            e.encode(&e.build_gs1(&input).map_err(es)?).map_err(es)
+        }
+
+        // ---------------- 1D: Code 39 / 93 / 11 ----------------
+        "code39" => {
+            let e = code39::Code39Encoder::new();
+            let full = opt_bool(opts, "fullascii", true);
+            let check = opt_bool(opts, "check", false);
+            e.encode(&e.build(b, full, check).map_err(es)?).map_err(es)
+        }
+        "code93" => {
+            let e = code93::Code93Encoder::new();
+            let full = opt_bool(opts, "fullascii", true);
+            e.encode(&e.build(b, full).map_err(es)?).map_err(es)
+        }
+        "code11" => {
+            let e = code11::Code11Encoder::new();
+            let count: u8 = match opt(opts, "check") {
+                None => 1,
+                Some(v) => v
+                    .parse()
+                    .map_err(|_| "Code 11 check digits must be 0, 1 or 2".to_string())?,
+            };
+            e.encode(&e.build(b, count).map_err(es)?).map_err(es)
+        }
+
+        // ---------------- 1D: 2-of-5 ----------------
         "itf" => {
             let e = itf::ItfEncoder::new();
-            e.encode(&e.build(b, false).map_err(es)?).map_err(es)
+            e.encode(&e.build(b, opt_bool(opts, "check", false)).map_err(es)?)
+                .map_err(es)
         }
+        "std2of5" => two_of_5(crate::Symbology::Std2of5, b, es),
+        "iata2of5" => two_of_5(crate::Symbology::Iata2of5, b, es),
+        "matrix2of5" => two_of_5(crate::Symbology::Matrix2of5, b, es),
+
+        // ---------------- 1D: other linear ----------------
         "codabar" => {
             let e = codabar::CodabarEncoder::new();
-            e.encode(&e.build(b'A', b, b'A').map_err(es)?).map_err(es)
+            let start = codabar_guard(opt(opts, "start"))?;
+            let stop = codabar_guard(opt(opts, "stop"))?;
+            e.encode(&e.build(start, b, stop).map_err(es)?).map_err(es)
         }
+        "msi" => {
+            let e = msi::MsiEncoder::new();
+            e.encode(&e.build_msi(b, msi_check(opt(opts, "check"))?).map_err(es)?)
+                .map_err(es)
+        }
+        "plessey" => {
+            let e = msi::MsiEncoder::new();
+            e.encode(&e.build_plessey(b).map_err(es)?).map_err(es)
+        }
+        "telepen" => {
+            let e = telepen::TelepenEncoder::new();
+            e.encode(&e.build(b, opt_bool(opts, "check", true)).map_err(es)?)
+                .map_err(es)
+        }
+        "pharmacode" => {
+            let v: u32 = data
+                .trim()
+                .parse()
+                .map_err(|_| "Pharmacode value must be an integer 3–131070".to_string())?;
+            let e = pharmacode::PharmacodeEncoder::new();
+            e.encode(&e.build(v).map_err(es)?).map_err(es)
+        }
+        "pharmacode2" => {
+            let v: u32 = data.trim().parse().map_err(|_| {
+                "Two-track Pharmacode value must be an integer 4–64570080".to_string()
+            })?;
+            let e = pharmacode::PharmacodeEncoder::new();
+            e.encode(&e.build_two_track(v).map_err(es)?).map_err(es)
+        }
+        "dxfilm" => {
+            let e = dxfilm::DxFilmEncoder::new();
+            e.encode(&e.build_text(data).map_err(es)?).map_err(es)
+        }
+
+        // ---------------- GS1 DataBar ----------------
+        "databar_omni" => {
+            let e = databar::DataBarEncoder::new();
+            e.encode(&e.build_omni(b).map_err(es)?).map_err(es)
+        }
+        "databar_limited" => {
+            let e = databar::DataBarEncoder::new();
+            e.encode(&e.build_limited(b).map_err(es)?).map_err(es)
+        }
+        "databar_stacked" => {
+            let e = databar::DataBarEncoder::new();
+            e.encode(&e.build_stacked(b).map_err(es)?).map_err(es)
+        }
+        "databar_stacked_omni" => {
+            let e = databar::DataBarEncoder::new();
+            e.encode(&e.build_stacked_omni(b).map_err(es)?).map_err(es)
+        }
+        "databar_expanded" => {
+            let e = databar::DataBarEncoder::new();
+            e.encode(&e.build_expanded(b).map_err(es)?).map_err(es)
+        }
+        "databar_expanded_stacked" => {
+            let e = databar::DataBarEncoder::new();
+            let cols: usize = match opt(opts, "cols") {
+                None => 2,
+                Some(v) => v
+                    .parse()
+                    .map_err(|_| "DataBar Expanded Stacked columns must be 1–11".to_string())?,
+            };
+            e.encode(&e.build_expanded_stacked(b, cols).map_err(es)?)
+                .map_err(es)
+        }
+
+        // ---------------- Postal ----------------
+        "postnet" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_postnet(data).map_err(es)?).map_err(es)
+        }
+        "planet" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_planet(data).map_err(es)?).map_err(es)
+        }
+        "imb" => {
+            let e = postal::PostalEncoder::new();
+            let mut it = data.split_whitespace();
+            let tracking = it.next().unwrap_or("");
+            let routing = it.next().unwrap_or("");
+            e.encode(&e.build_imb(tracking, routing).map_err(es)?)
+                .map_err(es)
+        }
+        "rm4scc" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_rm4scc(data).map_err(es)?).map_err(es)
+        }
+        "kix" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_kix(data).map_err(es)?).map_err(es)
+        }
+        "japanpost" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_japanpost(data).map_err(es)?).map_err(es)
+        }
+        "mailmark" => {
+            let e = postal::PostalEncoder::new();
+            e.encode(&e.build_mailmark(data).map_err(es)?).map_err(es)
+        }
+        "auspost" => {
+            let e = postal::PostalEncoder::new();
+            let (dpid, custinfo) = data.split_once(' ').unwrap_or((data, ""));
+            e.encode(&e.build_auspost(dpid, custinfo).map_err(es)?)
+                .map_err(es)
+        }
+
         other => Err(format!("unknown symbology '{other}'")),
+    }
+}
+
+/// Build a 2-of-5 variant symbol (Standard / IATA / Matrix).
+fn two_of_5(
+    sym: crate::Symbology,
+    data: &[u8],
+    es: impl Fn(crate::Error) -> String,
+) -> Result<Encoding, String> {
+    use crate::traits::Encode;
+    let e = crate::codes::twoof5::TwoOf5Encoder::new();
+    e.encode(&e.build(sym, data).map_err(&es)?).map_err(&es)
+}
+
+/// Map a Codabar start/stop option (`A`–`D`, default `A`) to its byte.
+fn codabar_guard(v: Option<&str>) -> Result<u8, String> {
+    match v {
+        None | Some("") | Some("A") => Ok(b'A'),
+        Some("B") => Ok(b'B'),
+        Some("C") => Ok(b'C'),
+        Some("D") => Ok(b'D'),
+        Some(o) => Err(format!(
+            "Codabar start/stop must be A, B, C or D (got '{o}')"
+        )),
     }
 }
 
@@ -363,4 +710,48 @@ fn pdf417_ec(ec: Option<&str>) -> Result<crate::codes::pdf417::EcLevel, String> 
             .map_err(|_| "PDF417 EC level must be 0–8".to_string())?,
     };
     crate::codes::pdf417::EcLevel::new(n).ok_or_else(|| "PDF417 EC level must be 0–8".to_string())
+}
+fn rmqr_size(size: Option<&str>) -> Result<crate::codes::rmqr::SizeStrategy, String> {
+    use crate::codes::rmqr::SizeStrategy::*;
+    match size {
+        None | Some("") | Some("balanced") => Ok(Balanced),
+        Some("min") => Ok(MinHeight),
+        Some("max") => Ok(MaxHeight),
+        Some(o) => Err(format!("rMQR size must be balanced/min/max (got '{o}')")),
+    }
+}
+fn hanxin_ec(ec: Option<&str>) -> Result<crate::codes::hanxin::EcLevel, String> {
+    use crate::codes::hanxin::EcLevel::*;
+    match ec {
+        None | Some("L1") => Ok(L1),
+        Some("L2") => Ok(L2),
+        Some("L3") => Ok(L3),
+        Some("L4") => Ok(L4),
+        Some(o) => Err(format!("Han Xin EC level must be L1–L4 (got '{o}')")),
+    }
+}
+fn gm_ec(ec: Option<&str>) -> Result<crate::codes::gridmatrix::EcLevel, String> {
+    use crate::codes::gridmatrix::EcLevel::*;
+    match ec {
+        Some("L1") => Ok(L1),
+        Some("L2") => Ok(L2),
+        Some("L3") => Ok(L3),
+        Some("L4") => Ok(L4),
+        Some("L5") => Ok(L5),
+        Some(o) => Err(format!("Grid Matrix EC level must be L1–L5 (got '{o}')")),
+        None => Ok(L3),
+    }
+}
+fn msi_check(check: Option<&str>) -> Result<crate::codes::msi::MsiCheck, String> {
+    use crate::codes::msi::MsiCheck;
+    match check {
+        None | Some("none") => Ok(MsiCheck::None),
+        Some("mod10") => Ok(MsiCheck::Mod10),
+        Some("mod11") => Ok(MsiCheck::Mod11),
+        Some("mod1010") => Ok(MsiCheck::Mod1010),
+        Some("mod1110") => Ok(MsiCheck::Mod1110),
+        Some(o) => Err(format!(
+            "MSI check must be none/mod10/mod11/mod1010/mod1110 (got '{o}')"
+        )),
+    }
 }

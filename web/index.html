@@ -553,26 +553,21 @@ document.getElementById('cam-capture').onclick = () => {
   scratch.width = pw; scratch.height = ph;
   const sctx = scratch.getContext('2d', { willReadFrequently: true });
   sctx.drawImage(video, 0, 0, pw, ph);
-  const img = sctx.getImageData(0, 0, pw, ph);
-  const frameArea = pw * ph;
-  const cands = locate(img).filter(c => { const b = bbox(c.corners); return (b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * frameArea; });
-  const seen = new Set(), decoded = [];
-  const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); decoded.push({ ...r, box }); } };
-  decode(img).forEach(r => add(r, null));
-  for (const c of cands) { const b = bbox(c.corners); const crop = cropRGBA(img, b.x0 - 16, b.y0 - 16, b.x1 + 16, b.y1 + 16); if (crop) decode(crop).forEach(r => add(r, b)); }
+  // Reuse the live pipeline's already-computed state (off-thread) — never re-decode
+  // synchronously here, which would freeze the UI on a busy 1080p frame.
   const report = {
     capturedAt: new Date().toISOString(),
     video: { width: vw, height: vh },
     processed: { width: pw, height: ph },
-    locate: cands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
-    decode: decoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box || null })),
+    locate: liveCands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
+    decode: lastDecoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box || null })),
     userAgent: navigator.userAgent,
   };
   const n = (window.__capN = (window.__capN || 0) + 1);
   scratch.toBlob(b => dl(`anyd-capture-${n}.png`, b));
   setTimeout(() => dl(`anyd-capture-${n}.json`, new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' })), 300);
   document.getElementById('cam-result').textContent =
-    `captured frame ${pw}×${ph} — ${cands.length} located, ${decoded.length} decoded (saved PNG + JSON)`;
+    `captured frame ${pw}×${ph} — ${liveCands.length} located, ${lastDecoded.length} decoded (saved PNG + JSON)`;
 };
 
 let liveCands = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;

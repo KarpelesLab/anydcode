@@ -123,6 +123,7 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
         let Some(bin) = binarize(frame, pass) else {
             break;
         };
+        let mut dewarps = 0;
         for located in candidates(frame, &bin) {
             let thr = located.threshold(&integral);
             let matrix = located.sample(frame, &thr);
@@ -138,8 +139,12 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                     // `dewarp_decode` self-guards (returns `None` for version 1 and when
                     // no alignment is found), and is only reached once the cheap path has
                     // already failed, so clean renders never pay for it.
-                    if let Some(sym) = dewarp_decode(frame, &bin, &located, &integral, &decoder) {
-                        return Ok(sym);
+                    if dewarps < MAX_DEWARP_PER_PASS {
+                        dewarps += 1;
+                        if let Some(sym) = dewarp_decode(frame, &bin, &located, &integral, &decoder)
+                        {
+                            return Ok(sym);
+                        }
                     }
                     if located.dimension > 21 && pending.len() < REFINE_HYPOTHESES {
                         pending.push(located);
@@ -163,6 +168,13 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
 
 /// Located hypotheses (dim > 21) retained for the fourth-corner refinement fallback.
 const REFINE_HYPOTHESES: usize = 4;
+
+/// Per binarization pass, how many failed hypotheses may pay for the expensive non-planar
+/// (thin-plate-spline) dewarp. Candidates are tried best-score first, so a genuine
+/// curved symbol's correct triple is dewarped within this budget, while a cluttered frame
+/// full of false finder triples — which would otherwise run a full TPS fit on every one —
+/// cannot stall the scan (that path cost ~7 s on a busy 1080p photo before this cap).
+const MAX_DEWARP_PER_PASS: usize = 4;
 
 /// Re-decode `located` while searching for the position of its bottom-right **alignment
 /// pattern** — the interior fiducial at grid `(dim-6.5, dim-6.5)`.

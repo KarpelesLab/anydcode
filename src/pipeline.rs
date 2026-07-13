@@ -90,36 +90,46 @@ impl Hints {
 /// vec. Intended for a located crop or a whole still image; on a live stream, gate it
 /// behind [`crate::detect::locate`] and decode only the regions it returns.
 pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    let mut found = scan_2d(frame);
+    dedup_extend(&mut found, scan_1d(frame));
+    found
+}
+
+/// Decode only the **2D matrix** symbologies (QR, Data Matrix, PDF417) from `frame`.
+///
+/// These samplers *self-localize* — they find their own finder / start patterns — so
+/// they are meant to run on a whole frame, not a pre-cropped region, and they carry the
+/// decoded [`Symbol::location`]. Splitting this out lets a live front-end decode 2D codes
+/// directly off each frame (fast, and independent of any coarse locator) while reserving
+/// the heavier, crop-dependent [`scan_1d`] pass for located regions.
+pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    let mut found: Vec<Symbol> = Vec::new();
+    if let Ok(s) = crate::codes::qr::scan(frame) {
+        found.push(s);
+    }
+    if let Ok(s) = crate::codes::datamatrix::scan(frame) {
+        dedup_push(&mut found, s);
+    }
+    if let Some(s) = crate::codes::pdf417::scan(frame) {
+        dedup_push(&mut found, s);
+    }
+    found
+}
+
+/// Decode the **1D / linear** symbologies from `frame`.
+///
+/// Unlike the 2D samplers, a linear scan reads along image rows, so it wants a region
+/// that contains (mostly) just the barcode — feed it a located crop, not a whole cluttered
+/// frame. The EAN/UPC edge reader (width ratios, voted across scanlines) reads curved and
+/// blurred captures the quantized grid cannot; the quantized `scan1d` front-end then feeds
+/// the remaining checksummed linear decoders.
+pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
     use crate::traits::Decode;
 
     let mut found: Vec<Symbol> = Vec::new();
-    let mut push = |sym: Symbol| {
-        let key = (sym.symbology, sym.text().unwrap_or_default());
-        if !found
-            .iter()
-            .any(|s| (s.symbology, s.text().unwrap_or_default()) == key)
-        {
-            found.push(sym);
-        }
-    };
-
-    // 2D image samplers.
-    if let Ok(s) = crate::codes::qr::scan(frame) {
-        push(s);
-    }
-    if let Ok(s) = crate::codes::datamatrix::scan(frame) {
-        push(s);
-    }
-    if let Some(s) = crate::codes::pdf417::scan(frame) {
-        push(s);
-    }
-
-    // 1D front-end. The EAN/UPC edge reader (width ratios, voted across scanlines) reads
-    // curved/blurred captures the quantized grid cannot; the quantized `scan1d` path then
-    // feeds the remaining checksummed linear decoders.
     let scan_opts = crate::scan1d::ScanOptions::default();
     if let Some(s) = crate::codes::ean::scan(frame, &scan_opts) {
-        push(s);
+        found.push(s);
     }
     let candidates = crate::scan1d::scan_lines(frame, &scan_opts);
     let linear: [Box<dyn Decode>; 6] = [
@@ -133,10 +143,27 @@ pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
     for cand in &candidates {
         for dec in &linear {
             if let Some(s) = crate::scan1d::try_decode(cand, dec.as_ref()) {
-                push(s);
+                dedup_push(&mut found, s);
             }
         }
     }
-
     found
+}
+
+/// Push `sym` unless an equal `(symbology, text)` is already present.
+fn dedup_push(found: &mut Vec<Symbol>, sym: Symbol) {
+    let key = (sym.symbology, sym.text().unwrap_or_default());
+    if !found
+        .iter()
+        .any(|s| (s.symbology, s.text().unwrap_or_default()) == key)
+    {
+        found.push(sym);
+    }
+}
+
+/// De-duplicating [`Vec::extend`] by `(symbology, text)`.
+fn dedup_extend(found: &mut Vec<Symbol>, more: Vec<Symbol>) {
+    for sym in more {
+        dedup_push(found, sym);
+    }
 }

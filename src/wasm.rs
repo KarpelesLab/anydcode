@@ -119,6 +119,66 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
     export(json.into_bytes())
 }
 
+/// Decode only the **2D** codes (QR, Data Matrix, PDF417) in a `w`×`h` luminance frame,
+/// returning JSON `[{"symbology":..,"text":..,"box":{"x0":..,..}|null}]`.
+///
+/// These samplers self-localize, so this is meant to run on the whole frame — a live
+/// front-end can read 2D codes directly per frame without depending on a coarse locator,
+/// and each result carries the code's bounding box (frame pixels) for overlay tracking.
+/// 1D codes are intentionally excluded: a linear scan wants a located crop, not a full
+/// cluttered frame (see [`crate::pipeline::scan_1d`]).
+///
+/// # Safety
+/// `luma_ptr` must point to `w*h` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn decode2d(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
+    let luma = unsafe { input(luma_ptr, w * h) };
+    let frame = match GrayFrame::new(luma, w, h) {
+        Ok(f) => f,
+        Err(_) => return export(b"[]".to_vec()),
+    };
+
+    let out = crate::pipeline::scan_2d(&frame);
+    let mut json = String::from("[");
+    for (i, sym) in out.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str("{\"symbology\":");
+        json_str(&mut json, &sym.symbology.to_string());
+        json.push_str(",\"text\":");
+        json_str(&mut json, &sym.text().unwrap_or_default());
+        json.push_str(",\"box\":");
+        match symbol_box(sym) {
+            Some((x0, y0, x1, y1)) => {
+                json.push_str("{\"x0\":");
+                push_num(&mut json, x0);
+                json.push_str(",\"y0\":");
+                push_num(&mut json, y0);
+                json.push_str(",\"x1\":");
+                push_num(&mut json, x1);
+                json.push_str(",\"y1\":");
+                push_num(&mut json, y1);
+                json.push('}');
+            }
+            None => json.push_str("null"),
+        }
+        json.push('}');
+    }
+    json.push(']');
+    export(json.into_bytes())
+}
+
+/// Axis-aligned bounds `(x0, y0, x1, y1)` of a decoded symbol's outline, if it has one.
+fn symbol_box(sym: &crate::Symbol) -> Option<(f32, f32, f32, f32)> {
+    let cs = sym.location.as_ref()?.outline.corners;
+    let x0 = cs.iter().map(|p| p.x).fold(f32::MAX, f32::min);
+    let y0 = cs.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    let x1 = cs.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+    let y1 = cs.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+    Some((x0, y0, x1, y1))
+}
+
 /// Locate (position-only, no decode) every candidate code in a `w`×`h` luminance
 /// frame; returns JSON `[{"family":..,"corners":[[x,y],..]}]`.
 ///

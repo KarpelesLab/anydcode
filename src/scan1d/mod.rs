@@ -130,6 +130,14 @@ pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandid
 /// cleaner captures. Every level is tried; a width-ratio decoder validates by checksum.
 const FINE_PROMINENCE: &[f32] = &[0.06, 0.11];
 
+/// Upper bound on luminance extrema in a single scanline profile before it is rejected as
+/// scene texture rather than a barcode. Even the longest linear symbologies produce a few
+/// hundred runs; thousands of extrema mean a cluttered full-frame line, and the
+/// prominence prune below is superlinear in the extrema count, so this cap keeps a busy
+/// image (e.g. a whole 1080p photo) from stalling the scan. A located crop, which is what
+/// the 1D path is meant to receive, stays far under it.
+const MAX_FINE_EXTREMA: usize = 1024;
+
 /// Scan `frame` and return per-scanline candidates carrying **fine** sub-pixel
 /// [`LinearCandidate::edges`], without the dedup and truncation [`scan_lines`] applies.
 ///
@@ -506,6 +514,13 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
         dir = nd;
     }
     ext.push((n - 1, profile[n - 1], 1));
+
+    // Bail on texture before the superlinear prune: a barcode line never has this many
+    // swings, but a cluttered full-frame profile does, and pruning them one at a time
+    // would stall the scan.
+    if ext.len() > MAX_FINE_EXTREMA {
+        return None;
+    }
 
     // Collapse consecutive same-kind extrema, keeping the more extreme.
     let mut j = 1;

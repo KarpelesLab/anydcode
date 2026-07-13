@@ -162,6 +162,63 @@ fn families_filter_restricts_output() {
     );
 }
 
+/// A code held close to the camera fills most of the frame. That defeats the texture
+/// pass twice over — huge modules leave tiles below the edge-density floor, and the
+/// region (if any) trips the scene-blob size cap — so this used to yield *no* candidate.
+/// Finder hits must rescue it: a finder-backed region is exempt from the size cap, and
+/// unclaimed finder hits synthesize a candidate on their own.
+#[test]
+fn locates_close_up_qr_filling_the_frame() {
+    // 25×25 modules at 16 px/module ≈ 464 px incl. quiet zone, in a 480×480 frame.
+    let qr = qr_image("CLOSE-UP", 16);
+    let mut canvas = blank(qr.width() + 16, qr.height() + 16);
+    let center = place(&mut canvas, &qr, 8, 8);
+
+    let cands = locate(&canvas.as_frame(), &LocateOptions::default());
+    assert!(
+        found_near(&cands, center, 0.4 * qr.width() as f32),
+        "close-up QR must still be located; candidates: {:?}",
+        cands
+            .iter()
+            .map(|c| c.location.outline.center())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// One physical code must not be reported as a pile of overlapping fragments: after
+/// duplicate suppression no two candidates may cover the same ground.
+#[test]
+fn candidates_do_not_duplicate_one_code() {
+    let mut canvas = blank(480, 360);
+    let qr = qr_image("NO DUPLICATES PLEASE", 6);
+    place(&mut canvas, &qr, 120, 90);
+
+    let cands = locate(&canvas.as_frame(), &LocateOptions::default());
+    let boxes: Vec<(f32, f32, f32, f32)> = cands
+        .iter()
+        .map(|c| {
+            let cs = c.location.outline.corners;
+            (
+                cs.iter().map(|p| p.x).fold(f32::MAX, f32::min),
+                cs.iter().map(|p| p.y).fold(f32::MAX, f32::min),
+                cs.iter().map(|p| p.x).fold(f32::MIN, f32::max),
+                cs.iter().map(|p| p.y).fold(f32::MIN, f32::max),
+            )
+        })
+        .collect();
+    for (i, a) in boxes.iter().enumerate() {
+        for b in &boxes[i + 1..] {
+            let ix = (a.2.min(b.2) - a.0.max(b.0)).max(0.0);
+            let iy = (a.3.min(b.3) - a.1.max(b.1)).max(0.0);
+            let min_area = ((a.2 - a.0) * (a.3 - a.1)).min((b.2 - b.0) * (b.3 - b.1));
+            assert!(
+                ix * iy <= 0.65 * min_area,
+                "candidates {a:?} and {b:?} overlap like duplicates"
+            );
+        }
+    }
+}
+
 #[test]
 fn respects_max_candidates() {
     let mut canvas = blank(640, 480);

@@ -122,13 +122,14 @@ pub(crate) fn find(grid: &DownGrid) -> Vec<FinderHit> {
     let mut centers: Vec<FinderHit> = Vec::new();
     let w = grid.width;
     let h = grid.height;
+    let mut runs: Vec<(bool, usize, i32)> = Vec::new();
     for y in 0..h {
-        // Run-length encode this row as (dark, start, len).
-        let mut runs: Vec<(bool, usize, i32)> = Vec::new();
-        let mut cur = grid.dark(0, y);
+        // Run-length encode this row as (dark, start, len), reusing one buffer.
+        runs.clear();
+        let row = &grid.dark[y * w..(y + 1) * w];
+        let mut cur = row[0];
         let mut start = 0usize;
-        for x in 1..w {
-            let d = grid.dark(x, y);
+        for (x, &d) in row.iter().enumerate().skip(1) {
             if d != cur {
                 runs.push((cur, start, (x - start) as i32));
                 cur = d;

@@ -63,6 +63,10 @@ pub(crate) enum Family {
 }
 
 /// A clustered candidate region in reduced-pixel coordinates.
+///
+/// The box is the *core* box — the clustered tiles only, no quiet zone. The caller
+/// grows linear boxes for downstream scanning; keeping the core here lets it measure
+/// region statistics (bar coherence, overlap) on the code itself.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Region {
     /// Inclusive-exclusive bounding box in reduced pixels: `[x0, x1) × [y0, y1)`.
@@ -72,6 +76,9 @@ pub(crate) struct Region {
     pub y1: usize,
     /// Coarse family guess.
     pub family: Family,
+    /// For [`Family::Linear`]: `true` when horizontal edges dominate (upright bars, the
+    /// code reads along x), `false` for the ~90°-rotated case. Meaningless for matrix.
+    pub reads_horizontal: bool,
 }
 
 impl Region {
@@ -91,18 +98,21 @@ impl TileStats {
         let mut vtrans = vec![0u32; cols * rows];
         let mut area = vec![0u32; cols * rows];
 
+        let w = grid.width;
         for y in 0..grid.height {
             let ty = y / tile;
             let base = ty * cols;
-            for x in 0..grid.width {
-                let tx = x / tile;
-                let idx = base + tx;
+            let row = &grid.dark[y * w..(y + 1) * w];
+            let prev = (y >= 1).then(|| &grid.dark[(y - 1) * w..y * w]);
+            for (x, &d) in row.iter().enumerate() {
+                let idx = base + x / tile;
                 area[idx] += 1;
-                let d = grid.dark(x, y);
-                if x >= 1 && d != grid.dark(x - 1, y) {
+                if x >= 1 && d != row[x - 1] {
                     htrans[idx] += 1;
                 }
-                if y >= 1 && d != grid.dark(x, y - 1) {
+                if let Some(prev) = prev
+                    && d != prev[x]
+                {
                     vtrans[idx] += 1;
                 }
             }
@@ -228,23 +238,13 @@ pub(crate) fn regions(
             }
 
             let t = stats.tile;
-            let (mut x0, mut y0) = (min_tx * t, min_ty * t);
-            let (mut x1, mut y1) = ((max_tx + 1) * t, (max_ty + 1) * t);
-            // Barcodes read across their bars, so a linear box needs the quiet zone on
-            // each side of the bars to survive downstream scanning. Grow it one tile out
-            // (matrix codes carry their own quiet zone inside the finder search).
-            if family == Family::Linear {
-                x0 = x0.saturating_sub(t);
-                y0 = y0.saturating_sub(t);
-                x1 += t;
-                y1 += t;
-            }
             out.push(Region {
-                x0,
-                y0,
-                x1: x1.min(grid.width),
-                y1: y1.min(grid.height),
+                x0: min_tx * t,
+                y0: min_ty * t,
+                x1: ((max_tx + 1) * t).min(grid.width),
+                y1: ((max_ty + 1) * t).min(grid.height),
                 family,
+                reads_horizontal: seed != Label::LinearV,
             });
         }
     }

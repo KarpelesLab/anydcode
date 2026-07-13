@@ -11,7 +11,8 @@ fn main() {
         .collect();
     let frame = anyd::GrayFrame::new(&luma, w, h).unwrap();
     let cands = locate(&frame, &LocateOptions::default());
-    println!("frame {w}x{h}: {} candidates", cands.len());
+    let thr = anyd::imgproc::threshold::otsu_threshold(&frame);
+    println!("frame {w}x{h}: {} candidates (otsu {thr})", cands.len());
     for c in &cands {
         let cr = c.location.outline.corners;
         let (xs, ys): (Vec<f32>, Vec<f32>) = (
@@ -30,14 +31,28 @@ fn main() {
             .symbology
             .map(|s| format!("{:?}", s.dimension()))
             .unwrap_or("?".into());
+        // Dark fraction of the candidate box under the global Otsu split — the cheap
+        // "is this barcode-like ink coverage?" signal the locator gates on.
+        let (bx0, by0) = (x0.max(0.0) as usize, y0.max(0.0) as usize);
+        let (bx1, by1) = ((x1 as usize).min(w), (y1 as usize).min(h));
+        let mut dark = 0u64;
+        for yy in by0..by1 {
+            for xx in bx0..bx1 {
+                if luma[yy * w + xx] <= thr {
+                    dark += 1;
+                }
+            }
+        }
+        let area = ((bx1 - bx0) * (by1 - by0)).max(1) as f64;
         println!(
-            "  {fam:8} ({:.0},{:.0})-({:.0},{:.0})  {:.0}x{:.0}",
+            "  {fam:8} ({:.0},{:.0})-({:.0},{:.0})  {:.0}x{:.0}  dark {:.2}",
             x0,
             y0,
             x1,
             y1,
             x1 - x0,
-            y1 - y0
+            y1 - y0,
+            dark as f64 / area
         );
     }
 }

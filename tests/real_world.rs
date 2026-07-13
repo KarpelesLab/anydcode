@@ -387,6 +387,103 @@ fn real_scene_locate_then_decode_ean() {
     );
 }
 
+/// Locator *precision* on the real cluttered captures — the live-demo side of the
+/// recall tests above. The locator is recall-biased, but a hand-held camera pointed at
+/// dense print used to drown the HUD (and the crop-decode budget) in candidates: the
+/// EAN scene produced 16 boxes led by a frame-spanning text blob, and the close-up QR
+/// shattered into seven overlapping fragments. This pins the gates that fixed it —
+/// scene-blob size cap, duplicate suppression, text-structure rejection for linear
+/// regions, ink-coverage banding for finderless matrix guesses — on the exact frames
+/// that exposed the noise.
+#[cfg(feature = "cli")]
+#[test]
+fn real_scene_locator_precision() {
+    use anyd::GrayFrame;
+    use anyd::detect::{LocateOptions, locate};
+
+    let load = |path: &str| {
+        let bytes = std::fs::read(path).expect("read fixture");
+        let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+        let (w, h) = (rgba.width as usize, rgba.height as usize);
+        let luma: Vec<u8> = rgba
+            .data
+            .chunks_exact(4)
+            .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+            .collect();
+        (luma, w, h)
+    };
+    let bbox = |c: &anyd::pipeline::Candidate| {
+        let cs = c.location.outline.corners;
+        (
+            cs.iter().map(|p| p.x).fold(f32::MAX, f32::min),
+            cs.iter().map(|p| p.y).fold(f32::MAX, f32::min),
+            cs.iter().map(|p| p.x).fold(f32::MIN, f32::max),
+            cs.iter().map(|p| p.y).fold(f32::MIN, f32::max),
+        )
+    };
+
+    // EAN amid dense text: few candidates, the true barcode ranked first, and no
+    // near-frame-sized scene blob.
+    let (luma, w, h) = load("testdata/real_scene_ean.png");
+    let frame = GrayFrame::new(&luma, w, h).unwrap();
+    let cands = locate(&frame, &LocateOptions::default());
+    assert!(
+        (1..=6).contains(&cands.len()),
+        "EAN scene: expected a handful of candidates, got {}",
+        cands.len()
+    );
+    let first = bbox(&cands[0]);
+    assert_eq!(
+        cands[0].symbology.map(|s| s.dimension()),
+        Some(anyd::Dimension::Linear),
+        "EAN scene: strongest candidate should be the linear barcode"
+    );
+    assert!(
+        first.0 <= 512.0 && 512.0 < first.2 && first.1 <= 295.0 && 295.0 < first.3,
+        "EAN scene: strongest candidate {first:?} does not cover the barcode centre"
+    );
+    for c in &cands {
+        let (x0, y0, x1, y1) = bbox(c);
+        assert!(
+            (x1 - x0) * (y1 - y0) <= 0.7 * (w * h) as f32,
+            "EAN scene: scene-sized blob ({x0},{y0})-({x1},{y1}) not capped"
+        );
+    }
+
+    // Close-up QR filling ~80% of the frame: exactly one box, over the code.
+    let (luma, w, h) = load("testdata/real_scene_qr.png");
+    let frame = GrayFrame::new(&luma, w, h).unwrap();
+    let cands = locate(&frame, &LocateOptions::default());
+    assert_eq!(
+        cands.len(),
+        1,
+        "close-up QR scene should collapse to a single candidate"
+    );
+    let (x0, y0, x1, y1) = bbox(&cands[0]);
+    assert!(
+        x0 <= 152.0 && 152.0 < x1 && y0 <= 152.0 && 152.0 < y1,
+        "QR scene: candidate ({x0},{y0})-({x1},{y1}) misses the symbol centre"
+    );
+    assert_eq!(
+        cands[0].symbology.map(|s| s.dimension()),
+        Some(anyd::Dimension::Matrix),
+    );
+
+    // Text-with-corner-barcode: every candidate stays on the barcode corner; the pure
+    // text (left/top of the frame) yields nothing.
+    let (luma, w, h) = load("testdata/real_scene_text.png");
+    let frame = GrayFrame::new(&luma, w, h).unwrap();
+    let cands = locate(&frame, &LocateOptions::default());
+    for c in &cands {
+        let (x0, y0, x1, y1) = bbox(c);
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        assert!(
+            cx >= 150.0 && cy >= 100.0,
+            "text scene: candidate centred at ({cx},{cy}) sits on plain text"
+        );
+    }
+}
+
 /// Real camera photo of an EAN-13 on a *curved, glossy gold bottle* — a 256×96 crop with
 /// module pitch ≈ 2.3 px, optical blur and mild cylinder curvature. The hard-quantized
 /// [`anyd::scan1d::scan_lines`] path cannot read it: blur merges the single-module start,

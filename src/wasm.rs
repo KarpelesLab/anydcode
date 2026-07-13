@@ -191,7 +191,15 @@ pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         Ok(f) => f,
         Err(_) => return export(b"[]".to_vec()),
     };
-    let candidates = crate::detect::locate(&frame, &crate::detect::LocateOptions::default());
+    // The locator's default downscale=2 is tuned for a full-resolution camera frame.
+    // The demo feeds an already GPU-downscaled half-res grab (cheaper to extract on the
+    // main thread), so pick the factor from the actual size: keep the reduced working
+    // image near the same ~500×500+ scale either way.
+    let opts = crate::detect::LocateOptions {
+        downscale: if w.min(h) >= 800 { 2 } else { 1 },
+        ..Default::default()
+    };
+    let candidates = crate::detect::locate(&frame, &opts);
 
     let mut json = String::from("[");
     for (i, c) in candidates.iter().enumerate() {

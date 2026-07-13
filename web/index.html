@@ -172,15 +172,14 @@ function lumaFrom(imageData) {
     luma[i] = (data[j] * 299 + data[j + 1] * 587 + data[j + 2] * 114) / 1000 | 0;
   return { w, h, luma };
 }
-function callJson(fn, imageData) {
-  const { w, h, luma } = lumaFrom(imageData);
+function callJson(fn, w, h, luma) {
   const ptr = writeBytes(luma);
   const packed = fn(w, h, ptr);
   wasm.dealloc(ptr, luma.length);
   return JSON.parse(new TextDecoder().decode(takeBytes(packed)) || '[]');
 }
-const decode = (img) => callJson(wasm.decode, img);
-const locate = (img) => callJson(wasm.locate, img);
+const decode = (img) => { const { w, h, luma } = lumaFrom(img); return callJson(wasm.decode, w, h, luma); };
+const locateLuma = (w, h, luma) => callJson(wasm.locate, w, h, luma);
 
 // ---- encode UI ----
 const encCanvas = document.getElementById('enc-canvas');
@@ -430,8 +429,10 @@ function updateCandTracks(cands, now) {
 
 // Decoding runs in a background worker (its own wasm instance) so the heavy sampler
 // can never block the UI thread — the live overlay stays smooth even when a scan is
-// slow. The main thread only sends a frame when the worker is free. It reuses the
-// cache-busted WASM_URL defined above so the worker loads the same fresh build.
+// slow. The main thread only sends a frame when the worker is free, transferring the
+// raw RGBA (zero-copy); the worker converts *only the crop pixels* to luminance, so
+// the main thread never pays for a full-frame conversion. It reuses the cache-busted
+// WASM_URL defined above so the worker loads the same fresh build.
 const workerSrc = `
 let w; const mem = () => new Uint8Array(w.memory.buffer);
 const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
@@ -440,14 +441,19 @@ function take(pk){ const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn)
 function decLuma(cw, ch, luma){ const p = wr(luma); const pk = w.decode(cw, ch, p); w.dealloc(p, luma.length); return JSON.parse(new TextDecoder().decode(take(pk)) || '[]'); }
 self.onmessage = async (e) => {
   await ready;
-  const { width, height, luma, crops } = e.data;
+  const { width, height, rgba, crops } = e.data;
+  const data = new Uint8Array(rgba);
   const seen = new Set(), found = [];
   const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ symbology: r.symbology, text: r.text, box }); } };
   for (const b of crops.slice(0, 6)) {
     const x0 = Math.max(0, b.x0 | 0), y0 = Math.max(0, b.y0 | 0), x1 = Math.min(width, Math.ceil(b.x1)), y1 = Math.min(height, Math.ceil(b.y1));
     const cw = x1 - x0, ch = y1 - y0; if (cw < 12 || ch < 12) continue;
     const crop = new Uint8Array(cw * ch);
-    for (let y = 0; y < ch; y++) { const s = (y0 + y) * width + x0; crop.set(luma.subarray(s, s + cw), y * cw); }
+    for (let y = 0; y < ch; y++) {
+      let s = ((y0 + y) * width + x0) * 4;
+      const d = y * cw;
+      for (let x = 0; x < cw; x++, s += 4) crop[d + x] = (data[s] * 299 + data[s + 1] * 587 + data[s + 2] * 114) / 1000 | 0;
+    }
     for (const r of decLuma(cw, ch, crop)) add(r, b);
   }
   self.postMessage(found);
@@ -462,10 +468,11 @@ decodeWorker.onmessage = (e) => {
 
 // A second, parallel worker reads 2D codes (QR / Data Matrix / PDF417) directly off the
 // whole frame — they self-localize, so they do not need the coarse locator, which fixes
-// the case where a QR is in view but the locator never boxes it. It runs on a
-// half-resolution copy (fast, and big enough for a held-up code) and hands back each
-// code's box in full-frame pixels. Kept separate so its heavier full-frame pass never
-// stalls the crop worker's snappy 1D decoding.
+// the case where a QR is in view but the locator never boxes it. It reuses the locate
+// pass's half-resolution luma (transferred, zero extra conversion — fast, and big
+// enough for a held-up code) and hands back each code's box in full-frame pixels. Kept
+// separate so its heavier full-frame pass never stalls the crop worker's snappy 1D
+// decoding.
 const worker2dSrc = `
 let w; const mem = () => new Uint8Array(w.memory.buffer);
 const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
@@ -486,32 +493,9 @@ self.onmessage = async (e) => {
 const worker2d = new Worker(URL.createObjectURL(new Blob([worker2dSrc], { type: 'text/javascript' })));
 worker2d.onmessage = (e) => { worker2dBusy = false; mergeDecoded(e.data, performance.now()); };
 
-// Box-average a luma frame down 2x — a cheap, safe downscale for the full-frame 2D pass.
-function downscale2(luma, w, h) {
-  const w2 = w >> 1, h2 = h >> 1, out = new Uint8Array(w2 * h2);
-  for (let y = 0; y < h2; y++) {
-    const s0 = (2 * y) * w, s1 = (2 * y + 1) * w, d = y * w2;
-    for (let x = 0; x < w2; x++) { const a = 2 * x; out[d + x] = (luma[s0 + a] + luma[s0 + a + 1] + luma[s1 + a] + luma[s1 + a + 1]) >> 2; }
-  }
-  return { luma: out, w: w2, h: h2 };
-}
-
 function bbox(corners) {
   const xs = corners.map(p => p[0]), ys = corners.map(p => p[1]);
   return { x0: Math.min(...xs), y0: Math.min(...ys), x1: Math.max(...xs), y1: Math.max(...ys) };
-}
-// Copy a padded sub-rectangle of an ImageData (for decoding a located region at full res).
-function cropRGBA(img, x0, y0, x1, y1) {
-  x0 = Math.max(0, x0 | 0); y0 = Math.max(0, y0 | 0);
-  x1 = Math.min(img.width, Math.ceil(x1)); y1 = Math.min(img.height, Math.ceil(y1));
-  const cw = x1 - x0, ch = y1 - y0;
-  if (cw < 12 || ch < 12) return null;
-  const out = new ImageData(cw, ch);
-  for (let y = 0; y < ch; y++) {
-    const s = ((y0 + y) * img.width + x0) * 4;
-    out.data.set(img.data.subarray(s, s + cw * 4), y * cw * 4);
-  }
-  return out;
 }
 // ---- futuristic target-lock HUD ----
 const HUD = { lock: '#5be9d4', acquire: '#f5a623', chip: '#ffc24b', text: '#eafffb', ink: 'rgba(6,13,17,0.80)' };
@@ -680,6 +664,7 @@ document.getElementById('cam-capture').onclick = () => {
 };
 
 let liveCands = [], acquiring = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;
+const locCanvas = document.createElement('canvas');
 function loop(ts) {
   if (!running) { return; }
   requestAnimationFrame(loop);
@@ -687,21 +672,26 @@ function loop(ts) {
   if (!vw) return;
   const pw = Math.min(vw, 1920), ph = Math.round(pw * vh / vw);
 
-  // Grab + locate at ~30 fps (getImageData at 1080p is the heavy main-thread step);
-  // the HUD still renders every frame below, so the overlay stays smooth.
+  // Grab + locate at ~30 fps on a GPU-downscaled half-res frame: getImageData and the
+  // RGBA→luma conversion — the two heavy main-thread steps — cost 4× less than at full
+  // resolution, and the wasm locator compensates by skipping its own downscale on the
+  // smaller input, so the reduced image it analyses (and detection quality) is
+  // unchanged. The full-resolution grab happens only when the crop worker is actually
+  // dispatched (~8×/s), never on the steady locate tick.
   if (ts - lastLocate > 33) {
     lastLocate = ts;
-    scratch.width = pw; scratch.height = ph;
-    const sctx = scratch.getContext('2d', { willReadFrequently: true });
-    sctx.drawImage(video, 0, 0, pw, ph);
-    const img = sctx.getImageData(0, 0, pw, ph);
-    const frameArea = pw * ph;
+    const lw = pw >> 1, lh = ph >> 1, sc = pw / lw;
+    if (locCanvas.width !== lw) locCanvas.width = lw;
+    if (locCanvas.height !== lh) locCanvas.height = lh;
+    const lctx = locCanvas.getContext('2d', { willReadFrequently: true });
+    lctx.drawImage(video, 0, 0, lw, lh);
     const t0 = performance.now();
-    // Drop background-sized boxes: a code is a bounded object, not half the scene.
-    liveCands = locate(img).filter(c => {
-      const b = bbox(c.corners);
-      return (b.x1 - b.x0) * (b.y1 - b.y0) < 0.5 * frameArea;
-    });
+    const { luma } = lumaFrom(lctx.getImageData(0, 0, lw, lh));
+    // Corners come back in half-res pixels; lift them to processed (full-res) space so
+    // tracks, crops and the HUD all share one coordinate system. No area filter here:
+    // the locator itself caps scene-sized blobs, and — unlike the old JS filter — it
+    // knows a finder-backed box is a close-up code, not background.
+    liveCands = locateLuma(lw, lh, luma).map(c => ({ family: c.family, corners: c.corners.map(p => [p[0] * sc, p[1] * sc]) }));
     lastMs = performance.now() - t0;
     liveScale = [pw, ph];
     updateCandTracks(liveCands, ts);
@@ -719,23 +709,27 @@ function loop(ts) {
     }
     // Decode off-thread on two parallel workers, each dispatched only when free so a slow
     // scan throttles itself and never stalls the UI: the crop worker (1D + located
-    // regions, every ~120ms) and the full-frame 2D worker (self-localizing QR/2D on a
-    // half-res copy, every ~400ms). Both read the one luma we build here; the 2D downscale
-    // happens before the crop worker transfers the buffer away.
-    const wantCrop = !workerBusy && ts - lastSent > 120;
+    // regions, every ~120ms, fed the full-res RGBA by transfer) and the full-frame 2D
+    // worker (self-localizing QR/2D, every ~400ms, fed this tick's half-res luma by
+    // transfer). Order matters: the 2D dispatch reuses `luma` before it is detached.
     const want2d = !worker2dBusy && ts - last2d > 400;
-    if (wantCrop || want2d) {
-      const { luma } = lumaFrom(img);
-      if (want2d) {
-        last2d = ts; worker2dBusy = true;
-        const d = downscale2(luma, pw, ph);
-        worker2d.postMessage({ width: d.w, height: d.h, luma: d.luma, scale: 2 }, [d.luma.buffer]);
-      }
-      if (wantCrop) {
-        lastSent = ts; workerBusy = true;
-        const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16 }; });
-        decodeWorker.postMessage({ width: pw, height: ph, luma, crops }, [luma.buffer]);
-      }
+    if (want2d) {
+      last2d = ts; worker2dBusy = true;
+      worker2d.postMessage({ width: lw, height: lh, luma, scale: sc }, [luma.buffer]);
+    }
+    const wantCrop = !workerBusy && ts - lastSent > 120;
+    if (wantCrop) {
+      lastSent = ts; workerBusy = true;
+      if (scratch.width !== pw) scratch.width = pw;
+      if (scratch.height !== ph) scratch.height = ph;
+      const sctx = scratch.getContext('2d', { willReadFrequently: true });
+      sctx.drawImage(video, 0, 0, pw, ph);
+      const img = sctx.getImageData(0, 0, pw, ph);
+      const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16 }; });
+      // No candidate this tick (e.g. motion blur wiped the texture pass) — still try
+      // the centre band, where a user aiming at a code will have put it.
+      if (!crops.length) crops.push({ x0: 0, y0: ph * 0.2, x1: pw, y1: ph * 0.8 });
+      decodeWorker.postMessage({ width: pw, height: ph, rgba: img.data.buffer, crops }, [img.data.buffer]);
     }
   }
 
@@ -753,7 +747,10 @@ function loop(ts) {
     lastDecoded.length ? lastDecoded.map(r => `${r.symbology}: ${r.text}`).join('\n') : '';
 
   // HUD every frame (cheap: canvas only) for a smooth reticle/scan animation.
-  overlay.width = video.clientWidth; overlay.height = video.clientHeight;
+  // Resizing a canvas reallocates its backing store — only do it when the layout
+  // actually changed.
+  if (overlay.width !== video.clientWidth) overlay.width = video.clientWidth;
+  if (overlay.height !== video.clientHeight) overlay.height = video.clientHeight;
   const octx = overlay.getContext('2d');
   octx.clearRect(0, 0, overlay.width, overlay.height);
   renderHUD(octx, overlay.width, overlay.height, acquiring, lastDecoded, overlay.width / liveScale[0], overlay.height / liveScale[1], ts);

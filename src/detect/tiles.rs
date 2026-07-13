@@ -176,7 +176,13 @@ pub(crate) fn regions(
         })
         .collect();
 
-    // 8-connected flood fill that only merges tiles sharing the start tile's label.
+    // Flood fill that only merges tiles sharing the start tile's label. For *linear*
+    // labels expansion reaches Chebyshev distance 2, bridging a one-tile gap: a bar or
+    // space wider than a tile (3–4-module runs at a coarse module scale) has no
+    // transitions inside it, and the resulting inactive seam would otherwise shatter
+    // one barcode into fragments that read as implausibly narrow. Matrix tiles stay
+    // 8-connected — a 2D code is transition-dense throughout, and bridging would only
+    // glue it to nearby scene texture.
     let mut visited = vec![false; cols * rows];
     let mut stack: Vec<(usize, usize)> = Vec::new();
     let mut out = Vec::new();
@@ -190,6 +196,7 @@ pub(crate) fn regions(
             }
             visited[start] = true;
             stack.push((sx, sy));
+            let reach = if seed == Label::Matrix { 1 } else { 2 };
 
             let mut min_tx = sx;
             let mut max_tx = sx;
@@ -204,10 +211,10 @@ pub(crate) fn regions(
                 min_ty = min_ty.min(cy);
                 max_ty = max_ty.max(cy);
 
-                let x0 = cx.saturating_sub(1);
-                let x1 = (cx + 1).min(cols - 1);
-                let y0 = cy.saturating_sub(1);
-                let y1 = (cy + 1).min(rows - 1);
+                let x0 = cx.saturating_sub(reach);
+                let x1 = (cx + reach).min(cols - 1);
+                let y0 = cy.saturating_sub(reach);
+                let y1 = (cy + reach).min(rows - 1);
                 for ny in y0..=y1 {
                     for nx in x0..=x1 {
                         let nidx = ny * cols + nx;

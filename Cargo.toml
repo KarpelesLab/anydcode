@@ -25,6 +25,13 @@ wasm = []
 [dependencies]
 oxideav-png = { version = "0.1.8", optional = true, default-features = false }
 
+# The library ships inside a per-frame video pipeline (and as the wasm demo, where the
+# browser cannot recover codegen quality after the fact) — trade compile time for the
+# fastest code the backend can emit.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [[bin]]
 name = "anyd"
 path = "src/bin/anyd.rs"

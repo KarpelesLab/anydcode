@@ -102,8 +102,32 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
 
     // Same shared decode entry point as the CLI (`crate::pipeline::scan_all`), so the
     // demo and the command line always agree on what a frame decodes to.
-    let out = crate::pipeline::scan_all(&frame);
+    export(symbols_json(&crate::pipeline::scan_all(&frame)))
+}
 
+/// Decode only the **1D / linear** symbologies in a `w`×`h` luminance frame; returns
+/// the same JSON shape as `decode`.
+///
+/// This exists for the live pipeline: a crop the locator classified as *linear* should
+/// never pay for the 2D samplers — their finder/geometry fallbacks are the expensive
+/// part of a scan, and on a text-heavy crop they can dominate the whole dispatch while
+/// the 1D read itself takes a millisecond (see [`crate::pipeline::scan_1d`]).
+///
+/// # Safety
+/// `luma_ptr` must point to `w*h` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn decode1d(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
+    let luma = unsafe { input(luma_ptr, w * h) };
+    let frame = match GrayFrame::new(luma, w, h) {
+        Ok(f) => f,
+        Err(_) => return export(b"[]".to_vec()),
+    };
+    export(symbols_json(&crate::pipeline::scan_1d(&frame)))
+}
+
+/// Serialize decoded symbols as the `[{"symbology":..,"text":..}]` JSON both decode
+/// entry points return.
+fn symbols_json(out: &[crate::Symbol]) -> Vec<u8> {
     let mut json = String::from("[");
     for (i, sym) in out.iter().enumerate() {
         if i > 0 {
@@ -116,7 +140,7 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         json.push('}');
     }
     json.push(']');
-    export(json.into_bytes())
+    json.into_bytes()
 }
 
 /// Decode only the **2D** codes (QR, Data Matrix, PDF417) in a `w`×`h` luminance frame,

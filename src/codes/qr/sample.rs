@@ -157,10 +157,19 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
     // parallelogram places wrongly and whose alignment pattern is too degraded to
     // detect: sweep that free corner and let Reed–Solomon accept the geometry that
     // reads. Reached only when every direct hypothesis failed, so clean renders never
-    // pay for it.
+    // pay for it. The shared budget bounds the sweep's worst case: on a genuinely
+    // curved symbol the winning placement sits within a step or two of the affine
+    // prediction (the sweep walks outward from it), while a cluttered no-QR crop —
+    // whose false triples would otherwise sweep huge grids at large estimated module
+    // sizes — exhausts the budget in bounded time (this stage alone cost ~4.5 s on a
+    // busy 336×672 text crop before the cap; the whole scan is now ~100 ms there).
+    let mut budget = REFINE_MODULE_BUDGET;
     for located in &pending {
-        if let Some(sym) = refine_fourth_corner(frame, located, &integral, &decoder) {
+        if let Some(sym) = refine_fourth_corner(frame, located, &integral, &decoder, &mut budget) {
             return Ok(sym);
+        }
+        if budget == 0 {
+            break;
         }
     }
     Err(last)
@@ -168,6 +177,13 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
 
 /// Located hypotheses (dim > 21) retained for the fourth-corner refinement fallback.
 const REFINE_HYPOTHESES: usize = 4;
+
+/// Total work the fourth-corner sweep may spend across *all* retained hypotheses,
+/// counted in sampled grid modules (one candidate placement of a dim×dim symbol costs
+/// `dim²`). A genuine curved capture decodes within the first few placements around the
+/// affine prediction; this cap only bites on cluttered crops whose false triples would
+/// otherwise sweep hundreds of placements each. ≈350k modules ≲ 100 ms native.
+const REFINE_MODULE_BUDGET: usize = 350_000;
 
 /// Per binarization pass, how many failed hypotheses may pay for the expensive non-planar
 /// (thin-plate-spline) dewarp. Candidates are tried best-score first, so a genuine
@@ -190,6 +206,7 @@ fn refine_fourth_corner(
     located: &Located,
     integral: &IntegralImage,
     decoder: &QrDecoder,
+    budget: &mut usize,
 ) -> Option<Symbol> {
     let [tl, tr, _, bl] = located.corners;
     let dim = located.dimension;
@@ -215,31 +232,40 @@ fn refine_fourth_corner(
     ];
     let reach = ms * 3.0;
     let step = (ms * 0.4).clamp(0.75, 3.0);
-    let n = (reach / step) as i32;
-    for thr in &thresholds {
-        for gy in -n..=n {
-            for gx in -n..=n {
-                let ax = ex + gx as f32 * step;
-                let ay = ey + gy as f32 * step;
-                let dst = [
-                    (tl.x as f64, tl.y as f64),
-                    (tr.x as f64, tr.y as f64),
-                    (ax as f64, ay as f64),
-                    (bl.x as f64, bl.y as f64),
-                ];
-                let projection = Projection::quad_to_quad(src, dst);
-                let trial = Located {
-                    projection,
-                    dimension: dim,
-                    threshold: located.threshold,
-                    local: located.local,
-                    corners: located.corners,
-                    module_size: located.module_size,
-                };
-                let matrix = trial.sample(frame, thr);
-                if let Ok(sym) = decoder.decode_matrix(&matrix) {
-                    return Some(sym);
-                }
+    let n = ((reach / step) as i32).min(8);
+    // Walk the grid nearest-first: on a genuine curved capture the true placement sits
+    // within a step or two of the affine prediction, so it is found long before the
+    // budget matters. Both thresholds are tried per placement, closest ones first.
+    let mut offsets: Vec<(i32, i32)> = (-n..=n)
+        .flat_map(|gy| (-n..=n).map(move |gx| (gx, gy)))
+        .collect();
+    offsets.sort_by_key(|&(gx, gy)| gx * gx + gy * gy);
+    for (gx, gy) in offsets {
+        let ax = ex + gx as f32 * step;
+        let ay = ey + gy as f32 * step;
+        let dst = [
+            (tl.x as f64, tl.y as f64),
+            (tr.x as f64, tr.y as f64),
+            (ax as f64, ay as f64),
+            (bl.x as f64, bl.y as f64),
+        ];
+        let projection = Projection::quad_to_quad(src, dst);
+        let trial = Located {
+            projection,
+            dimension: dim,
+            threshold: located.threshold,
+            local: located.local,
+            corners: located.corners,
+            module_size: located.module_size,
+        };
+        for thr in &thresholds {
+            *budget = budget.saturating_sub(dim * dim);
+            let matrix = trial.sample(frame, thr);
+            if let Ok(sym) = decoder.decode_matrix(&matrix) {
+                return Some(sym);
+            }
+            if *budget == 0 {
+                return None;
             }
         }
     }

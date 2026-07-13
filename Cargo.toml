@@ -63,6 +63,10 @@ name = "locdebug"
 required-features = ["cli"]
 
 [[example]]
+name = "cropdecode"
+required-features = ["cli"]
+
+[[example]]
 name = "scan1ddebug"
 required-features = ["cli"]
 

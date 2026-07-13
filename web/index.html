@@ -368,7 +368,7 @@ selectSym('qr');
 const video = document.getElementById('cam-video');
 const overlay = document.getElementById('cam-overlay');
 const scratch = document.createElement('canvas');
-let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false;
+let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false, worker2dBusy = false, last2d = 0;
 
 // Decoded codes persist for a short window after their last confirmation instead of
 // vanishing the instant one frame fails to re-read them. A hand-held camera only
@@ -393,6 +393,16 @@ const iou = (a, b) => {
   const uni = (a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter;
   return uni > 0 ? inter / uni : 0;
 };
+// Fold a batch of decoded results (each {symbology, text, box}) into the persistent
+// tracks — shared by the crop worker (1D + located regions) and the full-frame 2D worker.
+function mergeDecoded(list, now) {
+  for (const r of list) {
+    const key = r.symbology + '|' + r.text;
+    const tr = decodedTracks.get(key);
+    if (tr) { tr.lastSeen = now; if (r.box) tr.target = r.box; }
+    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, target: r.box, lastSeen: now });
+  }
+}
 
 // Located candidates favour recall, so each frame reports transient boxes on text,
 // hands and background clutter. Rather than draw every raw hit — which strobes — we
@@ -446,16 +456,45 @@ self.onmessage = async (e) => {
 const decodeWorker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
 decodeWorker.onmessage = (e) => {
   workerBusy = false;
-  const now = performance.now();
-  // Merge this batch into the persistent tracks: refresh a code that is still visible,
-  // register a newly seen one. Expiry happens in the render loop by DECODE_HOLD_MS.
-  for (const r of e.data) {
-    const key = r.symbology + '|' + r.text;
-    const tr = decodedTracks.get(key);
-    if (tr) { tr.lastSeen = now; if (r.box) tr.target = r.box; }
-    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, target: r.box, lastSeen: now });
-  }
+  // Merge this batch into the persistent tracks; expiry happens in the render loop.
+  mergeDecoded(e.data, performance.now());
 };
+
+// A second, parallel worker reads 2D codes (QR / Data Matrix / PDF417) directly off the
+// whole frame — they self-localize, so they do not need the coarse locator, which fixes
+// the case where a QR is in view but the locator never boxes it. It runs on a
+// half-resolution copy (fast, and big enough for a held-up code) and hands back each
+// code's box in full-frame pixels. Kept separate so its heavier full-frame pass never
+// stalls the crop worker's snappy 1D decoding.
+const worker2dSrc = `
+let w; const mem = () => new Uint8Array(w.memory.buffer);
+const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
+self.onmessage = async (e) => {
+  await ready;
+  const { width, height, luma, scale } = e.data;
+  const p = w.alloc(luma.length); mem().set(luma, p);
+  const pk = w.decode2d(width, height, p); w.dealloc(p, luma.length);
+  const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn);
+  const bytes = mem().slice(ptr, ptr + len); w.dealloc(ptr, len);
+  const res = JSON.parse(new TextDecoder().decode(bytes) || '[]');
+  self.postMessage(res.map(r => ({
+    symbology: r.symbology, text: r.text,
+    box: r.box ? { x0: r.box.x0 * scale, y0: r.box.y0 * scale, x1: r.box.x1 * scale, y1: r.box.y1 * scale } : null,
+  })));
+};
+`;
+const worker2d = new Worker(URL.createObjectURL(new Blob([worker2dSrc], { type: 'text/javascript' })));
+worker2d.onmessage = (e) => { worker2dBusy = false; mergeDecoded(e.data, performance.now()); };
+
+// Box-average a luma frame down 2x — a cheap, safe downscale for the full-frame 2D pass.
+function downscale2(luma, w, h) {
+  const w2 = w >> 1, h2 = h >> 1, out = new Uint8Array(w2 * h2);
+  for (let y = 0; y < h2; y++) {
+    const s0 = (2 * y) * w, s1 = (2 * y + 1) * w, d = y * w2;
+    for (let x = 0; x < w2; x++) { const a = 2 * x; out[d + x] = (luma[s0 + a] + luma[s0 + a + 1] + luma[s1 + a] + luma[s1 + a + 1]) >> 2; }
+  }
+  return { luma: out, w: w2, h: h2 };
+}
 
 function bbox(corners) {
   const xs = corners.map(p => p[0]), ys = corners.map(p => p[1]);
@@ -596,7 +635,7 @@ document.getElementById('cam-btn').onclick = async () => {
   document.getElementById('cam-btn').disabled = true;
   document.getElementById('cam-stop').disabled = false;
   document.getElementById('cam-capture').disabled = false;
-  running = true; workerBusy = false; lastSent = 0; decodedTracks.clear(); candTracks = []; requestAnimationFrame(loop);
+  running = true; workerBusy = false; worker2dBusy = false; lastSent = 0; last2d = 0; decodedTracks.clear(); candTracks = []; requestAnimationFrame(loop);
 };
 document.getElementById('cam-stop').onclick = () => {
   running = false; stream && stream.getTracks().forEach(t => t.stop());
@@ -678,13 +717,25 @@ function loop(ts) {
       }
       if (best) { tr.target = best; tr.lastSeen = ts; }
     }
-    // Decode off-thread: send a frame only when the worker is free, so a slow scan
-    // throttles itself and can never stall the UI.
-    if (!workerBusy && ts - lastSent > 120) {
-      lastSent = ts; workerBusy = true;
+    // Decode off-thread on two parallel workers, each dispatched only when free so a slow
+    // scan throttles itself and never stalls the UI: the crop worker (1D + located
+    // regions, every ~120ms) and the full-frame 2D worker (self-localizing QR/2D on a
+    // half-res copy, every ~400ms). Both read the one luma we build here; the 2D downscale
+    // happens before the crop worker transfers the buffer away.
+    const wantCrop = !workerBusy && ts - lastSent > 120;
+    const want2d = !worker2dBusy && ts - last2d > 400;
+    if (wantCrop || want2d) {
       const { luma } = lumaFrom(img);
-      const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16 }; });
-      decodeWorker.postMessage({ width: pw, height: ph, luma, crops }, [luma.buffer]);
+      if (want2d) {
+        last2d = ts; worker2dBusy = true;
+        const d = downscale2(luma, pw, ph);
+        worker2d.postMessage({ width: d.w, height: d.h, luma: d.luma, scale: 2 }, [d.luma.buffer]);
+      }
+      if (wantCrop) {
+        lastSent = ts; workerBusy = true;
+        const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16 }; });
+        decodeWorker.postMessage({ width: pw, height: ph, luma, crops }, [luma.buffer]);
+      }
     }
   }
 

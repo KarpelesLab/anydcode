@@ -369,17 +369,25 @@ const overlay = document.getElementById('cam-overlay');
 const scratch = document.createElement('canvas');
 let stream, running = false, lastSent = 0, lastDecoded = [], workerBusy = false, worker2dBusy = false, last2d = 0;
 
-// Decoded codes persist for a short window after their last confirmation instead of
-// vanishing the instant one frame fails to re-read them. A hand-held camera only
-// re-decodes a given code on a fraction of frames (the crop must be well-framed *and*
-// the decode must succeed), so without this hold the lock strobes on and off. Each
-// track keeps a position-smoothed box so the slate does not jitter frame to frame.
-// Each track carries a `box` (what the HUD draws) that eases toward a `target` (where the
-// code currently is). The value comes from the sparse decode; the position is refreshed
-// every frame from the fast locate pass, so a lock follows the code as the camera moves
-// even between successful reads.
-const decodedTracks = new Map(); // "symbology|text" -> { symbology, text, box, target, lastSeen }
-const DECODE_HOLD_MS = 1400;
+// Decoded codes persist for a short window after their last *decode* confirmation
+// instead of vanishing the instant one frame fails to re-read them, so the lock
+// survives brief motion blur without strobing. Only a successful decode extends a
+// track's life: the fast locate pass merely *steers* its position between reads.
+// (Letting locate matches refresh liveness — the old model — meant that on a busy
+// scene any clutter box overlapping the code's last position kept a stale lock alive
+// tens of seconds after the code left the frame, and kept re-aiming it at whichever
+// overlapping candidate matched that tick.) A visible code re-confirms every worker
+// dispatch (~120–500 ms) now that linear crops decode in milliseconds, so the hold can
+// be honest and short. Each track carries a `box` (what the HUD draws) easing toward a
+// `target` (where the code is); the target itself is eased too, because both sources
+// of position are noisy — locator boxes snap to the tile grid (so their edges flicker
+// ±1 tile between frames), and neighbouring candidates can alternate in covering the
+// code. Hard-assigning the target made the lock visibly judder every frame even on a
+// perfectly still camera.
+const decodedTracks = new Map(); // "symbology|text" -> { symbology, text, box, target, lastDecoded }
+const DECODE_HOLD_MS = 2200;
+const STEER_IOU = 0.3;      // overlap needed for a located box to steer a lock
+const STEER_AREA_RATIO = 2.5; // reject steering boxes this many times bigger/smaller
 const boxLerp = (a, b, t = 0.35) => !a ? b : !b ? a : {
   x0: a.x0 + (b.x0 - a.x0) * t, y0: a.y0 + (b.y0 - a.y0) * t,
   x1: a.x1 + (b.x1 - a.x1) * t, y1: a.y1 + (b.y1 - a.y1) * t,
@@ -398,8 +406,10 @@ function mergeDecoded(list, now) {
   for (const r of list) {
     const key = r.symbology + '|' + r.text;
     const tr = decodedTracks.get(key);
-    if (tr) { tr.lastSeen = now; if (r.box) tr.target = r.box; }
-    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, target: r.box, lastSeen: now });
+    // Ease toward the reported box rather than snapping: 1D results carry the
+    // tile-snapped crop box, which wobbles a pixel-tile between confirmations.
+    if (tr) { tr.lastDecoded = now; if (r.box) tr.target = boxLerp(tr.target, r.box, 0.5); }
+    else decodedTracks.set(key, { symbology: r.symbology, text: r.text, box: r.box, target: r.box, lastDecoded: now });
   }
 }
 
@@ -409,7 +419,7 @@ function mergeDecoded(list, now) {
 // few consecutive frames (a real object persists; single-frame noise does not).
 let candTracks = []; // { box, target, lastSeen, hits }
 const CAND_MIN_HITS = 3;    // consecutive locate cycles before a candidate is drawn
-const CAND_HOLD_MS = 260;   // drop a track not re-located within this window
+const CAND_HOLD_MS = 400;   // drop a track not re-located within this window
 const CAND_IOU = 0.25;      // overlap needed to treat two hits as the same object
 function updateCandTracks(cands, now) {
   const boxes = cands.map(c => bbox(c.corners));
@@ -421,7 +431,9 @@ function updateCandTracks(cands, now) {
       const j = iou(candTracks[i].target, b);
       if (j > bestIou) { bestIou = j; best = i; }
     }
-    if (best >= 0) { const t = candTracks[best]; t.target = b; t.lastSeen = now; t.hits++; used.add(best); }
+    // Ease the target too: locator boxes are tile-snapped, so hard-assigning makes a
+    // reticle on a perfectly still object judder by a tile every cycle.
+    if (best >= 0) { const t = candTracks[best]; t.target = boxLerp(t.target, b, 0.5); t.lastSeen = now; t.hits++; used.add(best); }
     else candTracks.push({ box: b, target: b, lastSeen: now, hits: 1 });
   }
   candTracks = candTracks.filter(t => now - t.lastSeen <= CAND_HOLD_MS);
@@ -711,17 +723,24 @@ function loop(ts) {
     lastMs = performance.now() - t0;
     liveScale = [pw, ph];
     updateCandTracks(liveCands, ts);
-    // Track: steer each decoded code toward the located candidate that best overlaps it,
-    // so the lock follows the code across camera movement between the sparse re-decodes.
-    // A locate match also refreshes the track's liveness — locate only fires on
-    // barcode-like texture, so a track fades once the code actually leaves the frame.
+    // Track: steer each decoded code toward the located candidate that best overlaps
+    // it, so the lock follows the code across camera movement between re-decodes.
+    // Position only — liveness comes exclusively from decodes (see decodedTracks).
+    // The match is deliberately strict (real overlap, comparable size) and the target
+    // eased, so an adjacent clutter box can neither capture the lock nor judder it.
     for (const tr of decodedTracks.values()) {
-      let best = null, bestIou = 0.15;
+      const cur = tr.target || tr.box;
+      if (!cur) continue;
+      const curArea = (cur.x1 - cur.x0) * (cur.y1 - cur.y0);
+      let best = null, bestIou = STEER_IOU;
       for (const c of liveCands) {
-        const j = iou(tr.target || tr.box, bbox(c.corners));
-        if (j > bestIou) { bestIou = j; best = bbox(c.corners); }
+        const b = bbox(c.corners);
+        const area = (b.x1 - b.x0) * (b.y1 - b.y0);
+        if (area > curArea * STEER_AREA_RATIO || area * STEER_AREA_RATIO < curArea) continue;
+        const j = iou(cur, b);
+        if (j > bestIou) { bestIou = j; best = b; }
       }
-      if (best) { tr.target = best; tr.lastSeen = ts; }
+      if (best) tr.target = boxLerp(tr.target, best, 0.35);
     }
     // Decode off-thread on two parallel workers, each dispatched only when free so a slow
     // scan throttles itself and never stalls the UI: the crop worker (1D + located
@@ -750,10 +769,10 @@ function loop(ts) {
   }
 
   // Ease each track's drawn box toward its target every frame (smooth follow), then
-  // expire tracks whose code has truly been gone for DECODE_HOLD_MS — not on a single
-  // dropped read.
+  // expire tracks not *decode*-confirmed within DECODE_HOLD_MS — a code that left the
+  // frame disappears within the hold, no matter what clutter the locator still sees.
   for (const tr of decodedTracks.values()) if (tr.target) tr.box = boxLerp(tr.box, tr.target, 0.3);
-  for (const [k, tr] of decodedTracks) if (ts - tr.lastSeen > DECODE_HOLD_MS) decodedTracks.delete(k);
+  for (const [k, tr] of decodedTracks) if (ts - tr.lastDecoded > DECODE_HOLD_MS) decodedTracks.delete(k);
   lastDecoded = [...decodedTracks.values()];
   // Ease located-candidate tracks too, and only surface the ones that have persisted
   // past the noise threshold — this is what the acquiring reticles are drawn from.

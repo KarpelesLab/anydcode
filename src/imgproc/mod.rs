@@ -21,6 +21,8 @@
 //! - `sample` — [`sample_grid`], the sub-pixel bilinear grid reader that turns a
 //!   warped frame plus a homography into a [`BitMatrix`].
 //! - [`edges`] — Sobel gradient magnitude and binary morphology (erode/dilate).
+//! - [`orient`] — [`dominant_gradient_angle`], the texture-orientation estimate that
+//!   lets the 1D pipeline derotate an arbitrarily rotated barcode crop.
 //! - [`rng`] — a small explicit seeded [`Prng`] so any randomness is reproducible.
 //!
 //! Everything here is deterministic and dependency-free.
@@ -34,6 +36,7 @@ pub mod edges;
 pub mod homography;
 pub mod integral;
 pub mod line;
+pub mod orient;
 pub mod rng;
 pub mod sample;
 pub mod threshold;
@@ -45,6 +48,7 @@ pub use edges::{dilate, erode, sobel_magnitude};
 pub use homography::Homography;
 pub use integral::IntegralImage;
 pub use line::{Line, fit_line_least_squares, ransac_line};
+pub use orient::dominant_gradient_angle;
 pub use rng::Prng;
 pub use sample::{sample_bilinear, sample_grid, sample_grid_binary};
 pub use threshold::{

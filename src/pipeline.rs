@@ -123,15 +123,72 @@ pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 /// frame. The EAN/UPC edge reader (width ratios, voted across scanlines) reads curved and
 /// blurred captures the quantized grid cannot; the quantized `scan1d` front-end then feeds
 /// the remaining checksummed linear decoders.
+///
+/// The scanline sweep itself only covers a few degrees around horizontal, but the code's
+/// orientation in the crop is arbitrary: each candidate pattern is also tried mirrored
+/// (an upside-down code scans in reverse), and when the sweep finds nothing the frame's
+/// dominant texture orientation is measured ([`crate::imgproc::orient`]) and the whole
+/// crop is derotated and rescanned — so a 1D code is read at any rotation, not just the
+/// near-horizontal band.
 pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    let scan_opts = crate::scan1d::ScanOptions::default();
+    let found = scan_1d_sweep(frame, &scan_opts);
+    if !found.is_empty() {
+        return found;
+    }
+
+    // Nothing near horizontal. If the crop's texture has one dominant orientation —
+    // the signature of a rotated barcode — derotate the whole crop and rescan. The
+    // sweep already covers ±6°, so only meaningfully rotated codes are worth the
+    // resample.
+    let Some(angle) = crate::imgproc::orient::dominant_gradient_angle(frame) else {
+        return found;
+    };
+    if angle.abs() < MIN_DEROTATE_ANGLE {
+        return found;
+    }
+    let image = to_image(frame);
+    let rotated = crate::transform::rotate(&image, -angle);
+    let mut found = scan_1d_sweep(&rotated.as_frame(), &scan_opts);
+
+    // Map each symbol's outline from derotated coordinates back into the frame.
+    let (s, c) = (-angle).sin_cos();
+    let (cx, cy) = (frame.width() as f32 / 2.0, frame.height() as f32 / 2.0);
+    let (ncx, ncy) = (
+        rotated.width() as f32 / 2.0,
+        rotated.height() as f32 / 2.0,
+    );
+    for sym in &mut found {
+        if let Some(loc) = &mut sym.location {
+            for p in &mut loc.outline.corners {
+                let (dx, dy) = (p.x - ncx, p.y - ncy);
+                p.x = c * dx + s * dy + cx;
+                p.y = -s * dx + c * dy + cy;
+            }
+            loc.rotation = Some(loc.rotation.unwrap_or(0.0) + angle);
+        }
+    }
+    found
+}
+
+/// Smallest texture rotation (radians) worth a derotate-and-rescan; the plain sweep
+/// already covers a ±6° band around horizontal.
+const MIN_DEROTATE_ANGLE: f32 = 8.0 * core::f32::consts::PI / 180.0;
+
+/// One near-horizontal 1D pass: the EAN/UPC edge reader plus the quantized `scan1d`
+/// front-end feeding every checksummed linear decoder, each candidate tried in both
+/// reading directions.
+fn scan_1d_sweep(
+    frame: &crate::image::GrayFrame<'_>,
+    scan_opts: &crate::scan1d::ScanOptions,
+) -> Vec<Symbol> {
     use crate::traits::Decode;
 
     let mut found: Vec<Symbol> = Vec::new();
-    let scan_opts = crate::scan1d::ScanOptions::default();
-    if let Some(s) = crate::codes::ean::scan(frame, &scan_opts) {
+    if let Some(s) = crate::codes::ean::scan(frame, scan_opts) {
         found.push(s);
     }
-    let candidates = crate::scan1d::scan_lines(frame, &scan_opts);
+    let candidates = crate::scan1d::scan_lines(frame, scan_opts);
     let linear: [Box<dyn Decode>; 6] = [
         Box::new(crate::codes::code128::Code128Decoder::new()),
         Box::new(crate::codes::ean::EanDecoder::new()),
@@ -141,13 +198,32 @@ pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
         Box::new(crate::codes::codabar::CodabarDecoder::new()),
     ];
     for cand in &candidates {
+        // A scanline as easily runs against the code's reading direction as with it
+        // (and a 180°-rotated code always does): try the mirrored pattern too. The
+        // decoders are all checksummed, so a mirrored misread cannot false-accept.
+        let mut mirrored = cand.clone();
+        mirrored.pattern.modules.reverse();
+        mirrored.edges.clear();
         for dec in &linear {
             if let Some(s) = crate::scan1d::try_decode(cand, dec.as_ref()) {
+                dedup_push(&mut found, s);
+            }
+            if let Some(s) = crate::scan1d::try_decode(&mirrored, dec.as_ref()) {
                 dedup_push(&mut found, s);
             }
         }
     }
     found
+}
+
+/// Copy a borrowed frame into an owned [`crate::image::GrayImage`] (for resampling).
+fn to_image(frame: &crate::image::GrayFrame<'_>) -> crate::image::GrayImage {
+    let (w, h) = (frame.width(), frame.height());
+    let mut data = Vec::with_capacity(w * h);
+    for y in 0..h {
+        data.extend_from_slice(frame.row(y).expect("row in range"));
+    }
+    crate::image::GrayImage::from_raw(w, h, data)
 }
 
 /// Push `sym` unless an equal `(symbology, text)` is already present.

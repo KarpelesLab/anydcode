@@ -37,8 +37,12 @@
 //! - **Blur.** Mild defocus (separable box blur up to a few pixels radius) — edges
 //!   are recovered from midpoint crossings which are blur-stable.
 //! - **Rotation.** A few degrees, handled by scanning at several small angles
-//!   (default ±`MAX_ANGLE_DEG`). Full rotation invariance is **out of scope**: a
-//!   scan line must cross all bars, so near-perpendicular capture is assumed.
+//!   (default ±`MAX_ANGLE_DEG`). Full rotation invariance is deliberately **not**
+//!   this module's job: a scan line must cross all bars, so near-perpendicular
+//!   capture is assumed here. [`crate::pipeline::scan_1d`] supplies it instead, by
+//!   trying every candidate pattern mirrored (180°) and — when the sweep finds
+//!   nothing — measuring the crop's dominant texture orientation and derotating the
+//!   whole crop before rescanning (any other angle).
 //! - **Framing.** The barcode need not span the full frame width, but a light
 //!   quiet zone must be present on both sides of the scan line.
 //!

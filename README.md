@@ -87,7 +87,10 @@ sampling → decode. Robust to any-angle rotation, moderate tilt, blur and noise
 run-length → normalized `LinearPattern`), feeding each symbology's decoder. The
 end-to-end pixel→symbol path is verified for Code 128, Code 39 and EAN-13 in
 `tests/scan1d_pipeline.rs`; it applies to any standard bar/space linear code.
-DataBar (finder-pattern based) and Pharmacode need dedicated samplers.
+Through `pipeline::scan_1d` the read is rotation-complete: mirrored patterns cover
+180°, and any other angle is handled by estimating the crop's dominant texture
+orientation and derotating before the rescan (`tests/rotated1d.rs`). DataBar
+(finder-pattern based) and Pharmacode need dedicated samplers.
 
 ³ Data Matrix ships an image sampler: Otsu binarization → largest-component isolation
 → solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid

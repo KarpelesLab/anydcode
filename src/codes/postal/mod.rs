@@ -98,9 +98,13 @@ use crate::traits::{Decode, Encode};
 const ROWS: usize = 3;
 
 /// Light-module margin recorded around a postal matrix. Postal clear zones are
-/// specified physically (in inches), not in modules; this is a nominal value and
-/// is not load-bearing for the round-trip.
-const QUIET: usize = 0;
+/// specified physically (Japan Post asks >=2 mm all round, USPS 1/8" beside an
+/// IMb), not in modules, so this is a nominal renderer hint rather than
+/// load-bearing for the round-trip -- but it must be non-zero: every renderer
+/// (the demo page, PNG export) pads by exactly this many modules, and bars flush
+/// against the canvas edge are both unsightly and unscannable from a printed or
+/// photographed copy.
+const QUIET: usize = 2;
 
 /// The state of a single postal bar (its height / extension pattern).
 ///

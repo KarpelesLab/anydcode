@@ -113,6 +113,10 @@ pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
     if let Some(s) = crate::codes::pdf417::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "appclip")]
+    if let Ok(s) = crate::codes::appclip::scan(frame) {
+        dedup_push(&mut found, s);
+    }
     found
 }
 

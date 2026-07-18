@@ -20,8 +20,9 @@
 //! foreground or a derived third color. See `doc/SPEC.md` of [rs/appclipcode] for the
 //! full write-up.
 //!
-//! Encoding and structural decoding (bits → URL) are implemented; camera detection of
-//! the printed circle is not yet wired into the live pipeline.
+//! Encoding, structural decoding (bits → URL) and camera detection ([`scan`], a
+//! grayscale ring detector + sampler over a [`crate::image::GrayFrame`]) are all
+//! implemented; [`crate::pipeline::scan_2d`] runs the detector automatically.
 //!
 //! [rs/appclipcode]: https://github.com/rs/appclipcode
 //!
@@ -45,11 +46,13 @@
 mod codec;
 mod gf;
 mod huffman;
+mod scan;
 mod svg;
 mod tables;
 mod url;
 
 pub use codec::{decode_payload, encode_payload};
+pub use scan::scan;
 pub use svg::{Color, LogoKind, Palette, template_palette, third_color};
 pub use url::{compress_url, decompress_url};
 

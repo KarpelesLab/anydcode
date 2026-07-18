@@ -44,7 +44,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
 | DotCode (GF(113) RS) | ✅ | ✅ | ⬜ |
 | Grid Matrix (all 13 versions) | ✅ | ✅ | ⬜ |
-| Apple App Clip Code (URL codec + SVG, camera & NFC variants)⁵ | ✅ | ✅ | ⬜ |
+| Apple App Clip Code (URL codec + SVG, camera & NFC variants)⁵ | ✅ | ✅ | ✅ |
 
 ### 2D — stacked
 
@@ -108,7 +108,10 @@ in `tests/pdf417_image.rs`.
 from-scratch implementation following the public reverse engineering of Apple's
 generator ([rs/appclipcode], MIT), byte-verified against `URLCompression.framework`
 output. Encode produces the circular five-ring SVG (all 18 Apple color templates,
-camera and NFC center glyphs); decode is structural (ring bits → URL). The trained
+camera and NFC center glyphs); decode covers both the structural path (ring bits →
+URL) and camera detection — a grayscale ring detector (gradient-normal Hough over the
+five-ring geometry, affine/tilt refinement, rotation search, RS-arbitrated bit
+recovery) wired into `pipeline::scan_2d`. The trained
 Huffman tables embed ~1.7 MB, so the module sits behind the default-on `appclip`
 cargo feature (`default-features = false` for a lean build). Apple, App Clips and
 related marks are trademarks of Apple Inc.

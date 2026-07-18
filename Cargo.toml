@@ -14,6 +14,11 @@ categories = ["encoding", "multimedia::images"]
 exclude = ["/web", "/.github", "/testdata"]
 
 [features]
+default = ["appclip"]
+# Apple App Clip Code encode/decode. Embeds ~1.7 MB of trained Huffman frequency
+# tables (see src/codes/appclip); disable with `default-features = false` for a
+# lean build.
+appclip = []
 # The `anyd` command-line tool. Off by default so the library stays
 # dependency-free; enable with `cargo build --features cli`.
 cli = ["dep:oxideav-png"]

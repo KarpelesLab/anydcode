@@ -79,6 +79,66 @@ pub unsafe extern "C" fn encode(
     }
 }
 
+/// Generate an Apple App Clip Code SVG for a UTF-8 `https://` URL. `opts` is the
+/// usual `key=value;…` string: `template` (0–17), or `fg`/`bg` hex colors, and
+/// `logo=cam|nfc`. Returns `[0][svg utf8]`, or `[2][utf8 error message]`.
+///
+/// # Safety
+/// Pointers must describe valid buffers of the given lengths.
+#[cfg(feature = "appclip")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn appclip(
+    url_ptr: *const u8,
+    url_len: usize,
+    opt_ptr: *const u8,
+    opt_len: usize,
+) -> u64 {
+    let url = core::str::from_utf8(unsafe { input(url_ptr, url_len) }).unwrap_or("");
+    let opts = core::str::from_utf8(unsafe { input(opt_ptr, opt_len) }).unwrap_or("");
+    match appclip_svg(url, opts) {
+        Ok(svg) => {
+            let mut buf = vec![0u8];
+            buf.extend_from_slice(svg.as_bytes());
+            export(buf)
+        }
+        Err(msg) => {
+            let mut buf = vec![2u8];
+            buf.extend_from_slice(msg.as_bytes());
+            export(buf)
+        }
+    }
+}
+
+#[cfg(feature = "appclip")]
+fn appclip_svg(url: &str, opts: &str) -> Result<String, String> {
+    use crate::codes::appclip;
+
+    let logo = match opt(opts, "logo") {
+        Some("nfc") => appclip::LogoKind::Nfc,
+        _ => appclip::LogoKind::Camera,
+    };
+    let palette = match (opt(opts, "fg"), opt(opts, "bg")) {
+        (Some(fg), Some(bg)) if !fg.is_empty() && !bg.is_empty() => {
+            let fg = appclip::Color::parse(fg).ok_or("foreground must be RRGGBB hex")?;
+            let bg = appclip::Color::parse(bg).ok_or("background must be RRGGBB hex")?;
+            appclip::Palette {
+                foreground: fg,
+                background: bg,
+                third: appclip::third_color(fg, bg),
+            }
+        }
+        _ => {
+            let idx: usize = match opt(opts, "template") {
+                o if is_auto(o) => 1,
+                Some(v) => v.parse().map_err(|_| "template must be 0-17")?,
+                None => unreachable!(),
+            };
+            appclip::template_palette(idx).ok_or("template must be 0-17")?
+        }
+    };
+    appclip::generate_svg(url, &appclip::Options { palette, logo }).map_err(|e| e.to_string())
+}
+
 /// Read `key`'s value out of a `key=value;key=value` options string.
 fn opt<'a>(opts: &'a str, key: &str) -> Option<&'a str> {
     opts.split([';', '&'])

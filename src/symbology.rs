@@ -52,6 +52,10 @@ pub enum Symbology {
     DotCode,
     /// Grid Matrix, a Chinese 2D matrix symbology.
     GridMatrix,
+    /// Apple App Clip Code: the circular five-ring code scanned by iOS to launch App
+    /// Clips. Proprietary (no published specification); modeled after the public
+    /// reverse engineering of Apple's generator (see `codes::appclip`).
+    AppClipCode,
 
     // ======== 2D: stacked ========
     /// PDF417 (ISO/IEC 15438).
@@ -168,6 +172,7 @@ impl Symbology {
             HanXin,
             DotCode,
             GridMatrix,
+            AppClipCode,
             Pdf417,
             MicroPdf417,
             Code16k,
@@ -218,7 +223,7 @@ impl Symbology {
         match self {
             // Matrix
             QrCode | MicroQrCode | RectMicroQrCode | Aztec | AztecRunes | DataMatrix | MaxiCode
-            | HanXin | DotCode | GridMatrix => Dimension::Matrix,
+            | HanXin | DotCode | GridMatrix | AppClipCode => Dimension::Matrix,
             // Stacked
             Pdf417
             | MicroPdf417
@@ -239,6 +244,11 @@ impl Symbology {
     /// Whether an encoder/decoder is currently implemented for this symbology.
     pub fn is_implemented(self) -> bool {
         use Symbology::*;
+        // Gated on its cargo feature: the URL codec embeds ~1.7 MB of trained
+        // frequency tables, which lean builds may want to leave out.
+        if self == AppClipCode {
+            return cfg!(feature = "appclip");
+        }
         matches!(
             self,
             QrCode
@@ -309,6 +319,7 @@ impl Symbology {
             HanXin => "Han Xin",
             DotCode => "DotCode",
             GridMatrix => "Grid Matrix",
+            AppClipCode => "App Clip Code",
             Pdf417 => "PDF417",
             MicroPdf417 => "MicroPDF417",
             Code16k => "Code 16K",

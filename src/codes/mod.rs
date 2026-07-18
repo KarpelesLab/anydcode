@@ -24,6 +24,8 @@ pub mod twoof5;
 pub mod databar;
 
 // 2D matrix families.
+#[cfg(feature = "appclip")]
+pub mod appclip;
 pub mod aztec;
 pub mod datamatrix;
 pub mod dotcode;

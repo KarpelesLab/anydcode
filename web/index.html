@@ -180,6 +180,18 @@ function callJson(fn, w, h, luma) {
 }
 const decode = (img) => { const { w, h, luma } = lumaFrom(img); return callJson(wasm.decode, w, h, luma); };
 const locateLuma = (w, h, luma) => callJson(wasm.locate, w, h, luma);
+// App Clip Code generation returns an SVG document rather than a module grid.
+function appclipSVG(url, opts) {
+  const te = new TextEncoder();
+  const uB = te.encode(url), oB = te.encode(opts);
+  const up = writeBytes(uB), op = writeBytes(oB);
+  const packed = wasm.appclip(up, uB.length, op, oB.length);
+  wasm.dealloc(up, uB.length); wasm.dealloc(op, oB.length);
+  const buf = takeBytes(packed);
+  if (!buf.length) return { error: 'encode failed' };
+  const text = new TextDecoder().decode(buf.subarray(1));
+  return buf[0] === 2 ? { error: text } : { svg: text };
+}
 
 // ---- encode UI ----
 const encCanvas = document.getElementById('enc-canvas');
@@ -234,6 +246,10 @@ const SYMS = [
   { id: 'hanxin', label: 'Han Xin', group: '2D matrix', desc: 'Chinese-optimized 2D matrix (ISO/IEC 20830). Encodes text incl. GB18030.', accepts: 'Any text', length: 'short–long', example: 'HANXIN 汉信码', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['L1', 'L1 · lowest'], ['L2', 'L2'], ['L3', 'L3'], ['L4', 'L4 · highest']], def: 'L1' }] },
   { id: 'dotcode', label: 'DotCode', group: '2D matrix', desc: 'Sparse dot matrix for high-speed inkjet/laser printing.', accepts: 'Any bytes (or GS1 element string)', length: 'short–medium', example: 'DOTCODE', validate: nonEmpty, options: [{ id: 'mode', label: 'Data mode', values: [['text', 'Plain data'], ['gs1', 'GS1 (reduced)']], def: 'text' }] },
   { id: 'gridmatrix', label: 'Grid Matrix', group: '2D matrix', desc: 'Chinese 2D matrix symbology, versions 1–13.', accepts: 'Any text', length: 'short–long', example: 'GRIDMATRIX', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['auto', 'Auto'], ['L1', 'L1 · strongest'], ['L2', 'L2'], ['L3', 'L3'], ['L4', 'L4'], ['L5', 'L5 · most data']], def: 'auto' }, { id: 'version', label: 'Version', values: withAuto(range(1, 13).map(v => v[0])), def: 'auto' }] },
+  { id: 'appclip', label: 'App Clip Code (Apple)', group: '2D matrix', desc: 'Apple’s circular five-ring code that launches an App Clip when scanned with iOS. Encodes one https:// URL through Apple’s trained URL compressor — short hosts and common path shapes fit, long URLs may exceed the 128-bit capacity. Unofficial implementation of a proprietary format.', accepts: 'One https:// URL', length: '≤128 compressed bits', example: 'https://example.com/shop?p=1', validate: s => /^https:\/\/[^/?#]+\.[^/?#]+/i.test(s.trim()) ? '' : 'an https:// URL with a dotted host', options: [
+    { id: 'template', label: 'Color template', values: [['1', 'Black on white'], ['0', 'White on black'], ['3', 'Gray on white'], ['2', 'White on gray'], ['5', 'Red on white'], ['4', 'White on red'], ['7', 'Orange on white'], ['6', 'White on orange'], ['9', 'Green on white'], ['8', 'White on green'], ['11', 'Teal on white'], ['10', 'White on teal'], ['13', 'Blue on white'], ['12', 'White on blue'], ['15', 'Indigo on white'], ['14', 'White on indigo'], ['17', 'Purple on white'], ['16', 'White on purple']], def: '1' },
+    { id: 'logo', label: 'Center glyph', values: [['cam', 'Camera (scan only)'], ['nfc', 'Phone (NFC tag)']], def: 'cam' },
+  ] },
 
   // ---------------- 2D: stacked ----------------
   { id: 'pdf417', label: 'PDF417', group: '2D stacked', desc: 'Stacked 2D code on IDs & boarding passes.', accepts: 'Any text', length: 'up to ~1,100 bytes', example: 'PDF417 DEMO', validate: nonEmpty, options: [{ id: 'ec', label: 'EC level (0–8)', values: [['0', '0 · min'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5'], ['6', '6'], ['7', '7'], ['8', '8 · max']], def: '2' }, { id: 'cols', label: 'Data columns', values: withAuto(range(1, 12).map(v => v[0])), def: 'auto' }] },
@@ -339,19 +355,35 @@ function validateData() {
 }
 $('enc-data').oninput = () => { delete $('enc-data').dataset.autofill; validateData(); };
 
-let lastEnc = null;
+let lastEnc = null, lastSvg = null;
 $('enc-btn').onclick = () => {
   $('enc-err').textContent = '';
   const optStr = current.options.map(o => `${o.id}=${optValues[o.id]}`).join(';');
+  // App Clip Codes come back as a finished SVG (circular geometry has no module
+  // grid); rasterize it onto the shared canvas so the PNG download works too.
+  if (current.id === 'appclip') {
+    const res = appclipSVG($('enc-data').value.trim(), optStr);
+    if (res.error) { $('enc-err').innerHTML = `<span class="bad">${res.error}</span>`; return; }
+    lastSvg = res.svg; lastEnc = null;
+    const img = new Image();
+    img.onload = () => {
+      encCanvas.width = 800; encCanvas.height = 800;
+      encCanvas.getContext('2d').drawImage(img, 0, 0, 800, 800);
+      URL.revokeObjectURL(img.src);
+    };
+    img.src = URL.createObjectURL(new Blob([lastSvg], { type: 'image/svg+xml' }));
+    $('enc-dl-png').hidden = false; $('enc-dl-svg').hidden = false;
+    return;
+  }
   const res = encode(current.id, $('enc-data').value, optStr);
   if (res.error) { $('enc-err').innerHTML = `<span class="bad">${res.error}</span>`; return; }
-  lastEnc = res; drawEncoding(res);
+  lastEnc = res; lastSvg = null; drawEncoding(res);
   $('enc-dl-png').hidden = false; $('enc-dl-svg').hidden = false;
 };
 
 function dl(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
 $('enc-dl-png').onclick = () => encCanvas.toBlob(b => dl(`${current.id}.png`, b));
-$('enc-dl-svg').onclick = () => dl(`${current.id}.svg`, new Blob([buildSVG(lastEnc)], { type: 'image/svg+xml' }));
+$('enc-dl-svg').onclick = () => dl(`${current.id}.svg`, new Blob([lastSvg ?? buildSVG(lastEnc)], { type: 'image/svg+xml' }));
 function buildSVG(e) {
   const q = e.quiet, sc = 8, rects = [];
   const W = (e.w + 2 * q) * sc, H = ((e.kind === 0 ? e.h : 24) + 2 * q) * sc;

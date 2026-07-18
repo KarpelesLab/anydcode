@@ -124,7 +124,19 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
             break;
         };
         let mut dewarps = 0;
-        for located in candidates(frame, &bin) {
+        let cands = candidates(frame, &bin);
+        if std::env::var("ANYD_QR_DEBUG").is_ok() {
+            eprintln!("pass {pass}: {} candidates", cands.len());
+            for c in &cands {
+                eprintln!(
+                    "  cand dim={} ms={:.2} corners={:?}",
+                    c.dimension,
+                    c.module_size,
+                    c.corners.map(|p| (p.x as i32, p.y as i32))
+                );
+            }
+        }
+        for located in cands {
             let thr = located.threshold(&integral);
             let matrix = located.sample(frame, &thr);
             match decoder.decode_matrix(&matrix) {
@@ -227,7 +239,11 @@ fn refine_fourth_corner(
     // global Otsu cutoff. Blur and curvature can make either the better discriminator.
     let radius = (ms * 2.0).round().clamp(2.0, 64.0) as usize;
     let thresholds = [
-        ModuleThreshold::Local { integral, radius },
+        ModuleThreshold::Local {
+            integral,
+            radius,
+            bias: 1.0,
+        },
         ModuleThreshold::Global(located.threshold),
     ];
     let reach = ms * 3.0;
@@ -634,6 +650,12 @@ enum ModuleThreshold<'a> {
     Local {
         integral: &'a IntegralImage,
         radius: usize,
+        /// Multiplier applied to the local-contrast midpoint before classification.
+        /// `1.0` is the standard cut; the dewarp pass also tries shifted variants,
+        /// because directional blur bleeds ink asymmetrically and drags the true
+        /// dark/light split away from the geometric midpoint. Biased variants skip the
+        /// local-mean backstop (Reed-Solomon validates whatever they produce).
+        bias: f64,
     },
 }
 
@@ -658,7 +680,11 @@ impl Located {
             // Window a couple of modules across, so it always spans both dark and light
             // modules and its mean lands between them.
             let radius = (self.module_size * 2.0).round().clamp(2.0, 64.0) as usize;
-            ModuleThreshold::Local { integral, radius }
+            ModuleThreshold::Local {
+                integral,
+                radius,
+                bias: 1.0,
+            }
         } else {
             ModuleThreshold::Global(self.threshold)
         }
@@ -722,14 +748,20 @@ impl Located {
                         let (px, py) = map(gx, gy);
                         sample_dark_global(frame, px, py, tap, t)
                     }
-                    ModuleThreshold::Local { integral, radius } => {
+                    ModuleThreshold::Local {
+                        integral,
+                        radius,
+                        bias,
+                    } => {
                         let (cx, cy) = map(gx, gy);
-                        let midpoint = local_contrast_midpoint(frame, cx, cy, win);
+                        let midpoint = local_contrast_midpoint(frame, cx, cy, win) * bias;
+                        let backstop = (bias - 1.0).abs() < 1e-9;
                         let mut votes_dark = 0u32;
                         for &dv in &OFF {
                             for &du in &OFF {
                                 let (px, py) = map(gx + du, gy + dv);
-                                if sample_dark_local(frame, px, py, integral, radius, midpoint) {
+                                if sample_dark_local(frame, px, py, integral, radius, midpoint, backstop)
+                                {
                                     votes_dark += 1;
                                 }
                             }
@@ -810,8 +842,14 @@ fn sample_dark_local(
     integral: &IntegralImage,
     radius: usize,
     midpoint: f64,
+    backstop: bool,
 ) -> bool {
     let lum = sample_bilinear(frame, px, py);
+    if !backstop {
+        // Biased fallback variants classify on the shifted midpoint alone; the mean
+        // backstop would fight the very shift they exist to apply.
+        return lum < midpoint;
+    }
     let cx = (px.round().max(0.0) as usize).min(integral.width().saturating_sub(1));
     let cy = (py.round().max(0.0) as usize).min(integral.height().saturating_sub(1));
     let (sum, count) = integral.window_sum_count(cx, cy, radius);
@@ -1393,6 +1431,15 @@ fn dewarp_decode(
 ) -> Option<Symbol> {
     let base = collect_anchors(frame, bin, located);
     let (tg, ti) = timing_anchors(bin, located);
+    if std::env::var("ANYD_QR_DEBUG").is_ok() {
+        eprintln!(
+            "dewarp: dim={} ms={:.2} anchors={:?} timing={}",
+            located.dimension,
+            located.module_size,
+            base.as_ref().map(|a| a.grid.len()),
+            tg.len(),
+        );
+    }
 
     // Candidate anchor meshes, richest first. Timing-augmented meshes correct the module
     // pitch that scatters errors on real prints; the un-augmented mesh is kept as a fallback
@@ -1431,8 +1478,22 @@ fn dewarp_decode(
 
     let radius = (located.module_size * 2.0).round().clamp(2.0, 64.0) as usize;
     let thresholds = [
-        ModuleThreshold::Local { integral, radius },
+        ModuleThreshold::Local {
+            integral,
+            radius,
+            bias: 1.0,
+        },
         ModuleThreshold::Global(located.threshold),
+        ModuleThreshold::Local {
+            integral,
+            radius,
+            bias: 0.85,
+        },
+        ModuleThreshold::Local {
+            integral,
+            radius,
+            bias: 1.15,
+        },
     ];
     for (g, im) in &meshes {
         let Some(warp) = ThinPlateSpline::fit(g, im) else {

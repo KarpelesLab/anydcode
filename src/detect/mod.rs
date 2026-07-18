@@ -206,8 +206,34 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
         family: Family,
         hit: Option<&'a FinderHit>,
     }
+    let debug = std::env::var("ANYD_LOC_DEBUG").is_ok();
+    if debug {
+        for f in &finders {
+            eprintln!(
+                "finder ({},{}) module={:.2} count={}",
+                f.x as usize * grid.scale,
+                f.y as usize * grid.scale,
+                f.module,
+                f.count
+            );
+        }
+    }
     let mut scored: Vec<Scored<'_>> = Vec::new();
     for region in regions {
+        if debug {
+            eprintln!(
+                "region ({},{})-({},{}) {:?} rh={} area={} lin_ok={} mat_ok={}",
+                region.x0 * grid.scale,
+                region.y0 * grid.scale,
+                region.x1 * grid.scale,
+                region.y1 * grid.scale,
+                region.family,
+                region.reads_horizontal,
+                region.area(),
+                linear_plausible(&grid, &region),
+                matrix_plausible(&grid, &region),
+            );
+        }
         // A finder falling inside the region upgrades it to a matrix guess and lends
         // its module size.
         let hit = enclosing_finder(&finders, &region);

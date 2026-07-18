@@ -484,6 +484,36 @@ fn real_scene_locator_precision() {
     }
 }
 
+/// Real camera photo of a version-2 QR on a *curved coffee-can label* at ≈4.6 px/module
+/// with visible vertical motion smear (`testdata/real_qr_can.png`, cropped from a
+/// hand-held 1080p frame). Three hardening layers must combine to read it, and this
+/// pins all of them:
+///
+/// - the **timing-anchored thin-plate dewarp** (both timing lines lock under the
+///   adaptive binarizations, bending the grid to the can's curvature),
+/// - the **format-information brute force** (blur wrecks the single-module format
+///   fields beyond BCH repair; only 32 (level, mask) combos exist, so RS arbitrates),
+/// - the **bias-shifted module classification** (the smear drags dark modules above
+///   the geometric local-contrast midpoint; the shifted variants recover them).
+#[cfg(feature = "cli")]
+#[test]
+fn real_can_qr_curved_blurred_decode() {
+    use anyd::GrayFrame;
+
+    let bytes = std::fs::read("testdata/real_qr_can.png").expect("read fixture");
+    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma: Vec<u8> = rgba
+        .data
+        .chunks_exact(4)
+        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+        .collect();
+    let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
+
+    let sym = scan(&frame).expect("curved blurred can QR must decode");
+    assert_eq!(sym.text().as_deref(), Some("https://zko.jp/ueacvj"));
+}
+
 /// Real camera photo of an EAN-13 on a *curved, glossy gold bottle* — a 256×96 crop with
 /// module pitch ≈ 2.3 px, optical blur and mild cylinder curvature. The hard-quantized
 /// [`anyd::scan1d::scan_lines`] path cannot read it: blur merges the single-module start,

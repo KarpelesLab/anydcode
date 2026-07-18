@@ -6,7 +6,7 @@
 
 use super::matrix::Canvas;
 use super::tables::{char_count_bits, ec_blocks, mode_from_indicator, remainder_bits};
-use super::{QrMeta, Version};
+use super::{EcLevel, Mask, QrMeta, Version};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::segment::{Mode, Segment};
@@ -28,47 +28,107 @@ impl QrDecoder {
     pub fn decode_matrix(&self, matrix: &BitMatrix) -> Result<Symbol> {
         let version = version_from_size(matrix.width(), matrix.height())?;
         let canvas = Canvas::from_matrix(version, matrix);
-        let (level, mask) = canvas
-            .read_format()
-            .ok_or_else(|| Error::undecodable("unreadable format information"))?;
 
-        // Read the masked data modules along the path, unmasking as we go.
-        let path = canvas.data_path();
-        let mut bits: Vec<bool> = Vec::with_capacity(path.len());
-        for &(x, y) in &path {
-            bits.push(canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y));
-        }
-
-        let ecb = ec_blocks(version, level);
-        let total_cw = ecb.total_codewords();
-        // Pack to codewords, dropping trailing remainder bits.
-        if bits.len() < total_cw * 8 {
-            return Err(Error::undecodable("not enough data modules"));
-        }
-        let mut codewords = Vec::with_capacity(total_cw);
-        for i in 0..total_cw {
-            let mut byte = 0u8;
-            for k in 0..8 {
-                byte = (byte << 1) | bits[i * 8 + k] as u8;
+        // The format information (EC level + mask) is the most fragile part of a real
+        // capture: it lives in single-module features hugging the finder rings, exactly
+        // where blur bleeds worst. Read it if possible — but a failed (or damaged and
+        // silently mis-corrected) read is not fatal, because only 4 levels × 8 masks
+        // exist: try the read result first, then every other combination, and let
+        // Reed–Solomon arbitrate. RS makes a false accept astronomically unlikely, and
+        // a failing combination is rejected in ~µs, so the exhaustive pass costs almost
+        // nothing on grids that were going to fail anyway.
+        let read = canvas.read_format();
+        let mut last = Error::undecodable("unreadable format information");
+        if let Some((level, mask)) = read {
+            match decode_with_format(&canvas, version, level, mask) {
+                Ok(sym) => return Ok(sym),
+                Err(e) => last = e,
             }
-            codewords.push(byte);
         }
-        let _ = remainder_bits(version); // remainder bits already excluded above
-
-        let data = deinterleave_and_correct(&codewords, &ecb)?;
-        let segments = parse_segments(&data, version)?;
-
-        let meta = QrMeta {
-            version,
-            ec_level: level,
-            mask,
-        };
-        Ok(Symbol::new(
-            Symbology::QrCode,
-            segments,
-            SymbolMeta::Qr(meta),
-        ))
+        // The exhaustive pass only makes sense on a grid that is plausibly a QR at all:
+        // image-sampling front-ends throw thousands of garbage grids from false finder
+        // triples at this decoder, and 32 RS attempts on each would dominate scan time.
+        // A real symbol keeps most of its timing-pattern alternation even when blur has
+        // wrecked the format modules; garbage reads as a coin flip.
+        if timing_score(&canvas, version) < 0.75 {
+            return Err(last);
+        }
+        for (level, mask) in [EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H]
+            .into_iter()
+            .flat_map(|level| (0..8).filter_map(move |m| Mask::new(m).map(|mk| (level, mk))))
+            .filter(|&combo| Some(combo) != read)
+        {
+            match decode_with_format(&canvas, version, level, mask) {
+                Ok(sym) => return Ok(sym),
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
     }
+}
+
+/// Fraction of the two timing patterns (grid row 6 and column 6 between the finders)
+/// whose modules carry the expected dark/light alternation. `1.0` on a clean symbol;
+/// ≈`0.5` on a grid sampled from something that is not a QR.
+fn timing_score(canvas: &Canvas, version: Version) -> f32 {
+    let dim = version.size();
+    let mut ok = 0u32;
+    let mut total = 0u32;
+    for i in 8..dim - 8 {
+        let expected = i % 2 == 0;
+        ok += u32::from(canvas.get(i, 6) == expected);
+        ok += u32::from(canvas.get(6, i) == expected);
+        total += 2;
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    ok as f32 / total as f32
+}
+
+/// Decode the canvas under one assumed `(level, mask)` interpretation.
+fn decode_with_format(
+    canvas: &Canvas,
+    version: Version,
+    level: EcLevel,
+    mask: Mask,
+) -> Result<Symbol> {
+    // Read the masked data modules along the path, unmasking as we go.
+    let path = canvas.data_path();
+    let mut bits: Vec<bool> = Vec::with_capacity(path.len());
+    for &(x, y) in &path {
+        bits.push(canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y));
+    }
+
+    let ecb = ec_blocks(version, level);
+    let total_cw = ecb.total_codewords();
+    // Pack to codewords, dropping trailing remainder bits.
+    if bits.len() < total_cw * 8 {
+        return Err(Error::undecodable("not enough data modules"));
+    }
+    let mut codewords = Vec::with_capacity(total_cw);
+    for i in 0..total_cw {
+        let mut byte = 0u8;
+        for k in 0..8 {
+            byte = (byte << 1) | bits[i * 8 + k] as u8;
+        }
+        codewords.push(byte);
+    }
+    let _ = remainder_bits(version); // remainder bits already excluded above
+
+    let data = deinterleave_and_correct(&codewords, &ecb)?;
+    let segments = parse_segments(&data, version)?;
+
+    let meta = QrMeta {
+        version,
+        ec_level: level,
+        mask,
+    };
+    Ok(Symbol::new(
+        Symbology::QrCode,
+        segments,
+        SymbolMeta::Qr(meta),
+    ))
 }
 
 impl Decode for QrDecoder {

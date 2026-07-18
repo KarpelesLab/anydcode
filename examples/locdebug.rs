@@ -10,7 +10,23 @@ fn main() {
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = anyd::GrayFrame::new(&luma, w, h).unwrap();
-    let cands = locate(&frame, &LocateOptions::default());
+    // Env overrides for quick experiments: LOC_MAX (max_candidates), LOC_FRAC
+    // (max_region_frac), LOC_DENSITY (edge_density).
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse().ok());
+    let mut opts = LocateOptions::default();
+    if let Some(v) = env("LOC_MAX") {
+        opts.max_candidates = v as usize;
+    }
+    if let Some(v) = env("LOC_FRAC") {
+        opts.max_region_frac = v;
+    }
+    if let Some(v) = env("LOC_DENSITY") {
+        opts.edge_density = v;
+    }
+    if let Some(v) = env("LOC_DOWNSCALE") {
+        opts.downscale = v as usize;
+    }
+    let cands = locate(&frame, &opts);
     let thr = anyd::imgproc::threshold::otsu_threshold(&frame);
     println!("frame {w}x{h}: {} candidates (otsu {thr})", cands.len());
     for c in &cands {

@@ -40,7 +40,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ✅³ |
 | Aztec (compact + full range, all modes) · Aztec Runes | ✅ | ✅ | ✅⁶ |
 | Micro QR Code (M1–M4) | ✅ | ✅ | ✅⁶ |
-| Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ⬜ |
+| Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ✅⁶ |
 | MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
 | Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
 | DotCode (GF(113) RS) | ✅ | ✅ | ⬜ |
@@ -111,13 +111,17 @@ affine grid sampling → RS-corrected decode. Handles upright, rotation ≤±10�
 blur and noise; perspective keystoning is out of scope (no interior anchor). Envelope
 in `tests/pdf417_image.rs`.
 
-⁶ Aztec and Micro QR ship image samplers built on their native fiducials: Aztec's
-bullseye (equal-run cross-section scan → the enclosed light annulus floods cleanly
-and its corners anchor a core homography → the mode-message ring, read in image
-space, gives the exact symbol size), and Micro QR's single finder (QR-style ratio
+⁶ Aztec, Micro QR and rMQR ship image samplers built on their native fiducials:
+Aztec's bullseye (equal-run cross-section scan → the enclosed light annulus floods
+cleanly and its corners anchor a core homography → the mode-message ring, read in
+image space, gives the exact symbol size); Micro QR's single finder (QR-style ratio
 scan → the separator-isolated outer ring's corners anchor the grid → four rotations
-× four sizes arbitrated by format/ECC). Both handle any-angle rotation, scale,
-blur and noise; envelopes in `tests/aztec_image.rs` / `tests/microqr_image.rs`.
+× four sizes arbitrated by format/ECC); and rMQR's finder plus its finder-side
+format copy, which is read in image space to learn the exact rectangle before
+sampling — with the finder-sub centre dot pinned as a far anchor so wide symbols
+(up to 139 modules) stay registered. All handle any-angle rotation, scale, blur and
+noise; envelopes in `tests/aztec_image.rs` / `tests/microqr_image.rs` /
+`tests/rmqr_image.rs`.
 
 ⁵ Apple has never published the App Clip Code format; this is an independent,
 from-scratch implementation following the public reverse engineering of Apple's
@@ -211,8 +215,8 @@ $ anyd encode qr "https://example.com" --format png --out qr.png --scale 8
 $ anyd encode ean13 5901234123457 --format svg --out barcode.svg
 $ anyd encode qr "HELLO" --format unicode          # half-block art in the terminal
 
-# Decode a PNG (tries QR, Micro QR, Data Matrix, Aztec, PDF417, App Clip
-# Code, and the rotation-complete 1D front-end)
+# Decode a PNG (tries QR, Micro QR, rMQR, Data Matrix, Aztec, PDF417,
+# App Clip Code, and the rotation-complete 1D front-end)
 $ anyd decode qr.png
 QR Code: https://example.com
 

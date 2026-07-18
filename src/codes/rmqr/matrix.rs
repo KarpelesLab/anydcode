@@ -16,7 +16,7 @@ use crate::output::BitMatrix;
 pub const QUIET_ZONE: usize = 2;
 
 /// XOR mask for the finder-side format-information copy.
-const FMT_MASK_A: u32 = 0b011111101010110010;
+pub(crate) const FMT_MASK_A: u32 = 0b011111101010110010;
 /// XOR mask for the finder-sub-side format-information copy.
 const FMT_MASK_B: u32 = 0b100000101001111011;
 
@@ -316,7 +316,7 @@ impl Canvas {
 
 /// Decode an unmasked 18-bit format word to `(size, ec)` by nearest-codeword search
 /// over the 64 valid words (Hamming distance ≤ 3).
-fn decode_format(raw: u32) -> Option<(RmqrSize, RmqrEcLevel)> {
+pub(crate) fn decode_format(raw: u32) -> Option<(RmqrSize, RmqrEcLevel)> {
     let mut best = None;
     let mut best_dist = u32::MAX;
     for vi in 0..32u8 {

@@ -21,10 +21,12 @@
 mod decode;
 mod encode;
 mod matrix;
+mod sample;
 mod tables;
 
 pub use decode::RmqrDecoder;
 pub use encode::RmqrEncoder;
+pub use sample::scan;
 
 /// An rMQR symbol size, identified by its 5-bit version indicator (0..=31).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

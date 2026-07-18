@@ -36,11 +36,11 @@ const SIZES: [usize; 4] = [11, 13, 15, 17];
 
 /// A clustered finder-pattern centre.
 #[derive(Debug, Clone, Copy)]
-struct Finder {
-    x: f32,
-    y: f32,
-    module: f32,
-    count: u32,
+pub(crate) struct Finder {
+    pub x: f32,
+    pub y: f32,
+    pub module: f32,
+    pub count: u32,
 }
 
 /// Locate, sample and structurally decode the Micro QR symbol in `frame`.
@@ -125,7 +125,7 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
     Err(last)
 }
 
-fn shoelace(q: &[(f32, f32); 4]) -> f32 {
+pub(crate) fn shoelace(q: &[(f32, f32); 4]) -> f32 {
     let mut sum = 0.0;
     for i in 0..4 {
         let (x0, y0) = q[i];
@@ -136,7 +136,7 @@ fn shoelace(q: &[(f32, f32); 4]) -> f32 {
 }
 
 /// Row sweep for the 1:1:3:1:1 finder ratio with a vertical cross-check.
-fn find_finders(bin: &BinaryImage) -> Vec<Finder> {
+pub(crate) fn find_finders(bin: &BinaryImage) -> Vec<Finder> {
     let (w, h) = (bin.width(), bin.height());
     let mut out: Vec<Finder> = Vec::new();
     for y in 0..h {
@@ -186,7 +186,7 @@ fn merge(finders: &mut Vec<Finder>, x: f32, y: f32, module: f32) {
 /// solid 3×3 core, across the light ring, into the outer ring, and flood it. The
 /// light separator row/column isolates the ring from the data region, so the flood
 /// cannot leak.
-fn finder_ring_corners(bin: &BinaryImage, finder: &Finder) -> Option<[(f32, f32); 4]> {
+pub(crate) fn finder_ring_corners(bin: &BinaryImage, finder: &Finder) -> Option<[(f32, f32); 4]> {
     let w = bin.width();
     let mut x = finder.x as usize;
     let y = finder.y as usize;

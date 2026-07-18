@@ -18,7 +18,7 @@
 mod decode;
 mod encode;
 mod matrix;
-mod sample;
+pub(crate) mod sample;
 mod tables;
 
 pub use decode::MicroQrDecoder;

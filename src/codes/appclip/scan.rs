@@ -164,10 +164,14 @@ impl Gray {
         let inv = 1.0 / scale;
         for y in 0..dh {
             let sy0 = (y as f64 * inv) as usize;
-            let sy1 = (((y + 1) as f64 * inv).ceil() as usize).min(self.h).max(sy0 + 1);
+            let sy1 = (((y + 1) as f64 * inv).ceil() as usize)
+                .min(self.h)
+                .max(sy0 + 1);
             for x in 0..dw {
                 let sx0 = (x as f64 * inv) as usize;
-                let sx1 = (((x + 1) as f64 * inv).ceil() as usize).min(self.w).max(sx0 + 1);
+                let sx1 = (((x + 1) as f64 * inv).ceil() as usize)
+                    .min(self.w)
+                    .max(sx0 + 1);
                 let mut sum = 0.0;
                 for sy in sy0..sy1 {
                     for sx in sx0..sx1 {
@@ -701,7 +705,14 @@ fn sample_positions(gray: &Gray, x: &Xform, theta_deg: f64) -> Option<Vec<Positi
         for pos in 0..n {
             let angle = (ring_rot + theta_deg + pos as f64 * bit_angle).to_radians();
 
-            let boundary = patch(gray, x, radius, angle, jitter, &[-STROKE * 0.22, 0.0, STROKE * 0.22])?;
+            let boundary = patch(
+                gray,
+                x,
+                radius,
+                angle,
+                jitter,
+                &[-STROKE * 0.22, 0.0, STROKE * 0.22],
+            )?;
             let bg_off = STROKE * 0.85;
             let inner = patch(gray, x, radius - bg_off, angle, jitter * 0.6, &[0.0])?;
             let outer = patch(gray, x, radius + bg_off, angle, jitter * 0.6, &[0.0])?;
@@ -867,7 +878,10 @@ fn decode_candidate(gray: &Gray, field: &EdgeField, cand: Candidate) -> Option<S
                 x.angle.to_degrees(),
                 x.sx,
                 x.sy,
-                thetas.iter().map(|t| (t * 10.0).round() / 10.0).collect::<Vec<_>>()
+                thetas
+                    .iter()
+                    .map(|t| (t * 10.0).round() / 10.0)
+                    .collect::<Vec<_>>()
             );
         }
         for theta in thetas {
@@ -923,8 +937,8 @@ fn decode_attempts(samples: &[PositionSample]) -> Vec<Vec<bool>> {
                     mi += 1;
                 }
             }
-            let penalty = f64::from(template_mismatch(&bits)) * 10.0
-                + (visible_count as f64 - 64.0).abs();
+            let penalty =
+                f64::from(template_mismatch(&bits)) * 10.0 + (visible_count as f64 - 64.0).abs();
             attempts.push((penalty, bits));
         }
     }

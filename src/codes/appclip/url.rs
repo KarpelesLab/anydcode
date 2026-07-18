@@ -12,8 +12,8 @@ use std::sync::OnceLock;
 
 use super::huffman::{HuffmanCoder, MultiCoder, Trie};
 use super::tables::{
-    CPQ_SYMBOLS, FIXED6_ALPHABET, FIXED_TLDS, HOST_SYMBOLS, HUFFMAN_TLDS, KNOWN_WORDS,
-    SPQ_SYMBOLS, fixed6_index, known_word_index,
+    CPQ_SYMBOLS, FIXED_TLDS, FIXED6_ALPHABET, HOST_SYMBOLS, HUFFMAN_TLDS, KNOWN_WORDS, SPQ_SYMBOLS,
+    fixed6_index, known_word_index,
 };
 use crate::error::{Error, Result};
 
@@ -140,7 +140,9 @@ fn choose_path_query(path: &str, query: &str, fragment: &str) -> Result<(String,
         (Some(t), Some(p)) if t.len() < p.len() => Ok((t, true)),
         (_, Some(p)) => Ok((p, false)),
         (Some(t), None) => Ok((t, true)),
-        (None, None) => Err(Error::invalid_parameter("App Clip path/query not encodable")),
+        (None, None) => Err(Error::invalid_parameter(
+            "App Clip path/query not encodable",
+        )),
     }
 }
 
@@ -491,7 +493,9 @@ enum Component {
 fn parse_url(raw: &str) -> Result<ParsedUrl> {
     let scheme = "https://";
     if raw.len() < scheme.len() || !raw[..scheme.len()].eq_ignore_ascii_case(scheme) {
-        return Err(Error::invalid_parameter("App Clip URL scheme must be https"));
+        return Err(Error::invalid_parameter(
+            "App Clip URL scheme must be https",
+        ));
     }
     let rest = &raw[scheme.len()..];
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
@@ -800,7 +804,11 @@ fn decode_segmented(data: &[bool], pos: &mut usize) -> Result<String> {
 
 fn build_segmented_path(parts: &[String], root_only: bool, trailing_slash: bool) -> String {
     if parts.is_empty() {
-        return if root_only { "/".to_string() } else { String::new() };
+        return if root_only {
+            "/".to_string()
+        } else {
+            String::new()
+        };
     }
     let mut path = format!("/{}", parts.join("/"));
     if trailing_slash {
@@ -845,9 +853,7 @@ fn decode_segmented_query(data: &[bool], pos: &mut usize) -> Result<String> {
                 (key, value)
             }
             _ => {
-                return Err(Error::undecodable(
-                    "App Clip segmented query type invalid",
-                ));
+                return Err(Error::undecodable("App Clip segmented query type invalid"));
             }
         };
         if !first {

@@ -760,8 +760,9 @@ impl Located {
                         for &dv in &OFF {
                             for &du in &OFF {
                                 let (px, py) = map(gx + du, gy + dv);
-                                if sample_dark_local(frame, px, py, integral, radius, midpoint, backstop)
-                                {
+                                if sample_dark_local(
+                                    frame, px, py, integral, radius, midpoint, backstop,
+                                ) {
                                     votes_dark += 1;
                                 }
                             }

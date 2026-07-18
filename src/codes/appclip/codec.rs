@@ -43,7 +43,10 @@ const TEMPLATE_BITS: [bool; 8] = [false, true, false, true, false, true, false, 
 /// Encode a compressed-URL payload (≤ 16 bytes) into the final ring bit vector.
 pub fn encode_payload(payload: &[u8]) -> Result<Vec<bool>> {
     let trimmed: &[u8] = {
-        let start = payload.iter().position(|&b| b != 0).unwrap_or(payload.len());
+        let start = payload
+            .iter()
+            .position(|&b| b != 0)
+            .unwrap_or(payload.len());
         &payload[start..]
     };
     if trimmed.len() > 16 {
@@ -60,7 +63,10 @@ pub fn encode_payload(payload: &[u8]) -> Result<Vec<bool>> {
     let scrambled: Vec<u8> = (0..total).map(|i| padded[total - 1 - i] ^ 0xA5).collect();
 
     let gf256 = Gf::f256();
-    let gaps_syms: Vec<usize> = scrambled[..fp.gaps_data].iter().map(|&b| b as usize).collect();
+    let gaps_syms: Vec<usize> = scrambled[..fp.gaps_data]
+        .iter()
+        .map(|&b| b as usize)
+        .collect();
     let mut gaps_bits = symbols_to_bits(&rs_encode(&gf256, &gaps_syms, fp.gaps_parity), 8);
 
     // Invert so the gaps ring always holds more zero (visible) than one bits.
@@ -183,7 +189,8 @@ fn symbols_to_bits(symbols: &[usize], bits_per: usize) -> Vec<bool> {
 }
 
 fn bits_to_symbol(bits: &[bool]) -> usize {
-    bits.iter().fold(0usize, |acc, &b| (acc << 1) | usize::from(b))
+    bits.iter()
+        .fold(0usize, |acc, &b| (acc << 1) | usize::from(b))
 }
 
 #[cfg(test)]

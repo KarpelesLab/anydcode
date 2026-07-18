@@ -246,7 +246,11 @@ fn write_logo(s: &mut String, logo: LogoKind, pal: &Palette) {
         LogoKind::Camera => {
             s.push_str("    <g id=\"Logo\" data-logo-type=\"Camera\" transform=\"translate(293.275699 293.275699) scale(1.874000 1.874000)\">\n");
             for p in CAMERA_PATHS {
-                let _ = writeln!(s, "        <path d=\"{p}\" style=\"fill:{}\"/>", pal.foreground.hex());
+                let _ = writeln!(
+                    s,
+                    "        <path d=\"{p}\" style=\"fill:{}\"/>",
+                    pal.foreground.hex()
+                );
             }
         }
     }

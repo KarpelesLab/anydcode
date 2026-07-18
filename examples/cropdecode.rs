@@ -37,8 +37,7 @@ fn main() {
     let (cw, ch) = (x1 - x0, y1 - y0);
     let mut crop = vec![0u8; cw * ch];
     for y in 0..ch {
-        crop[y * cw..(y + 1) * cw]
-            .copy_from_slice(&luma[(y0 + y) * w + x0..(y0 + y) * w + x1]);
+        crop[y * cw..(y + 1) * cw].copy_from_slice(&luma[(y0 + y) * w + x0..(y0 + y) * w + x1]);
     }
     let frame = anyd::GrayFrame::new(&crop, cw, ch).unwrap();
     if let Some(out) = dump {

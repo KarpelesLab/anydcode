@@ -244,7 +244,13 @@ impl MultiCoder {
 
     /// Decode symbols from `data` at `*pos` until `stop` is produced (included in the
     /// result), the bits run out, or no code matches.
-    pub fn decode(&self, data: &[bool], pos: &mut usize, stop: Option<char>, start_ctx: &str) -> String {
+    pub fn decode(
+        &self,
+        data: &[bool],
+        pos: &mut usize,
+        stop: Option<char>,
+        start_ctx: &str,
+    ) -> String {
         let (mut node, mut depth) = (0usize, 0usize);
         for c in start_ctx.chars() {
             let Some(idx) = self.symbol_index(c) else {

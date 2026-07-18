@@ -21,12 +21,19 @@ use anyd::{GrayImage, Symbology};
 /// Render an EAN-13 at `scale` px/module with a tall bar band.
 fn ean(scale: usize) -> GrayImage {
     let enc = EanEncoder::new();
-    render(&enc.encode(&enc.build_ean13("4901777300521").unwrap()).unwrap(), scale)
+    render(
+        &enc.encode(&enc.build_ean13("4901777300521").unwrap())
+            .unwrap(),
+        scale,
+    )
 }
 
 fn code128(scale: usize) -> GrayImage {
     let enc = Code128Encoder::new();
-    render(&enc.encode(&enc.build_text("ROT-128").unwrap()).unwrap(), scale)
+    render(
+        &enc.encode(&enc.build_text("ROT-128").unwrap()).unwrap(),
+        scale,
+    )
 }
 
 /// Scan a rotated render and assert the expected symbology + payload comes back.
@@ -82,7 +89,10 @@ fn rotated_outline_maps_back_into_frame() {
         .iter()
         .find(|s| s.symbology == Symbology::Ean13)
         .expect("EAN at 45° must decode");
-    let loc = sym.location.as_ref().expect("decoded symbol carries a location");
+    let loc = sym
+        .location
+        .as_ref()
+        .expect("decoded symbol carries a location");
     let c = loc.outline.center();
     let (w, h) = (rotated.width() as f32, rotated.height() as f32);
     // The symbol fills the rotated canvas's centre; its mapped-back centre must land

@@ -158,10 +158,7 @@ pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
     // Map each symbol's outline from derotated coordinates back into the frame.
     let (s, c) = (-angle).sin_cos();
     let (cx, cy) = (frame.width() as f32 / 2.0, frame.height() as f32 / 2.0);
-    let (ncx, ncy) = (
-        rotated.width() as f32 / 2.0,
-        rotated.height() as f32 / 2.0,
-    );
+    let (ncx, ncy) = (rotated.width() as f32 / 2.0, rotated.height() as f32 / 2.0);
     for sym in &mut found {
         if let Some(loc) = &mut sym.location {
             for p in &mut loc.outline.corners {

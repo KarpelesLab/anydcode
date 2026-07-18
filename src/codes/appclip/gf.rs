@@ -133,7 +133,9 @@ fn syndromes(gf: &Gf, codeword: &[usize], num_parity: usize) -> Vec<usize> {
     (0..num_parity)
         .map(|si| {
             let root = gf.pow((gf.fcr + si) as isize);
-            codeword.iter().fold(0usize, |acc, &sym| gf.mul(acc, root) ^ sym)
+            codeword
+                .iter()
+                .fold(0usize, |acc, &sym| gf.mul(acc, root) ^ sym)
         })
         .collect()
 }

@@ -37,10 +37,10 @@ pub fn dominant_gradient_angle(frame: &GrayFrame<'_>) -> Option<f32> {
     let mut total = 0.0f32;
     for y in 1..h - 1 {
         for x in 1..w - 1 {
-            let gx = f32::from(frame.get_unchecked(x + 1, y))
-                - f32::from(frame.get_unchecked(x - 1, y));
-            let gy = f32::from(frame.get_unchecked(x, y + 1))
-                - f32::from(frame.get_unchecked(x, y - 1));
+            let gx =
+                f32::from(frame.get_unchecked(x + 1, y)) - f32::from(frame.get_unchecked(x - 1, y));
+            let gy =
+                f32::from(frame.get_unchecked(x, y + 1)) - f32::from(frame.get_unchecked(x, y - 1));
             let mag2 = gx * gx + gy * gy;
             if mag2 < MIN_MAG2 {
                 continue;

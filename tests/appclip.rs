@@ -12,24 +12,78 @@ const APPLE_VECTORS: &[(&str, &str)] = &[
     ("https://example.com", "0000000000000000000000008e33db36"),
     ("https://a.co", "00000000000000000000000000004e2f"),
     ("https://www.apple.com", "000000000000000000000478a3cee226"),
-    ("https://example.com/path", "000000000000000000238cf6cdb5d582"),
-    ("https://appclip.example.com", "000000000000000000000000ae33db36"),
-    ("https://app.nextdns.io?p=", "0000000000000000d02424a9f120a6e4"),
-    ("https://app.nextdns.io?p=a", "000000000000001a0484953e2414dc85"),
-    ("https://app.nextdns.io?p=a&p1=b", "000000000001a0484953e2414dc85031"),
-    ("https://app.nextdns.io?p=a&", "000000000902424a9f120a6e3ccda046"),
-    ("https://app.nextdns.io?p=abcdef", "000000003409092a7c4829b90b858ed5"),
-    ("https://app.nextdns.io?&p=a&&p1=b", "000000000001a0484953e2414dc85031"),
-    ("https://app.nextdns.io?x=a", "0000000000902424a9f120a6e720cea5"),
-    ("https://app.nextdns.io/bag", "000000000000003409092a7c4829b809"),
-    ("https://app.nextdns.io/biz", "000000000000003409092a7c4829b80a"),
-    ("https://app.nextdns.io/cat", "000000000000003409092a7c4829b812"),
-    ("https://app.nextdns.io/shop?p=a", "0000000000003409092a7c4829b87785"),
-    ("https://app.nextdns.io/use", "000000000000003409092a7c4829b894"),
-    ("https://app.nextdns.io/a?p=abcdef", "00048121254f89053722fb320b858ed5"),
-    ("https://app.nextdns.io/id?p=a&p1=b", "0000000003409092a7c4829b83e85031"),
-    ("https://app.nextdns.io/id?p=abcdef", "00000068121254f89053707d0b858ed5"),
-    ("https://qr.netflix.com/C/AAAA", "0000000116d5992f39664d1bfa2cb2cb"),
+    (
+        "https://example.com/path",
+        "000000000000000000238cf6cdb5d582",
+    ),
+    (
+        "https://appclip.example.com",
+        "000000000000000000000000ae33db36",
+    ),
+    (
+        "https://app.nextdns.io?p=",
+        "0000000000000000d02424a9f120a6e4",
+    ),
+    (
+        "https://app.nextdns.io?p=a",
+        "000000000000001a0484953e2414dc85",
+    ),
+    (
+        "https://app.nextdns.io?p=a&p1=b",
+        "000000000001a0484953e2414dc85031",
+    ),
+    (
+        "https://app.nextdns.io?p=a&",
+        "000000000902424a9f120a6e3ccda046",
+    ),
+    (
+        "https://app.nextdns.io?p=abcdef",
+        "000000003409092a7c4829b90b858ed5",
+    ),
+    (
+        "https://app.nextdns.io?&p=a&&p1=b",
+        "000000000001a0484953e2414dc85031",
+    ),
+    (
+        "https://app.nextdns.io?x=a",
+        "0000000000902424a9f120a6e720cea5",
+    ),
+    (
+        "https://app.nextdns.io/bag",
+        "000000000000003409092a7c4829b809",
+    ),
+    (
+        "https://app.nextdns.io/biz",
+        "000000000000003409092a7c4829b80a",
+    ),
+    (
+        "https://app.nextdns.io/cat",
+        "000000000000003409092a7c4829b812",
+    ),
+    (
+        "https://app.nextdns.io/shop?p=a",
+        "0000000000003409092a7c4829b87785",
+    ),
+    (
+        "https://app.nextdns.io/use",
+        "000000000000003409092a7c4829b894",
+    ),
+    (
+        "https://app.nextdns.io/a?p=abcdef",
+        "00048121254f89053722fb320b858ed5",
+    ),
+    (
+        "https://app.nextdns.io/id?p=a&p1=b",
+        "0000000003409092a7c4829b83e85031",
+    ),
+    (
+        "https://app.nextdns.io/id?p=abcdef",
+        "00000068121254f89053707d0b858ed5",
+    ),
+    (
+        "https://qr.netflix.com/C/AAAA",
+        "0000000116d5992f39664d1bfa2cb2cb",
+    ),
 ];
 
 fn hex(bytes: &[u8]) -> String {
@@ -39,8 +93,8 @@ fn hex(bytes: &[u8]) -> String {
 #[test]
 fn compression_matches_apple_framework() {
     for &(url, want) in APPLE_VECTORS {
-        let payload = appclip::compress_url(url)
-            .unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
+        let payload =
+            appclip::compress_url(url).unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
         assert_eq!(hex(&payload), want, "payload mismatch for {url}");
     }
 }
@@ -71,19 +125,19 @@ fn full_roundtrip_through_ring_bits() {
         "https://example.com/watch?v=123",
     ];
     for url in urls {
-        let payload = appclip::compress_url(url)
-            .unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
-        let bits = appclip::encode_payload(&payload)
-            .unwrap_or_else(|e| panic!("encode {url}: {e:?}"));
+        let payload =
+            appclip::compress_url(url).unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
+        let bits =
+            appclip::encode_payload(&payload).unwrap_or_else(|e| panic!("encode {url}: {e:?}"));
         assert!(bits.len() >= 129, "{url}: bit vector too short");
-        let back = appclip::decode_payload(&bits)
-            .unwrap_or_else(|e| panic!("decode bits {url}: {e:?}"));
+        let back =
+            appclip::decode_payload(&bits).unwrap_or_else(|e| panic!("decode bits {url}: {e:?}"));
         assert_eq!(hex(&back), hex(&payload), "payload round-trip for {url}");
         // The decompressor canonicalizes some spellings the way Apple's does (e.g.
         // `?x=y` → `/?x=y`), so the recovered URL is asserted to be a *fixpoint*:
         // compressing and decompressing it again must reproduce it exactly.
-        let recovered = appclip::decompress_url(&back)
-            .unwrap_or_else(|e| panic!("decompress {url}: {e:?}"));
+        let recovered =
+            appclip::decompress_url(&back).unwrap_or_else(|e| panic!("decompress {url}: {e:?}"));
         let recompressed = appclip::compress_url(&recovered)
             .unwrap_or_else(|e| panic!("recompress {recovered}: {e:?}"));
         let again = appclip::decompress_url(&recompressed)
@@ -112,13 +166,13 @@ fn canonical_escapes_match() {
 #[test]
 fn rejects_invalid_urls() {
     for url in [
-        "http://example.com",           // not https
-        "https://",                     // no host
-        "https://user@example.com",     // user info
-        "https://example.com:8443",     // port
-        "https://exämple.com",          // non-ASCII host
+        "http://example.com",            // not https
+        "https://",                      // no host
+        "https://user@example.com",      // user info
+        "https://example.com:8443",      // port
+        "https://exämple.com",           // non-ASCII host
         "https://xn--e1afmkfd.xn--p1ai", // punycode
-        "https://example",              // no TLD
+        "https://example",               // no TLD
         // Legitimate URL that simply does not fit 128 compressed bits: rejected
         // with a capacity error rather than silently truncated.
         "https://karpeleslab.github.io/anydcode/scanner-docs",
@@ -233,8 +287,7 @@ fn rasterize_at(
                         for &(start, end, luma) in &arcs[ring] {
                             // Wrapping arcs run past 360°, so a position near 0° may
                             // fall inside via its +360° alias.
-                            if (a >= start && a <= end)
-                                || (a + 360.0 >= start && a + 360.0 <= end)
+                            if (a >= start && a <= end) || (a + 360.0 >= start && a + 360.0 <= end)
                             {
                                 v = luma;
                                 break;
@@ -289,7 +342,10 @@ fn scan_2d_pipeline_reads_appclip() {
             .any(|s| s.symbology == anyd::Symbology::AppClipCode
                 && s.text().as_deref() == Some("https://example.com/shop?p=1")),
         "scan_2d results: {:?}",
-        found.iter().map(|s| (s.symbology, s.text())).collect::<Vec<_>>()
+        found
+            .iter()
+            .map(|s| (s.symbology, s.text()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -310,8 +366,7 @@ fn scan_rejects_plain_scene() {
 
 #[test]
 fn svg_generation_structure() {
-    let svg =
-        appclip::generate_svg("https://example.com", &appclip::Options::default()).unwrap();
+    let svg = appclip::generate_svg("https://example.com", &appclip::Options::default()).unwrap();
     assert!(svg.contains("data-design=\"Fingerprint\""));
     assert!(svg.contains("<circle"));
     for ring in 1..=5 {

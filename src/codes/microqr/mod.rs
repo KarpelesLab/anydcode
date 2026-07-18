@@ -18,10 +18,12 @@
 mod decode;
 mod encode;
 mod matrix;
+mod sample;
 mod tables;
 
 pub use decode::MicroQrDecoder;
 pub use encode::MicroQrEncoder;
+pub use sample::scan;
 
 /// A Micro QR symbol version, M1–M4. The module grid is `11 + 2 * (n - 1)` on a side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

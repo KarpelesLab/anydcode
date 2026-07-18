@@ -14,7 +14,7 @@ mod decode;
 mod encode;
 pub mod gf;
 mod matrix;
-mod sample;
+pub(crate) mod sample;
 mod tables;
 
 pub use decode::QrDecoder;

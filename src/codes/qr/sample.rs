@@ -419,7 +419,7 @@ struct Finder {
 
 /// Check that five run lengths match the finder 1:1:3:1:1 ratio; return the module
 /// size (average narrow-run width) on success.
-fn found_pattern_cross(counts: [i32; 5]) -> Option<f32> {
+pub(crate) fn found_pattern_cross(counts: [i32; 5]) -> Option<f32> {
     let total: i32 = counts.iter().sum();
     if total < 7 {
         return None;
@@ -441,7 +441,11 @@ fn found_pattern_cross(counts: [i32; 5]) -> Option<f32> {
 /// Walk a dark-light-dark-light-dark run centered at `start` along an axis, returning
 /// the five run lengths and the end index just past the final dark run. `sample(k)`
 /// returns whether the pixel at axis position `k` is dark; the axis spans `0..len`.
-fn walk_run(len: i32, start: i32, sample: impl Fn(i32) -> bool) -> Option<([i32; 5], i32)> {
+pub(crate) fn walk_run(
+    len: i32,
+    start: i32,
+    sample: impl Fn(i32) -> bool,
+) -> Option<([i32; 5], i32)> {
     let mut counts = [0i32; 5];
     let mut i = start;
     while i >= 0 && sample(i) {
@@ -491,7 +495,7 @@ fn walk_run(len: i32, start: i32, sample: impl Fn(i32) -> bool) -> Option<([i32;
 }
 
 /// Refined center from run lengths and the walk's end index.
-fn run_center(counts: [i32; 5], end: i32) -> f32 {
+pub(crate) fn run_center(counts: [i32; 5], end: i32) -> f32 {
     end as f32 - counts[4] as f32 - counts[3] as f32 - counts[2] as f32 / 2.0
 }
 
@@ -536,7 +540,11 @@ fn add_center(centers: &mut Vec<Finder>, x: f32, y: f32, module_size: f32) {
 /// Run-length encode one line, invoking `emit(run_start, [c0..c4])` for every window of
 /// five consecutive runs that begins on a dark run — `start` is the pixel index where
 /// the middle (centre) run begins.
-fn scan_line_runs(len: usize, dark: impl Fn(usize) -> bool, mut emit: impl FnMut(usize, [i32; 5])) {
+pub(crate) fn scan_line_runs(
+    len: usize,
+    dark: impl Fn(usize) -> bool,
+    mut emit: impl FnMut(usize, [i32; 5]),
+) {
     let mut runs: Vec<(bool, usize, i32)> = Vec::new();
     let mut cur = dark(0);
     let mut start = 0usize;

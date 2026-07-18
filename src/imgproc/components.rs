@@ -139,6 +139,105 @@ pub fn connected_components(img: &BinaryImage, conn: Connectivity) -> Vec<Compon
     out
 }
 
+/// Collect the pixels of the single region of `value`-pixels containing `seed`
+/// (8-connected). Empty when the seed has the wrong value or is out of bounds.
+///
+/// Complements [`connected_components`] (which labels *every* dark region but keeps
+/// only summary statistics): samplers that already know a point on their fiducial —
+/// a finder ring, a bullseye ring, an enclosed quiet annulus — flood just that
+/// region and keep the pixels for geometry extraction.
+pub fn flood_region(img: &BinaryImage, seed: (usize, usize), value: bool) -> Vec<(usize, usize)> {
+    let (w, h) = (img.width(), img.height());
+    if seed.0 >= w || seed.1 >= h || img.get(seed.0, seed.1) != value {
+        return Vec::new();
+    }
+    let mut visited = vec![false; w * h];
+    let mut stack = vec![seed];
+    let mut out = Vec::new();
+    visited[seed.1 * w + seed.0] = true;
+    while let Some((x, y)) = stack.pop() {
+        out.push((x, y));
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx as usize >= w || ny as usize >= h {
+                    continue;
+                }
+                let idx = ny as usize * w + nx as usize;
+                if !visited[idx] && img.get(nx as usize, ny as usize) == value {
+                    visited[idx] = true;
+                    stack.push((nx as usize, ny as usize));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The four corners of a roughly square/quadrilateral pixel cloud, in cyclic order,
+/// by the rotation-robust farthest-point method: the pixel farthest from the centroid
+/// is a corner, the pixel farthest from it is the opposite corner, and the extreme
+/// pixels on each side of that diagonal complete the quad. Each returned point is the
+/// corner pixel's **outer corner** (its centre pushed half a pixel away from the
+/// cloud centroid on each axis) — the geometrically meaningful boundary point, whose
+/// half-pixel accuracy matters once a small fiducial is extrapolated across a whole
+/// symbol. Returns `None` for clouds too small to carry corners.
+pub fn extreme_quad(pixels: &[(usize, usize)]) -> Option<[(f32, f32); 4]> {
+    if pixels.len() < 4 {
+        return None;
+    }
+    let n = pixels.len() as f32;
+    let (sx, sy) = pixels.iter().fold((0f32, 0f32), |(ax, ay), &(x, y)| {
+        (ax + x as f32, ay + y as f32)
+    });
+    let (cx, cy) = (sx / n, sy / n);
+
+    let far_from = |px: f32, py: f32| -> (f32, f32) {
+        let mut best = (px, py);
+        let mut best_d = -1.0f32;
+        for &(x, y) in pixels {
+            let (dx, dy) = (x as f32 - px, y as f32 - py);
+            let d = dx * dx + dy * dy;
+            if d > best_d {
+                best_d = d;
+                best = (x as f32, y as f32);
+            }
+        }
+        best
+    };
+    let a = far_from(cx, cy);
+    let c = far_from(a.0, a.1);
+
+    // Extremes on each side of the diagonal a–c (largest perpendicular offset).
+    let (dx, dy) = (c.0 - a.0, c.1 - a.1);
+    let mut b = a;
+    let mut d = a;
+    let mut best_pos = 0.0f32;
+    let mut best_neg = 0.0f32;
+    for &(x, y) in pixels {
+        let cross = (x as f32 - a.0) * dy - (y as f32 - a.1) * dx;
+        if cross > best_pos {
+            best_pos = cross;
+            b = (x as f32, y as f32);
+        } else if cross < best_neg {
+            best_neg = cross;
+            d = (x as f32, y as f32);
+        }
+    }
+    if best_pos == 0.0 || best_neg == 0.0 {
+        return None;
+    }
+    // Pixel index → the pixel's outer corner: centre (+0.5) then half a pixel
+    // outward from the centroid per axis.
+    let outer = |p: (f32, f32)| {
+        (
+            p.0 + 0.5 + 0.5 * (p.0 - cx).signum(),
+            p.1 + 0.5 + 0.5 * (p.1 - cy).signum(),
+        )
+    };
+    Some([outer(a), outer(b), outer(c), outer(d)])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

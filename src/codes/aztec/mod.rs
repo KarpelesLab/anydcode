@@ -23,10 +23,12 @@ pub mod gf;
 mod highlevel;
 mod layout;
 mod rune;
+mod sample;
 mod tables;
 
 pub use decode::AztecDecoder;
 pub use encode::AztecEncoder;
+pub use sample::scan;
 
 /// Aztec Code has no mandatory quiet zone.
 const QUIET_ZONE: usize = 0;

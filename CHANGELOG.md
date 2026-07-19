@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/KarpelesLab/anydcode/compare/v0.1.2...v0.1.3) - 2026-07-19
+
+### Other
+
+- image sampler — camera detection for all 34 size variants
+- image sampler — camera detection for all 32 rectangular sizes
+- image samplers — camera detection via native fiducials
+
 ## [0.1.2](https://github.com/KarpelesLab/anydcode/compare/v0.1.1...v0.1.2) - 2026-07-18
 
 ### Fixed

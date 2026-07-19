@@ -96,7 +96,7 @@ pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 }
 
 /// Decode only the **2D / self-localizing** symbologies (QR, Data Matrix, Aztec,
-/// Micro QR, rMQR, PDF417, App Clip Code) from `frame`.
+/// Micro QR, rMQR, PDF417, MicroPDF417, App Clip Code) from `frame`.
 ///
 /// These samplers *self-localize* — they find their own finder / start patterns — so
 /// they are meant to run on a whole frame, not a pre-cropped region, and they carry the
@@ -121,6 +121,9 @@ pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
         dedup_push(&mut found, s);
     }
     if let Some(s) = crate::codes::pdf417::scan(frame) {
+        dedup_push(&mut found, s);
+    }
+    if let Ok(s) = crate::codes::pdf417::scan_micro(frame) {
         dedup_push(&mut found, s);
     }
     #[cfg(feature = "appclip")]

@@ -66,16 +66,16 @@ const RAP_WIDTH: usize = 10;
 const PAD: u32 = 900;
 
 /// Number of size variants defined by ISO/IEC 24728.
-const NUM_VARIANTS: usize = 34;
+pub(super) const NUM_VARIANTS: usize = 34;
 
 /// Data columns (`1..=4`) for each of the 34 size variants.
-const VAR_COLS: [u8; NUM_VARIANTS] = [
+pub(super) const VAR_COLS: [u8; NUM_VARIANTS] = [
     1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4,
     4, 4,
 ];
 
 /// Row count for each size variant.
-const VAR_ROWS: [u8; NUM_VARIANTS] = [
+pub(super) const VAR_ROWS: [u8; NUM_VARIANTS] = [
     11, 14, 17, 20, 24, 28, 8, 11, 14, 17, 20, 23, 26, 6, 8, 10, 12, 15, 20, 26, 32, 38, 44, 4, 6,
     8, 10, 12, 15, 20, 26, 32, 38, 44,
 ];
@@ -127,7 +127,7 @@ const RAP_CENTRE_PAT: [u32; 52] = [
 ];
 
 /// The symbol width in modules for a variant with `cols` data columns.
-fn variant_width(cols: usize) -> usize {
+pub(super) fn variant_width(cols: usize) -> usize {
     // left RAP + data columns + (a centre RAP when there are 3+ columns) + right RAP
     // + the single stop module.
     let centre = if cols >= 3 { RAP_WIDTH } else { 0 };
@@ -361,6 +361,7 @@ impl MicroPdf417Decoder {
         let reverse = reverse_tables();
         let mut cluster = START_CLUSTER[variant] as usize;
         let mut codewords = Vec::with_capacity(cols * rows);
+        let mut misses = 0usize;
         for y in 0..rows {
             let sample_row = y * MICRO_ROW_HEIGHT;
             for col in 0..cols {
@@ -371,13 +372,29 @@ impl MicroPdf417Decoder {
                     x0 += RAP_WIDTH;
                 }
                 let pattern = read_pattern(matrix, x0, sample_row);
-                let cw = reverse[cluster].get(&pattern).copied().unwrap_or(0);
+                let cw = match reverse[cluster].get(&pattern) {
+                    Some(&cw) => cw,
+                    None => {
+                        misses += 1;
+                        0
+                    }
+                };
                 codewords.push(cw);
             }
             cluster = if cluster == 2 { 0 } else { cluster + 1 };
         }
 
         let k = VAR_EC[variant] as usize;
+        // A pattern absent from the codeword tables is a guaranteed error; once they
+        // exceed what Reed–Solomon can repair the grid cannot be genuine, and an
+        // all-miss grid would otherwise "decode" perfectly (misses read as codeword
+        // 0, and the all-zero vector is a valid RS codeword). Image samplers throw
+        // many wrong geometry hypotheses at this decoder, so reject early and hard.
+        if misses * 2 > k {
+            return Err(Error::undecodable(
+                "too many unrecognized MicroPDF417 codeword patterns",
+            ));
+        }
         let capacity = variant_capacity(variant);
         let corrected = ec::decode(&codewords, k).ok_or(Error::ErrorCorrectionFailed)?;
         // MicroPDF417 has no symbol-length descriptor; synthesise one so the shared

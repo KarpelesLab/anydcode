@@ -34,12 +34,14 @@ mod decode;
 pub mod ec;
 mod encode;
 mod micro;
+mod micro_sample;
 mod sample;
 mod tables;
 
 pub use decode::Pdf417Decoder;
 pub use encode::Pdf417Encoder;
 pub use micro::{MicroPdf417Decoder, MicroPdf417Encoder};
+pub use micro_sample::scan_micro;
 pub use sample::{Pdf417Scanner, sample_grid, scan};
 
 use crate::error::Error;

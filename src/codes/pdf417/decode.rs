@@ -55,6 +55,7 @@ impl Pdf417Decoder {
 
         let reverse = build_reverse_tables();
         let mut codewords = Vec::with_capacity(rows * cols);
+        let mut misses = 0usize;
         for y in 0..rows {
             let cluster = y % 3;
             let sample_row = y * ROW_HEIGHT;
@@ -63,12 +64,26 @@ impl Pdf417Decoder {
                 let pattern = read_pattern(matrix, x0, sample_row);
                 // An unrecognised pattern is a damaged symbol character; substitute a
                 // sentinel so Reed–Solomon sees (and can repair) it as a codeword error.
-                let cw = reverse[cluster].get(&pattern).copied().unwrap_or(0);
+                let cw = match reverse[cluster].get(&pattern) {
+                    Some(&cw) => cw,
+                    None => {
+                        misses += 1;
+                        0
+                    }
+                };
                 codewords.push(cw);
             }
         }
 
         let total = rows * cols;
+        // Unrecognised patterns beyond half the symbol cannot be Reed–Solomon
+        // repaired at any EC level; reject rather than let an all-miss (all-zero)
+        // grid slide through as a trivially valid codeword.
+        if misses * 2 > total {
+            return Err(Error::undecodable(
+                "too many unrecognized PDF417 codeword patterns",
+            ));
+        }
         let (ec_level, corrected) = resolve_ec(&codewords, total)?;
         let k = ec_level.ec_codewords();
         let n = total - k;

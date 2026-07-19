@@ -52,7 +52,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
 | PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ✅⁴ |
-| MicroPDF417 (all 34 size variants) | ✅ | ✅ | ⬜ |
+| MicroPDF417 (all 34 size variants) | ✅ | ✅ | ✅⁷ |
 | Code 16K · Code 49 · Codablock F | ✅ | ✅ | ⬜ |
 | GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ✅ | ✅ | ⬜ |
 
@@ -137,6 +137,12 @@ related marks are trademarks of Apple Inc.
 
 [rs/appclipcode]: https://github.com/rs/appclipcode
 
+⁷ MicroPDF417 has no start/stop guards (its Row Address Patterns vary per row), but
+only 34 rigid size variants exist: the sampler corners the dark-pixel cloud (as the
+Data Matrix sampler does), then tries the variants whose module aspect matches the
+measured quad, nearest first, across the four rotations — Reed–Solomon arbitrates.
+Any-angle rotation, scale, blur, noise; envelope in `tests/micropdf417_image.rs`.
+
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes
 > called "Coda"/NW-7. These are aliases for the same `Symbology` variants above.
@@ -216,7 +222,7 @@ $ anyd encode ean13 5901234123457 --format svg --out barcode.svg
 $ anyd encode qr "HELLO" --format unicode          # half-block art in the terminal
 
 # Decode a PNG (tries QR, Micro QR, rMQR, Data Matrix, Aztec, PDF417,
-# App Clip Code, and the rotation-complete 1D front-end)
+# MicroPDF417, App Clip Code, and the rotation-complete 1D front-end)
 $ anyd decode qr.png
 QR Code: https://example.com
 

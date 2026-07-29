@@ -13,7 +13,7 @@ use super::{MicroEcLevel, MicroMask, MicroQrMeta, MicroVersion};
 use crate::codes::qr::gf;
 use crate::error::{Error, Result};
 use crate::output::Encoding;
-use crate::segment::{Mode, Segment};
+use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
@@ -51,6 +51,70 @@ impl MicroQrEncoder {
     pub fn build_numeric(&self, digits: &[u8], level: MicroEcLevel) -> Result<Symbol> {
         self.build(vec![Segment::numeric(digits.to_vec())], level)
     }
+
+    /// Convenience: build a symbol from UTF-8 `text`, splitting it into the
+    /// cheapest mix of the modes each version permits (M1: numeric only;
+    /// M2: +alphanumeric; M3/M4: +byte). Kanji mode is not generated.
+    pub fn build_text(&self, text: &str, level: MicroEcLevel) -> Result<Symbol> {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return self.build(vec![Segment::byte(Vec::new())], level);
+        }
+        // Mode availability and count-field widths differ per version, so
+        // optimize per version, smallest first, and take the first fit.
+        for version in [
+            MicroVersion::M1,
+            MicroVersion::M2,
+            MicroVersion::M3,
+            MicroVersion::M4,
+        ] {
+            let Some(cap) = data_bit_capacity(version, level) else {
+                continue; // level not supported at this version
+            };
+            let Some(segs) = optimize_segments(bytes, &mode_costs(version)) else {
+                continue; // some byte not representable at this version
+            };
+            if let Some(len) = segments_bit_len(&segs, version)
+                && len <= cap
+            {
+                return self.build(segs, level);
+            }
+        }
+        Err(Error::capacity(
+            "data does not fit any Micro QR version at this EC level",
+        ))
+    }
+}
+
+/// Segmenter cost model for a version: only the modes it permits.
+fn mode_costs(version: MicroVersion) -> Vec<ModeCost> {
+    fn is_digit(b: u8) -> bool {
+        b.is_ascii_digit()
+    }
+    fn is_alnum(b: u8) -> bool {
+        alnum_value(b).is_some()
+    }
+    fn any(_: u8) -> bool {
+        true
+    }
+    let mib = mode_indicator_bits(version) as u32;
+    [
+        (Mode::Numeric, 20, is_digit as fn(u8) -> bool),
+        (Mode::Alphanumeric, 33, is_alnum),
+        (Mode::Byte, 48, any),
+    ]
+    .into_iter()
+    .filter_map(|(mode, char_cost_sixths, accepts)| {
+        let ccb = char_count_bits(version, &mode)? as u32;
+        Some(ModeCost {
+            mode,
+            head_bits: mib + ccb,
+            tail_bits: 0,
+            char_cost_sixths,
+            accepts,
+        })
+    })
+    .collect()
 }
 
 impl Encode for MicroQrEncoder {

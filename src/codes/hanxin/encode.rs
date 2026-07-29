@@ -15,7 +15,7 @@ use super::tables::{data_codewords, ec_blocks, total_codewords};
 use super::{EcLevel, HanXinMeta, Mask, Version};
 use crate::error::{Error, Result};
 use crate::output::Encoding;
-use crate::segment::{Mode, Segment};
+use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
@@ -48,15 +48,62 @@ impl HanXinEncoder {
         ))
     }
 
-    /// Convenience: build a symbol from UTF-8 `text` as a single byte segment.
+    /// Convenience: build a symbol from UTF-8 `text`, splitting it into the
+    /// cheapest mix of numeric / text / binary segments. (Text sub-mode switch
+    /// costs are not modeled — the split is near-optimal, and the exact bit
+    /// stream is always re-measured when choosing the version.)
     pub fn build_text(&self, text: &str, level: EcLevel) -> Result<Symbol> {
-        self.build(vec![Segment::byte(text.as_bytes().to_vec())], level)
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return self.build(vec![Segment::byte(Vec::new())], level);
+        }
+        // Binary mode accepts everything, so the optimizer cannot fail.
+        let segs = optimize_segments(bytes, &mode_costs())
+            .unwrap_or_else(|| vec![Segment::byte(bytes.to_vec())]);
+        self.build(segs, level)
     }
 
     /// Convenience: build a numeric symbol from ASCII `digits`.
     pub fn build_numeric(&self, digits: &str, level: EcLevel) -> Result<Symbol> {
         self.build(vec![Segment::numeric(digits.as_bytes().to_vec())], level)
     }
+}
+
+/// Segmenter cost model: Han Xin numeric and text modes are self-terminating
+/// (10- and 6-bit terminators) while binary carries a 13-bit count up front.
+fn mode_costs() -> [ModeCost; 3] {
+    fn is_digit(b: u8) -> bool {
+        b.is_ascii_digit()
+    }
+    fn is_text(b: u8) -> bool {
+        text1_value(b).is_some() || text2_value(b).is_some()
+    }
+    fn any(_: u8) -> bool {
+        true
+    }
+    [
+        ModeCost {
+            mode: Mode::Numeric,
+            head_bits: 4,
+            tail_bits: 10,
+            char_cost_sixths: 20,
+            accepts: is_digit,
+        },
+        ModeCost {
+            mode: Mode::Alphanumeric,
+            head_bits: 4,
+            tail_bits: 6,
+            char_cost_sixths: 36,
+            accepts: is_text,
+        },
+        ModeCost {
+            mode: Mode::Byte,
+            head_bits: 4 + 13,
+            tail_bits: 0,
+            char_cost_sixths: 48,
+            accepts: any,
+        },
+    ]
 }
 
 impl Encode for HanXinEncoder {

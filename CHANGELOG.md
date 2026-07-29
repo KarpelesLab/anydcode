@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- automatic mode selection: `build_text` for QR, Micro QR (new), rMQR and Han Xin
+  now splits text into the cheapest mix of numeric / alphanumeric / byte segments
+  via a shared cost-model dynamic program (`segment::optimize_segments`)
+
 ## [0.1.2](https://github.com/KarpelesLab/anydcode/compare/v0.1.1...v0.1.2) - 2026-07-18
 
 ### Fixed

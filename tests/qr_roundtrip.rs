@@ -115,3 +115,87 @@ fn text_convenience_roundtrip() {
     );
     assert_eq!(enc.encode(&decoded).unwrap(), encoding);
 }
+
+// --- Automatic mode selection in build_text ---
+
+/// Build from text, assert the chosen segmentation, and require a full
+/// encode → decode → re-encode round trip.
+fn assert_text_segments(text: &str, level: EcLevel, want: &[Segment]) {
+    let enc = QrEncoder::new();
+    let symbol = enc.build_text(text, level).unwrap();
+    assert_eq!(
+        symbol.segments, want,
+        "unexpected segmentation for {text:?}"
+    );
+    let encoding = enc.encode(&symbol).unwrap();
+    let decoded = QrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, symbol.segments);
+    assert_eq!(decoded.text().as_deref(), Some(text));
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+}
+
+#[test]
+fn build_text_picks_alphanumeric() {
+    assert_text_segments(
+        "HELLO WORLD",
+        EcLevel::M,
+        &[Segment::alphanumeric(b"HELLO WORLD".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_picks_numeric() {
+    assert_text_segments(
+        "12345678901234567890",
+        EcLevel::M,
+        &[Segment::numeric(b"12345678901234567890".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_splits_mixed_content() {
+    assert_text_segments(
+        "https://example.com/A012345678901234",
+        EcLevel::M,
+        &[
+            Segment::byte(b"https://example.com/A".to_vec()),
+            Segment::numeric(b"012345678901234".to_vec()),
+        ],
+    );
+}
+
+#[test]
+fn build_text_keeps_utf8_in_byte_mode() {
+    assert_text_segments(
+        "héllo wörld",
+        EcLevel::M,
+        &[Segment::byte("héllo wörld".as_bytes().to_vec())],
+    );
+}
+
+#[test]
+fn build_text_never_worse_than_single_byte_segment() {
+    use anyd::symbol::{Symbol, SymbolMeta};
+    let version_of = |s: &Symbol| match &s.meta {
+        SymbolMeta::Qr(m) => m.version.number(),
+        _ => unreachable!(),
+    };
+    let enc = QrEncoder::new();
+    let zeros = "0".repeat(500);
+    for text in [
+        "HELLO WORLD",
+        zeros.as_str(),
+        "WIFI:S:CAFE;T:WPA;P:12345678;;",
+        "https://example.com/?id=1234567890123456789012345678901234567890",
+        "mixed CASE with 123 numbers and symbols !@#",
+    ] {
+        let auto = enc.build_text(text, EcLevel::M).unwrap();
+        let byte = enc
+            .build(vec![Segment::byte(text.as_bytes().to_vec())], EcLevel::M)
+            .unwrap();
+        assert!(
+            version_of(&auto) <= version_of(&byte),
+            "auto segmentation chose a larger version for {text:?}"
+        );
+    }
+}

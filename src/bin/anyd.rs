@@ -18,7 +18,6 @@ use anyd::GrayFrame;
 use anyd::Symbol;
 use anyd::output::Encoding;
 use anyd::render::render;
-use anyd::segment::Segment;
 use anyd::symbology::Symbology;
 use anyd::traits::Encode;
 
@@ -160,9 +159,7 @@ fn build_encoding(symbology: &str, data: &str, ec: Option<&str>) -> Result<Encod
         "microqr" => {
             let e = microqr::MicroQrEncoder::new();
             let lvl = micro_ec(ec)?;
-            let s = e
-                .build(vec![Segment::byte(bytes.to_vec())], lvl)
-                .map_err(err)?;
+            let s = e.build_text(data, lvl).map_err(err)?;
             let g = e.encode(&s).map_err(err)?;
             (s, g)
         }

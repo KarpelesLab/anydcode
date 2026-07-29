@@ -264,3 +264,35 @@ fn size_strategy_picks_shape() {
         assert!([7, 9, 11, 13, 15, 17].contains(&h));
     }
 }
+
+// --- Automatic mode selection in build_text ---
+
+#[test]
+fn build_text_picks_dense_modes() {
+    let enc = RmqrEncoder::new();
+    let sym = enc
+        .build_text("HELLO WORLD 123456789", RmqrEcLevel::M)
+        .unwrap();
+    assert_eq!(
+        sym.segments,
+        vec![
+            Segment::alphanumeric(b"HELLO WORLD ".to_vec()),
+            Segment::numeric(b"123456789".to_vec()),
+        ]
+    );
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = RmqrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+    assert_eq!(RmqrEncoder::new().encode(&decoded).unwrap(), encoding);
+}
+
+#[test]
+fn build_text_utf8_roundtrips() {
+    let enc = RmqrEncoder::new();
+    let sym = enc.build_text("héllo 12345678", RmqrEcLevel::M).unwrap();
+    let flat: Vec<u8> = sym.segments.iter().flat_map(|s| s.data.clone()).collect();
+    assert_eq!(flat, "héllo 12345678".as_bytes().to_vec());
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = RmqrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+}

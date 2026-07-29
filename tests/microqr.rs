@@ -234,3 +234,62 @@ fn wrong_size_matrix_is_undecodable() {
     let m = BitMatrix::new(12, 12, 2);
     assert!(MicroQrDecoder::new().decode(&Encoding::Matrix(m)).is_err());
 }
+
+// --- Automatic mode selection in build_text ---
+
+/// Build from text, assert version + segmentation, and require a full round trip.
+fn assert_text_choice(text: &str, level: MicroEcLevel, version: MicroVersion, want: &[Segment]) {
+    let enc = MicroQrEncoder::new();
+    let sym = enc.build_text(text, level).unwrap();
+    assert_eq!(sym.segments, want, "unexpected segmentation for {text:?}");
+    match &sym.meta {
+        SymbolMeta::MicroQr(m) => assert_eq!(m.version, version, "version for {text:?}"),
+        _ => panic!("missing MicroQrMeta"),
+    }
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = MicroQrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+}
+
+#[test]
+fn build_text_digits_fit_m1() {
+    assert_text_choice(
+        "12345",
+        MicroEcLevel::Detection,
+        MicroVersion::M1,
+        &[Segment::numeric(b"12345".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_alphanumeric_fits_m2() {
+    assert_text_choice(
+        "HELLO",
+        MicroEcLevel::L,
+        MicroVersion::M2,
+        &[Segment::alphanumeric(b"HELLO".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_lowercase_needs_byte_and_m3() {
+    assert_text_choice(
+        "hello",
+        MicroEcLevel::L,
+        MicroVersion::M3,
+        &[Segment::byte(b"hello".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_mixed_splits() {
+    // Digits split out of the alphanumeric run once the run is long enough.
+    let enc = MicroQrEncoder::new();
+    let sym = enc.build_text("AB0123456789", MicroEcLevel::L).unwrap();
+    let flat: Vec<u8> = sym.segments.iter().flat_map(|s| s.data.clone()).collect();
+    assert_eq!(flat, b"AB0123456789".to_vec());
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = MicroQrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+}

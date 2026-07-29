@@ -10,7 +10,7 @@ use super::{RmqrEcLevel, RmqrMeta, RmqrSize, SizeStrategy};
 use crate::codes::qr::gf;
 use crate::error::{Error, Result};
 use crate::output::Encoding;
-use crate::segment::{Mode, Segment};
+use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
@@ -51,24 +51,75 @@ impl RmqrEncoder {
         ))
     }
 
-    /// Convenience: build a symbol from UTF-8 `text` as a single byte segment.
+    /// Convenience: build a symbol from UTF-8 `text`, splitting it into the
+    /// cheapest mix of numeric / alphanumeric / byte segments (Kanji mode is not
+    /// generated — byte mode carries UTF-8 losslessly).
     pub fn build_text(&self, text: &str, level: RmqrEcLevel) -> Result<Symbol> {
-        self.build(vec![Segment::byte(text.as_bytes().to_vec())], level)
+        self.build_text_with(text, level, SizeStrategy::Balanced)
     }
 
-    /// Convenience: [`build_with`](Self::build_with) from UTF-8 `text`.
+    /// Convenience: [`build_with`](Self::build_with) from UTF-8 `text`, with the
+    /// same automatic segmentation as [`build_text`](Self::build_text).
     pub fn build_text_with(
         &self,
         text: &str,
         level: RmqrEcLevel,
         strategy: SizeStrategy,
     ) -> Result<Symbol> {
-        self.build_with(
-            vec![Segment::byte(text.as_bytes().to_vec())],
-            level,
-            strategy,
-        )
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return self.build_with(vec![Segment::byte(Vec::new())], level, strategy);
+        }
+        // Count-field widths differ per size, so optimize per size and keep the
+        // fitting candidate the strategy prefers.
+        let mut best: Option<(Vec<Segment>, RmqrSize)> = None;
+        for size in RmqrSize::all() {
+            let Some(segs) = optimize_segments(bytes, &mode_costs(size)) else {
+                continue;
+            };
+            if let Some(len) = segments_bit_len(&segs, size)
+                && len <= info(size).data_bit_capacity(level)
+                && best
+                    .as_ref()
+                    .is_none_or(|&(_, b)| prefers(size, b, strategy))
+            {
+                best = Some((segs, size));
+            }
+        }
+        let (segs, _) = best
+            .ok_or_else(|| Error::capacity("data does not fit any rMQR size at this EC level"))?;
+        self.build_with(segs, level, strategy)
     }
+}
+
+/// Segmenter cost model for a size (3-bit mode indicator + per-size count field).
+fn mode_costs(size: RmqrSize) -> Vec<ModeCost> {
+    fn is_digit(b: u8) -> bool {
+        b.is_ascii_digit()
+    }
+    fn is_alnum(b: u8) -> bool {
+        alnum_value(b).is_some()
+    }
+    fn any(_: u8) -> bool {
+        true
+    }
+    [
+        (Mode::Numeric, 20, is_digit as fn(u8) -> bool),
+        (Mode::Alphanumeric, 33, is_alnum),
+        (Mode::Byte, 48, any),
+    ]
+    .into_iter()
+    .filter_map(|(mode, char_cost_sixths, accepts)| {
+        let ccb = char_count_bits(size, &mode)? as u32;
+        Some(ModeCost {
+            mode,
+            head_bits: 3 + ccb,
+            tail_bits: 0,
+            char_cost_sixths,
+            accepts,
+        })
+    })
+    .collect()
 }
 
 impl Encode for RmqrEncoder {

@@ -239,3 +239,42 @@ fn modes_helper() {
         .unwrap();
     assert_eq!(symbol.modes(), vec![Mode::Numeric, Mode::Byte]);
 }
+
+// --- Automatic mode selection in build_text ---
+
+/// Build from text, assert the chosen segmentation, and require a full round trip.
+fn assert_text_segments(text: &str, want: &[Segment]) {
+    let enc = HanXinEncoder::new();
+    let sym = enc.build_text(text, EcLevel::L1).unwrap();
+    assert_eq!(sym.segments, want, "unexpected segmentation for {text:?}");
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = HanXinDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+}
+
+#[test]
+fn build_text_digits_pick_numeric() {
+    assert_text_segments("1234567890", &[Segment::numeric(b"1234567890".to_vec())]);
+}
+
+#[test]
+fn build_text_ascii_picks_text_mode() {
+    // Han Xin's text mode covers lowercase too (sub-modes 1 and 2).
+    assert_text_segments(
+        "Hello World",
+        &[Segment::alphanumeric(b"Hello World".to_vec())],
+    );
+}
+
+#[test]
+fn build_text_non_ascii_falls_back_to_binary() {
+    let text = "café \u{1F600}";
+    let enc = HanXinEncoder::new();
+    let sym = enc.build_text(text, EcLevel::L1).unwrap();
+    let flat: Vec<u8> = sym.segments.iter().flat_map(|s| s.data.clone()).collect();
+    assert_eq!(flat, text.as_bytes().to_vec());
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = HanXinDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.segments, sym.segments);
+}

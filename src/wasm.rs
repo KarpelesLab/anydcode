@@ -393,9 +393,7 @@ fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
         }
         "microqr" => {
             let e = microqr::MicroQrEncoder::new();
-            let s = e
-                .build(vec![Segment::byte(b.to_vec())], micro_ec(ec)?)
-                .map_err(es)?;
+            let s = e.build_text(data, micro_ec(ec)?).map_err(es)?;
             e.encode(&s).map_err(es)
         }
         "rmqr" => {

@@ -9,7 +9,7 @@ use super::tables::{char_count_bits, ec_blocks, mode_indicator, remainder_bits};
 use super::{EcLevel, Mask, QrMeta, Version};
 use crate::error::{Error, Result};
 use crate::output::Encoding;
-use crate::segment::{Mode, Segment};
+use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
@@ -42,10 +42,68 @@ impl QrEncoder {
         ))
     }
 
-    /// Convenience: build a symbol from UTF-8 `text` as a single byte segment.
+    /// Convenience: build a symbol from UTF-8 `text`, splitting it into the
+    /// cheapest mix of numeric / alphanumeric / byte segments (Kanji mode is not
+    /// generated — byte mode carries UTF-8 losslessly).
     pub fn build_text(&self, text: &str, level: EcLevel) -> Result<Symbol> {
-        self.build(vec![Segment::byte(text.as_bytes().to_vec())], level)
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return self.build(vec![Segment::byte(Vec::new())], level);
+        }
+        // Count-field widths change across the three version bands, so optimize
+        // per band and keep whichever segmentation reaches the smallest version.
+        let mut best: Option<(Vec<Segment>, u8)> = None;
+        for group in 0..3 {
+            let Some(segs) = optimize_segments(bytes, &mode_costs(group)) else {
+                continue;
+            };
+            if let Ok(v) = choose_version(&segs, level)
+                && best.as_ref().is_none_or(|&(_, bv)| v.number() < bv)
+            {
+                best = Some((segs, v.number()));
+            }
+        }
+        let (segs, _) = best.ok_or_else(|| {
+            Error::capacity("data does not fit in any QR version at this EC level")
+        })?;
+        self.build(segs, level)
     }
+}
+
+/// Segmenter cost model for a QR version band (0: v1–9, 1: v10–26, 2: v27–40).
+fn mode_costs(group: usize) -> [ModeCost; 3] {
+    fn is_digit(b: u8) -> bool {
+        b.is_ascii_digit()
+    }
+    fn is_alnum(b: u8) -> bool {
+        alnum_value(b).is_some()
+    }
+    fn any(_: u8) -> bool {
+        true
+    }
+    [
+        ModeCost {
+            mode: Mode::Numeric,
+            head_bits: 4 + [10, 12, 14][group],
+            tail_bits: 0,
+            char_cost_sixths: 20,
+            accepts: is_digit,
+        },
+        ModeCost {
+            mode: Mode::Alphanumeric,
+            head_bits: 4 + [9, 11, 13][group],
+            tail_bits: 0,
+            char_cost_sixths: 33,
+            accepts: is_alnum,
+        },
+        ModeCost {
+            mode: Mode::Byte,
+            head_bits: 4 + [8, 16, 16][group],
+            tail_bits: 0,
+            char_cost_sixths: 48,
+            accepts: any,
+        },
+    ]
 }
 
 impl Encode for QrEncoder {

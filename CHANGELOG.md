@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/KarpelesLab/anydcode/compare/v0.1.2...v0.1.3) - 2026-07-29
+
+### Other
+
+- automatic mode selection for QR-family and Han Xin build_text
+- image sampler — camera detection for all 34 size variants
+- image sampler — camera detection for all 32 rectangular sizes
+- image samplers — camera detection via native fiducials
+
 ### Added
 
 - automatic mode selection: `build_text` for QR, Micro QR (new), rMQR and Han Xin

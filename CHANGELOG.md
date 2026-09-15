@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/KarpelesLab/anydcode/compare/v0.1.3...v0.1.4) - 2026-09-15
+
+### Added
+
+- no_std core, alloc/std tiers, per-symbology and encode/decode/scan gates
+
+### Other
+
+- tests, docs: run heap-free encoders without alloc; document encode_into
+- heap-free encode_into
+- heap-free code-set planner
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free encode_into
+- heap-free LinearSink/LinearBuf/MatrixBuf; Code 39 encode_into
+
 ## [0.1.3](https://github.com/KarpelesLab/anydcode/compare/v0.1.2...v0.1.3) - 2026-07-29
 
 ### Other

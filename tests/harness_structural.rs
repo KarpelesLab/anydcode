@@ -17,6 +17,7 @@
 //! lands, implement `StructuralCodec` for a wrapper around its encoder/decoder and add
 //! one `#[test]` that feeds representative [`Symbol`]s through [`assert_roundtrip`].
 //! Only QR is implemented at branch time, so only the QR codec appears below.
+#![cfg(all(feature = "decode", feature = "encode", feature = "qr"))]
 
 use anyd::Symbol;
 use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};

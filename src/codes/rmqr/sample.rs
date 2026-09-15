@@ -21,17 +21,18 @@
 
 use super::matrix::{FMT_MASK_A, QUIET_ZONE, decode_format};
 use super::{RmqrDecoder, RmqrSize};
-use crate::codes::microqr::sample::{find_finders, finder_ring_corners, shoelace};
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
 use crate::imgproc::components::flood_region;
+use crate::imgproc::finder::{find_finders, finder_ring_corners, shoelace};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::sample_bilinear;
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::output::BitMatrix;
 use crate::symbol::Symbol;
+use alloc::vec;
 
 /// Locate, sample and structurally decode the rMQR symbol in `frame`.
 pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
@@ -178,7 +179,7 @@ fn refine_with_sub_dot(
     let mut offsets = vec![(0.0f64, 0.0f64)];
     for r in [0.5f64, 1.0, 1.5, 2.0, 2.5] {
         for i in 0..8 {
-            let a = f64::from(i) * std::f64::consts::FRAC_PI_4;
+            let a = f64::from(i) * core::f64::consts::FRAC_PI_4;
             offsets.push((r * a.cos(), r * a.sin()));
         }
     }

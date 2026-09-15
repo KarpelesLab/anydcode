@@ -10,6 +10,8 @@
 //! highest-degree term), matching the reference Euclidean decoder this module mirrors.
 
 /// A finite field GF(2^m) described by its size and primitive polynomial.
+use alloc::{vec, vec::Vec};
+
 #[derive(Debug, Clone)]
 pub struct Gf {
     /// `exp[i] = α^i` for `i` in `0..order`.
@@ -347,7 +349,7 @@ fn find_error_magnitudes(gf: &Gf, omega: &[u16], locations: &[u16]) -> Vec<u16> 
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

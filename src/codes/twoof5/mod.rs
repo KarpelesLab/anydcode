@@ -21,14 +21,28 @@
 //! [zint](https://github.com/zint/zint) (`C25MatrixTable`, `C25IndustTable`,
 //! `C25*StartStop`).
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// Five-element two-of-5 bar widths per digit (wide = 3, narrow = 1).
@@ -57,6 +71,7 @@ enum Variant {
 }
 
 impl Variant {
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn from_symbology(s: Symbology) -> Result<Self> {
         match s {
             Symbology::Std2of5 => Ok(Variant::Standard),
@@ -66,6 +81,7 @@ impl Variant {
         }
     }
 
+    #[cfg(feature = "decode")]
     fn symbology(self) -> Symbology {
         match self {
             Variant::Standard => Symbology::Std2of5,
@@ -87,6 +103,7 @@ impl Variant {
     }
 
     /// Element-width sequence for one digit (alternating bar, space, ...).
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn digit_widths(self, d: usize) -> Vec<u32> {
         let bars = &BAR_WIDTHS[d];
         match self {
@@ -111,6 +128,7 @@ impl Variant {
 pub struct TwoOf5Meta;
 
 /// Validate that every byte is an ASCII digit.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("2-of-5 payload is empty"));
@@ -123,11 +141,13 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
 }
 
 /// Append `width` copies of `bar` to `modules`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(std::iter::repeat_n(bar, width as usize));
+    modules.extend(core::iter::repeat_n(bar, width as usize));
 }
 
 /// Render an alternating (bar, space, ...) width sequence into modules.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn render_widths(modules: &mut Vec<bool>, widths: &[u32]) {
     for (i, &w) in widths.iter().enumerate() {
         push_run(modules, i % 2 == 0, w);
@@ -135,9 +155,11 @@ fn render_widths(modules: &mut Vec<bool>, widths: &[u32]) {
 }
 
 /// 2-of-5 encoder (Standard / IATA / Matrix).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TwoOf5Encoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl TwoOf5Encoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -156,6 +178,7 @@ impl TwoOf5Encoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for TwoOf5Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let variant = Variant::from_symbology(symbol.symbology)?;
@@ -181,9 +204,11 @@ impl Encode for TwoOf5Encoder {
 }
 
 /// 2-of-5 decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TwoOf5Decoder;
 
+#[cfg(feature = "decode")]
 impl TwoOf5Decoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -192,6 +217,7 @@ impl TwoOf5Decoder {
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
+#[cfg(feature = "decode")]
 fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -213,11 +239,13 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
 }
 
 /// Compare a run slice against an expected width pattern by wide/narrow class.
+#[cfg(feature = "decode")]
 fn matches_widths(runs: &[u32], pattern: &[u32]) -> bool {
     runs.len() == pattern.len() && runs.iter().zip(pattern).all(|(&r, &p)| (r > 1) == (p > 1))
 }
 
 /// Recover a digit from its five bar widths (wide = width > 1).
+#[cfg(feature = "decode")]
 fn digit_from_bars(bars: &[u32]) -> Result<u8> {
     for (d, pat) in BAR_WIDTHS.iter().enumerate() {
         if (0..5).all(|i| (bars[i] > 1) == (pat[i] > 1)) {
@@ -227,6 +255,7 @@ fn digit_from_bars(bars: &[u32]) -> Result<u8> {
     Err(Error::undecodable("invalid 2-of-5 digit pattern"))
 }
 
+#[cfg(feature = "decode")]
 impl Decode for TwoOf5Decoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -295,7 +324,7 @@ impl Decode for TwoOf5Decoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

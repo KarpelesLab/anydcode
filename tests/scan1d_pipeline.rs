@@ -2,6 +2,14 @@
 //! it purely from pixels through the generic `scan1d` front-end feeding each
 //! symbology's real decoder. This exercises the render → scan → decode path across
 //! three independently-implemented modules, not just structural round-trips.
+#![cfg(all(
+    feature = "decode",
+    feature = "encode",
+    feature = "scan",
+    feature = "code128",
+    feature = "code39",
+    feature = "ean"
+))]
 
 use anyd::codes::code39::{Code39Decoder, Code39Encoder};
 use anyd::codes::code128::{Code128Decoder, Code128Encoder};

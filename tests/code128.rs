@@ -1,6 +1,7 @@
 //! Integration tests for Code 128 / GS1-128: an independent reference vector plus
 //! encode → decode → re-encode identity across all three code sets, set switches,
 //! shifts, and a GS1-128 Application Identifier example.
+#![cfg(all(feature = "decode", feature = "encode", feature = "code128"))]
 
 use anyd::codes::code128::{Code128Decoder, Code128Encoder, Code128Input};
 use anyd::output::Encoding;

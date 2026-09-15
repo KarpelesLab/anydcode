@@ -15,6 +15,8 @@
 //! most-significant coefficient first.
 
 /// A binary Galois field GF(2^m) with a fixed primitive polynomial.
+use alloc::{vec, vec::Vec};
+
 #[derive(Debug, Clone)]
 pub struct GaloisField {
     /// `exp[i] = α^i` for `i` in `0..order`.
@@ -282,7 +284,7 @@ impl GaloisField {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

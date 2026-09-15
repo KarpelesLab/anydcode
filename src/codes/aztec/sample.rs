@@ -33,6 +33,8 @@ use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::{sample_bilinear, sample_grid};
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::symbol::Symbol;
+use alloc::{vec, vec::Vec};
+use std::eprintln;
 
 /// A detected bullseye: centre, module pitch along the scan axes, ring count.
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +163,7 @@ fn quiet_beyond_core(frame: &GrayFrame<'_>, core: &Homography, threshold: u8) ->
     let mut total = 0usize;
     for r in [6.5f64, 7.5] {
         for i in 0..24 {
-            let a = i as f64 / 24.0 * std::f64::consts::TAU;
+            let a = i as f64 / 24.0 * core::f64::consts::TAU;
             let (px, py) = core.map_f64(r * a.cos(), r * a.sin());
             total += 1;
             if sample_bilinear(frame, px, py) <= thr {
@@ -316,7 +318,7 @@ fn find_bullseyes(bin: &BinaryImage) -> Vec<Bullseye> {
         b.count.cmp(&a.count).then(b.full.cmp(&a.full)).then(
             b.module
                 .partial_cmp(&a.module)
-                .unwrap_or(std::cmp::Ordering::Equal),
+                .unwrap_or(core::cmp::Ordering::Equal),
         )
     });
     dedup_overlapping(eyes)

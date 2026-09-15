@@ -10,6 +10,7 @@
 
 use crate::geometry::Point;
 use crate::imgproc::rng::Prng;
+use alloc::vec::Vec;
 
 /// A 2D line in normalized implicit form `a·x + b·y + c = 0` with `a² + b² = 1`.
 #[derive(Debug, Clone, Copy, PartialEq)]

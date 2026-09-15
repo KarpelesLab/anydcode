@@ -1,4 +1,5 @@
 //! Interleaved 2 of 5: encode → decode → re-encode identity across the option matrix.
+#![cfg(all(feature = "decode", feature = "encode", feature = "itf"))]
 
 use anyd::codes::itf::{ItfDecoder, ItfEncoder};
 use anyd::segment::Segment;

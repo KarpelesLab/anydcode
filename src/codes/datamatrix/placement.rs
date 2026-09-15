@@ -8,6 +8,7 @@
 
 use super::tables::SquareSpec;
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// The result of running Annex F placement over an `nrows × ncols` mapping matrix.
 pub struct Placement {
@@ -282,7 +283,7 @@ pub fn strip_borders(spec: &SquareSpec, m: &BitMatrix) -> Vec<bool> {
 /// specifies at least one module on every side).
 pub const QUIET_ZONE: usize = 1;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
     use crate::codes::datamatrix::tables::all_squares;

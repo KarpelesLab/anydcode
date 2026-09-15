@@ -20,12 +20,11 @@
 //! perspective tolerance is limited since all four anchors span one corner.
 
 use super::{MicroQrDecoder, matrix::QUIET_ZONE};
-use crate::codes::qr::sample::{found_pattern_cross, run_center, scan_line_runs, walk_run};
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
-use crate::imgproc::components::{extreme_quad, flood_region};
+use crate::imgproc::finder::{find_finders, finder_ring_corners, shoelace};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::sample_grid;
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
@@ -33,15 +32,6 @@ use crate::symbol::Symbol;
 
 /// The four Micro QR grid sizes (M1–M4).
 const SIZES: [usize; 4] = [11, 13, 15, 17];
-
-/// A clustered finder-pattern centre.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Finder {
-    pub x: f32,
-    pub y: f32,
-    pub module: f32,
-    pub count: u32,
-}
 
 /// Locate, sample and structurally decode the Micro QR symbol in `frame`.
 pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
@@ -123,101 +113,4 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
         }
     }
     Err(last)
-}
-
-pub(crate) fn shoelace(q: &[(f32, f32); 4]) -> f32 {
-    let mut sum = 0.0;
-    for i in 0..4 {
-        let (x0, y0) = q[i];
-        let (x1, y1) = q[(i + 1) % 4];
-        sum += x0 * y1 - x1 * y0;
-    }
-    sum
-}
-
-/// Row sweep for the 1:1:3:1:1 finder ratio with a vertical cross-check.
-pub(crate) fn find_finders(bin: &BinaryImage) -> Vec<Finder> {
-    let (w, h) = (bin.width(), bin.height());
-    let mut out: Vec<Finder> = Vec::new();
-    for y in 0..h {
-        scan_line_runs(
-            w,
-            |x| bin.get(x, y),
-            |mid, counts| {
-                let Some(module) = found_pattern_cross(counts) else {
-                    return;
-                };
-                let Some((vc, vend)) = walk_run(h as i32, y as i32, |k| bin.get(mid, k as usize))
-                else {
-                    return;
-                };
-                if found_pattern_cross(vc).is_none() {
-                    return;
-                }
-                let cy = run_center(vc, vend);
-                merge(&mut out, mid as f32, cy, module);
-            },
-        );
-    }
-    out.sort_by_key(|f| std::cmp::Reverse(f.count));
-    out
-}
-
-fn merge(finders: &mut Vec<Finder>, x: f32, y: f32, module: f32) {
-    for f in finders.iter_mut() {
-        if (f.x - x).abs() <= f.module && (f.y - y).abs() <= f.module {
-            let c = f.count as f32;
-            f.x = (f.x * c + x) / (c + 1.0);
-            f.y = (f.y * c + y) / (c + 1.0);
-            f.module = (f.module * c + module) / (c + 1.0);
-            f.count += 1;
-            return;
-        }
-    }
-    finders.push(Finder {
-        x,
-        y,
-        module,
-        count: 1,
-    });
-}
-
-/// Corners of the finder's outer 7×7 dark ring: march from the centre out of the
-/// solid 3×3 core, across the light ring, into the outer ring, and flood it. The
-/// light separator row/column isolates the ring from the data region, so the flood
-/// cannot leak.
-pub(crate) fn finder_ring_corners(bin: &BinaryImage, finder: &Finder) -> Option<[(f32, f32); 4]> {
-    let w = bin.width();
-    let mut x = finder.x as usize;
-    let y = finder.y as usize;
-    let mut seen_light = false;
-    let mut seed = None;
-    let limit = ((finder.module * 4.5) as usize).max(4);
-    for _ in 0..limit {
-        if x + 1 >= w {
-            break;
-        }
-        x += 1;
-        let dark = bin.get(x, y);
-        if !dark {
-            seen_light = true;
-        } else if seen_light {
-            seed = Some((x, y));
-            break;
-        }
-    }
-    let pixels = flood_region(bin, seed?, true);
-    if pixels.is_empty() {
-        return None;
-    }
-    // Sanity: the ring must span ~7 modules.
-    let span = 7.0 * finder.module;
-    let (min_x, max_x) = pixels.iter().fold((usize::MAX, 0), |(lo, hi), &(px, _)| {
-        (lo.min(px), hi.max(px))
-    });
-    let width = (max_x - min_x) as f32;
-    if width < span * 0.7 || width > span * 1.5 {
-        return None;
-    }
-    extreme_quad(&pixels)
 }

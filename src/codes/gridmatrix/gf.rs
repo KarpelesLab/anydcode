@@ -19,6 +19,8 @@
 //! vectors, most-significant coefficient first.
 
 /// Primitive polynomial for the Grid Matrix field, without the implicit `x^7` bit.
+use alloc::{vec, vec::Vec};
+
 const PRIMITIVE: u16 = 0x89;
 
 /// Number of non-zero field elements (`2^7 - 1`).
@@ -267,7 +269,7 @@ fn sub_shift(dst: &mut Vec<u8>, src: &[u8], scale: u8, shift: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

@@ -9,6 +9,10 @@
 //! (EN 12323 Table 3/4) and two lookup tables (Table 5) that map a row number to the
 //! start and stop delimiter used, encoding the row's position in the stack.
 
+use crate::error::{Error, Result};
+use crate::segment::Segment;
+use alloc::{vec, vec::Vec};
+
 /// The 107 Code 128 symbol patterns, indexed by symbol value `0..=106`.
 ///
 /// Each string is a run of element widths starting with a bar; every entry sums to
@@ -75,4 +79,96 @@ pub fn value_for_widths(widths: &[u8]) -> Option<u8> {
     }
     let s = core::str::from_utf8(&buf).ok()?;
     C128_PATTERNS.iter().position(|p| *p == s).map(|v| v as u8)
+}
+
+/// The two modulo-107 check characters for a Code 16K data-value sequence (mode char +
+/// data + pads, without the checks). Ported from EN 12323 / zint.
+pub(crate) fn checksum(values: &[u8]) -> (u8, u8) {
+    let mut first: u32 = 0;
+    let mut second: u32 = 0;
+    for (i, &v) in values.iter().enumerate() {
+        first += (i as u32 + 2) * v as u32;
+        second += (i as u32 + 1) * v as u32;
+    }
+    let first_check = (first % 107) as u8;
+    second += first_check as u32 * (values.len() as u32 + 1);
+    let second_check = (second % 107) as u8;
+    (first_check, second_check)
+}
+
+/// Fixed symbol width in modules: 7 (start) + 1 (guard) + 5*11 (chars) + 7 (stop).
+pub(crate) const ROW_WIDTH: usize = 70;
+
+/// Reconstruct the payload [`Segment`]s from a Code 16K data-value sequence (the mode
+/// character, data and padding, without the check characters). Shared by the decoder and
+/// the encoder's `build` path so both produce identical payload segments.
+///
+/// Mode values `0..=4` (start A/B/C, optionally GS1) are handled; the size-optimizing
+/// shift modes `5`/`6` are decoded best-effort as a Set B start. Because re-encoding
+/// renders from the stored symbol values rather than these segments, segment fidelity
+/// never affects the round-trip identity.
+pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let m = values[0] % 7;
+    let mut set = match m {
+        0 => Set::A,
+        2 | 4 => Set::C,
+        _ => Set::B,
+    };
+    let mut bytes = Vec::new();
+    let mut shift: Option<Set> = None;
+
+    for &v in &values[1..] {
+        if v == PAD {
+            continue;
+        }
+        let active = shift.take().unwrap_or(set);
+        match active {
+            Set::C => match v {
+                0..=99 => {
+                    bytes.push(b'0' + v / 10);
+                    bytes.push(b'0' + v % 10);
+                }
+                CODE_B => set = Set::B,
+                CODE_A => set = Set::A,
+                FNC1 => {}
+                _ => return Err(Error::undecodable("invalid symbol in Code 16K set C")),
+            },
+            Set::A => match v {
+                0..=95 => bytes.push(if v < 64 { v + 32 } else { v - 64 }),
+                96 | 97 => {} // FNC3 / FNC2
+                SHIFT => shift = Some(Set::B),
+                CODE_C => set = Set::C,
+                CODE_B => set = Set::B,
+                101 => {} // FNC4 in Set A
+                FNC1 => {}
+                _ => return Err(Error::undecodable("invalid symbol in Code 16K set A")),
+            },
+            Set::B => match v {
+                0..=95 => bytes.push(v + 32),
+                96 | 97 => {} // FNC3 / FNC2
+                SHIFT => shift = Some(Set::A),
+                CODE_C => set = Set::C,
+                100 => {} // FNC4 in Set B
+                CODE_A => set = Set::A,
+                FNC1 => {}
+                _ => return Err(Error::undecodable("invalid symbol in Code 16K set B")),
+            },
+        }
+    }
+
+    Ok(if bytes.is_empty() {
+        Vec::new()
+    } else {
+        vec![Segment::byte(bytes)]
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Set {
+    A,
+    B,
+    C,
 }

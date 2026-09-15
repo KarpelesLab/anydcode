@@ -49,6 +49,9 @@
 //! finder-less matrix [`Symbology::DataMatrix`], and a linear region [`Symbology::Code128`].
 //! Recover just the family with [`Symbology::dimension`].
 
+use alloc::vec::Vec;
+use std::eprintln;
+
 mod finder;
 mod grid;
 mod tiles;
@@ -164,7 +167,7 @@ const SUPPRESS_OVERLAP: f32 = 0.5;
 /// close to half ink; a region far outside this band is a solid blob (logo, fill) or
 /// sparse print, not a matrix code. Finder-backed and linear regions are exempt — bar
 /// widths legitimately skew linear ink coverage.
-const MATRIX_DARK_FRAC: std::ops::Range<f32> = 0.22..0.85;
+const MATRIX_DARK_FRAC: core::ops::Range<f32> = 0.22..0.85;
 
 /// A linear region's extent along the reading axis must be at least this fraction of its
 /// extent along the bars. A 1D code is read by a scanline crossing *every* bar, so a
@@ -269,8 +272,8 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
     // than raw texture), then largest first, so max_candidates keeps the best.
     scored.sort_by_key(|s| {
         (
-            std::cmp::Reverse(u8::from(s.hit.is_some())),
-            std::cmp::Reverse(s.region.area()),
+            core::cmp::Reverse(u8::from(s.hit.is_some())),
+            core::cmp::Reverse(s.region.area()),
         )
     });
 

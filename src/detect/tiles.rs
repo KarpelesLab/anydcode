@@ -21,6 +21,7 @@
 //! the code entirely.
 
 use super::grid::DownGrid;
+use alloc::{vec, vec::Vec};
 
 /// Per-tile transition tallies over the reduced dark mask.
 struct TileStats {

@@ -38,15 +38,32 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::vec::Vec;
+
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod data;
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod layout;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
 pub use data::GmMode;
+#[cfg(feature = "decode")]
 pub use decode::GridMatrixDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::GridMatrixEncoder;
 pub use tables::{EcLevel, Version};
 

@@ -14,6 +14,8 @@ pub(super) struct Gf {
     log: Vec<usize>,
 }
 
+use alloc::{vec, vec::Vec};
+
 impl Gf {
     pub fn new(primitive: usize, size: usize, fcr: usize) -> Gf {
         let mut exp = vec![0usize; size * 2];
@@ -207,7 +209,7 @@ fn correct_double(gf: &Gf, codeword: &[usize], syn: &[usize]) -> Option<Vec<usiz
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

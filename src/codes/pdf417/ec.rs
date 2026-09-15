@@ -11,6 +11,8 @@
 //! constant term, so a clean block evaluates to zero at every generator root.
 
 /// The field modulus.
+use alloc::{vec, vec::Vec};
+
 pub const MOD: u32 = 929;
 
 /// The primitive element used to build the generator polynomial.
@@ -270,7 +272,7 @@ fn sub_shift(dst: &mut Vec<u32>, src: &[u32], scale: u32, shift: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

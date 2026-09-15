@@ -1,5 +1,6 @@
 //! Micro QR image-sampling tests: render → transform → scan through the
 //! single-finder detector and corner homography.
+#![cfg(all(feature = "encode", feature = "scan", feature = "microqr"))]
 
 use anyd::GrayImage;
 use anyd::codes::microqr::MicroEcLevel;

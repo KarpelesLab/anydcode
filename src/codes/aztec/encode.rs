@@ -17,6 +17,7 @@ use crate::segment::{Mode, Segment};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Aztec Code encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -236,7 +237,7 @@ pub fn render(data: &[u8], compact: bool, layers: usize) -> Result<BitMatrix> {
     Ok(m)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

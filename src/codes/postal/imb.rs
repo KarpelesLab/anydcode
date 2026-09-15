@@ -23,7 +23,7 @@
 use super::BarState;
 use crate::error::{Error, Result};
 use crate::segment::Segment;
-use std::sync::OnceLock;
+use alloc::{string::ToString, vec, vec::Vec};
 
 /// Bar-to-character map (USPS-B-3200 Table 22): for each of the 65 bars, the
 /// `(descender character, descender bit, ascender character, ascender bit)`.
@@ -96,30 +96,20 @@ const BAR_MAP: [(u8, u8, u8, u8); 65] = [
     (3, 10, 8, 2),
 ];
 
-/// The generated "5 of 13" and "2 of 13" codeword→character tables.
-struct Tables {
-    /// 1287 entries; codeword `0..=1286` → 13-bit character.
-    five: Vec<u16>,
-    /// 78 entries; codeword `1287..=1364` (index `−1287`) → 13-bit character.
-    two: Vec<u16>,
-}
-
-/// The cached character tables, generated once per process.
-fn tables() -> &'static Tables {
-    static TABLES: OnceLock<Tables> = OnceLock::new();
-    TABLES.get_or_init(|| Tables {
-        five: init_nof13(5, 1287),
-        two: init_nof13(2, 78),
-    })
-}
+/// "5 of 13" table: codeword `0..=1286` → 13-bit character.
+const FIVE: [u16; 1287] = init_nof13(5);
+/// "2 of 13" table: codeword `1287..=1364` (index `−1287`) → 13-bit character.
+const TWO: [u16; 78] = init_nof13(2);
 
 /// Reverse the low 13 bits of `value`.
-fn reverse13(value: u16) -> u16 {
+const fn reverse13(value: u16) -> u16 {
     let mut reverse = 0u16;
     let mut v = value;
-    for _ in 0..13 {
+    let mut i = 0;
+    while i < 13 {
         reverse = (reverse << 1) | (v & 1);
         v >>= 1;
+        i += 1;
     }
     reverse
 }
@@ -127,55 +117,46 @@ fn reverse13(value: u16) -> u16 {
 /// Generate an "N of 13" table (USPS-B-3200 Appendix D): the 13-bit values with
 /// exactly `n` bits set, ordered so that a value and its bit-reversal are paired
 /// from opposite ends of the table.
-fn init_nof13(n: u32, table_length: usize) -> Vec<u16> {
-    let mut table = vec![0u16; table_length];
+const fn init_nof13<const LEN: usize>(n: u32) -> [u16; LEN] {
+    let mut table = [0u16; LEN];
     let mut lower = 0usize;
-    let mut upper = table_length - 1;
-    for count in 0u16..8192 {
-        if count.count_ones() != n {
-            continue;
-        }
+    let mut upper = LEN - 1;
+    let mut count = 0u16;
+    while count < 8192 {
         let reverse = reverse13(count);
-        if reverse < count {
-            continue;
+        if count.count_ones() == n && reverse >= count {
+            if count == reverse {
+                table[upper] = count;
+                upper = upper.wrapping_sub(1);
+            } else {
+                table[lower] = count;
+                lower += 1;
+                table[lower] = reverse;
+                lower += 1;
+            }
         }
-        if count == reverse {
-            table[upper] = count;
-            upper = upper.wrapping_sub(1);
-        } else {
-            table[lower] = count;
-            lower += 1;
-            table[lower] = reverse;
-            lower += 1;
-        }
+        count += 1;
     }
     table
 }
 
 /// The 13-bit character for a codeword `0..=1364`.
 fn codeword_to_char(codeword: u16) -> u16 {
-    let t = tables();
-    if (codeword as usize) < t.five.len() {
-        t.five[codeword as usize]
+    if (codeword as usize) < FIVE.len() {
+        FIVE[codeword as usize]
     } else {
-        t.two[codeword as usize - t.five.len()]
+        TWO[codeword as usize - FIVE.len()]
     }
 }
 
 /// The codeword `0..=1364` for a 13-bit character, if it is a valid one.
 fn char_to_codeword(character: u16) -> Option<u16> {
-    let t = tables();
     match character.count_ones() {
-        5 => t
-            .five
+        5 => FIVE.iter().position(|&c| c == character).map(|p| p as u16),
+        2 => TWO
             .iter()
             .position(|&c| c == character)
-            .map(|p| p as u16),
-        2 => t
-            .two
-            .iter()
-            .position(|&c| c == character)
-            .map(|p| (p + t.five.len()) as u16),
+            .map(|p| (p + FIVE.len()) as u16),
         _ => None,
     }
 }

@@ -9,6 +9,7 @@
 //!   the alternating complement pattern); value 42 additionally pins the ring bit
 //!   ordering.
 //! - encode → decode → re-encode is byte-identical for every value 0..=255.
+#![cfg(all(feature = "decode", feature = "encode", feature = "aztec"))]
 
 use anyd::codes::aztec::{AztecDecoder, AztecEncoder};
 use anyd::output::{BitMatrix, Encoding};

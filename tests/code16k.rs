@@ -5,6 +5,7 @@
 //!    --barcode=CODE16K --data=ABCD1234 --dump`): the exact module rows of a documented
 //!    symbol are reproduced from the corresponding symbol values.
 //! 2. `encode -> decode -> re-encode` identity across sizes, plus payload recovery.
+#![cfg(all(feature = "decode", feature = "encode", feature = "code16k"))]
 
 use anyd::codes::code16k::{Code16kDecoder, Code16kEncoder, Code16kMeta};
 use anyd::output::Encoding;

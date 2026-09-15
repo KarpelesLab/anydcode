@@ -20,6 +20,7 @@ use crate::scan1d::{ScanOptions, scan_edges};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
+use alloc::{format, string::String, vec, vec::Vec};
 
 /// Maximum acceptable per-digit width-match score (sum of squared module-count
 /// deviations over the four elements). Clean digits score ~0; this rejects noise.

@@ -7,6 +7,7 @@
 //! here, and re-encoded to the identical bitmap. This pins the finder patterns,
 //! numeric mode, GF(2^8)/`0x163` Reed–Solomon, picket-fence interleave, mask 2 and
 //! the function information all at once against a third-party implementation.
+#![cfg(all(feature = "decode", feature = "encode", feature = "hanxin"))]
 
 use anyd::codes::hanxin::{EcLevel, HanXinDecoder, HanXinEncoder, HanXinMeta, Mask, Version};
 use anyd::output::{BitMatrix, Encoding};

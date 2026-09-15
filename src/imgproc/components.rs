@@ -7,6 +7,7 @@
 //! deterministic and never recurses (no stack-overflow risk on large blobs).
 
 use crate::imgproc::binary::BinaryImage;
+use alloc::{vec, vec::Vec};
 
 /// Pixel adjacency used when growing a component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

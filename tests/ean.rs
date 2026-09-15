@@ -1,6 +1,7 @@
 //! End-to-end EAN/UPC round-trip tests: encode → decode → re-encode must be
 //! identical across every family member, plus 2- and 5-digit add-ons. Also asserts
 //! independent reference vectors for the computed check/parity digits.
+#![cfg(all(feature = "decode", feature = "encode", feature = "ean"))]
 
 use anyd::Symbology;
 use anyd::codes::ean::{AddOnKind, EanDecoder, EanEncoder, EanVariant};

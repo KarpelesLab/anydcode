@@ -7,7 +7,12 @@
 //! each arc extending clockwise across adjacent gap positions until the next visible
 //! one, and every drawn arc is inset by the ring's half-gap angle at both ends.
 
-use std::fmt::Write;
+#[cfg(feature = "std")]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use alloc::{format, string::String};
+#[cfg(feature = "std")]
+use core::fmt::Write;
 
 /// An RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +37,7 @@ impl Color {
         Some(Color::new((v >> 16) as u8, (v >> 8) as u8, v as u8))
     }
 
+    #[cfg(feature = "std")]
     fn hex(&self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
     }
@@ -104,6 +110,7 @@ pub enum LogoKind {
 }
 
 /// Ring geometry (radius, rotation °, positions, half-gap °), innermost first.
+#[cfg(feature = "std")]
 pub(super) const RINGS: [(f64, f64, usize, f64); 5] = [
     (177.2016, -78.0, 17, 7.5),
     (224.1012, -85.0, 23, 5.6),
@@ -112,11 +119,15 @@ pub(super) const RINGS: [(f64, f64, usize, f64); 5] = [
     (364.8, -70.0, 33, 3.5),
 ];
 
+#[cfg(feature = "std")]
 const CENTER: f64 = 400.0;
+#[cfg(feature = "std")]
 const BG_RADIUS: f64 = 400.0;
+#[cfg(feature = "std")]
 const STROKE: f64 = 23.5;
 
 /// Render the encoded bit vector as a self-contained SVG document.
+#[cfg(feature = "std")]
 pub(super) fn render_svg(bits: &[bool], pal: &Palette, url: &str, logo: LogoKind) -> String {
     let mut s = String::with_capacity(16 * 1024);
     s.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
@@ -166,6 +177,7 @@ pub(super) fn render_svg(bits: &[bool], pal: &Palette, url: &str, logo: LogoKind
     s
 }
 
+#[cfg(feature = "std")]
 fn write_ring_arcs(
     s: &mut String,
     radius: f64,
@@ -219,15 +231,19 @@ fn write_ring_arcs(
 }
 
 // Center glyph path data (from Apple's generator output).
+#[cfg(feature = "std")]
 const CAMERA_PATHS: [&str; 3] = [
     "M56.9500008,40.9528084c-8.9051094,0-16.0505219,7.1454086-16.0505219,16.1038475c0,8.9051132,7.1454124,16.0505219,16.0505219,16.0505219s16.050518-7.1454086,16.050518-16.0505219C73.0005188,48.0448914,65.8551102,40.9528084,56.9500008,40.9528084z M56.9500008,67.7214508c-5.8656387,0-10.6647949-4.7458305-10.6647949-10.6647949c0-5.9722939,4.7458305-10.7181244,10.6647949-10.7181244s10.6647987,4.7458305,10.6647987,10.7181244C67.6147995,62.975605,62.8689651,67.7214508,56.9500008,67.7214508z",
     "M78.919487,42.1259422c-2.1862869,0-3.9992981,1.8663368-3.9992981,3.9459686c0,2.2396164,1.8130112,3.9459724,3.9992981,3.9459724c2.1329575-0.0533257,3.9459686-1.7596855,3.9459686-3.9459724C82.8654556,43.9389534,81.0524445,42.1259422,78.919487,42.1259422z",
     "M57.0033264,0C57.0033264,0,56.9500008,0,57.0033264,0C25.4888554,0,0,25.4888554,0,56.9500008s25.4888554,56.9500008,56.9500008,56.9500008s56.9500008-25.4888535,56.9500008-56.9500008C113.9000015,25.542181,88.4111481,0.053311,57.0033264,0z M93.7435455,72.733902c0,6.3455505-3.412735,9.7049713-9.8116074,9.7049713H29.9147377c-6.4522038,0-9.8116074-3.3594055-9.8116074-9.7049713V41.4860458c0-6.3455467,3.3594036-9.7049694,9.8116074-9.7049694h7.785305c2.3462524,0,3.0927849-0.4265842,4.5325356-1.9196663l2.3462524-2.5062332c1.5463943-1.6530457,3.1461105-2.4529057,6.185585-2.4529057H62.975605c3.0394707,0,4.6391945,0.79986,6.1855812,2.4529057l2.3462524,2.5062332c1.4397583,1.4930649,2.1862869,1.9196663,4.5325394,1.9196663h7.8919449c6.4522018,0,9.8116074,3.3594036,9.8116074,9.7049694V72.733902H93.7435455z",
 ];
 
+#[cfg(feature = "std")]
 const PHONE_OUTER: &str = "M53.92,0a53.92,53.92,0,1,0,53.92,53.92A53.92,53.92,0,0,0,53.92,0Zm30,91.32c-1,.78-2,1.51-3,2.21h0a47.94,47.94,0,0,1-53.92,0h0c-1-.7-2-1.44-3-2.21V36.8C24,28.47,28.47,24,36.91,24H71c8.38,0,12.9,4.51,12.9,12.84Z";
+#[cfg(feature = "std")]
 const PHONE_SCREEN: &str = "M77.89,95.42V36.8c0-5.06-1.81-6.85-6.9-6.85H68.92v.13A2.69,2.69,0,0,1,66.11,33H41.8A2.69,2.69,0,0,1,39,30.08V30H36.92c-5.14,0-7,1.79-7,6.85V95.42h0a48,48,0,0,0,47.94,0h0Z";
 
+#[cfg(feature = "std")]
 fn write_logo(s: &mut String, logo: LogoKind, pal: &Palette) {
     match logo {
         LogoKind::Nfc => {
@@ -257,6 +273,7 @@ fn write_logo(s: &mut String, logo: LogoKind, pal: &Palette) {
     s.push_str("    </g>\n");
 }
 
+#[cfg(feature = "std")]
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

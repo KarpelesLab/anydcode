@@ -69,6 +69,48 @@ jobs:
       - name: Build the anyd CLI (cli feature)
         run: cargo build --features cli --bin anyd
 
+  features:
+    name: Feature slices (warnings denied)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      # Every symbology alone, with encode-only / decode-only / both / scan.
+      - name: Check feature slices
+        run: ci/check-features.sh
+
+      - name: Test a single-symbology build
+        run: cargo test --no-default-features --features qr,encode,decode
+
+  no-std:
+    name: no_std builds (bare metal)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf, thumbv6m-none-eabi
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: No alloc
+        run: cargo build --lib --target thumbv7em-none-eabihf --no-default-features --features encode,all-codes
+
+      - name: alloc, every codec
+        run: cargo build --lib --target thumbv7em-none-eabihf --no-default-features --features alloc,encode,decode,all-codes
+
+      - name: alloc, no atomics
+        run: cargo build --lib --target thumbv6m-none-eabi --no-default-features --features alloc,encode,decode,all-codes
+
   docs:
     name: Docs build (warnings denied)
     runs-on: ubuntu-latest

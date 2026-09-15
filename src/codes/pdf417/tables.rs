@@ -313,3 +313,7 @@ pub const CODEWORD_PATTERNS: [[u32; 929]; 3] = [
         0x10396, 0x107b6, 0x187d4, 0x187d2, 0x10794, 0x10fb4, 0x10792, 0x10fb2, 0x1c7ea,
     ],
 ];
+
+/// Number of identical module rows rendered per codeword row (PDF417 rows are at
+/// least three modules tall). The decoder derives the row count from this.
+pub(super) const ROW_HEIGHT: usize = 3;

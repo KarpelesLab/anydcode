@@ -11,6 +11,7 @@
 use super::tables::{alignment_columns, format_bits, info};
 use super::{RmqrEcLevel, RmqrSize};
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width required around an rMQR symbol, in modules.
 pub const QUIET_ZONE: usize = 2;
@@ -333,7 +334,7 @@ pub(crate) fn decode_format(raw: u32) -> Option<(RmqrSize, RmqrEcLevel)> {
     if best_dist <= 3 { best } else { None }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

@@ -249,68 +249,48 @@ impl Symbology {
         }
     }
 
-    /// Whether an encoder/decoder is currently implemented for this symbology.
+    /// Whether this build carries an implementation of this symbology, i.e. its
+    /// cargo feature (`qr`, `ean`, `postal`, ...) is enabled. Which halves are
+    /// available additionally depends on the `encode` / `decode` / `scan` features.
     pub fn is_implemented(self) -> bool {
         use Symbology::*;
-        // Gated on its cargo feature: the URL codec embeds ~1.7 MB of trained
-        // frequency tables, which lean builds may want to leave out.
-        if self == AppClipCode {
-            return cfg!(feature = "appclip");
+        match self {
+            QrCode => cfg!(feature = "qr"),
+            MicroQrCode => cfg!(feature = "microqr"),
+            RectMicroQrCode => cfg!(feature = "rmqr"),
+            Aztec | AztecRunes => cfg!(feature = "aztec"),
+            DataMatrix => cfg!(feature = "datamatrix"),
+            MaxiCode => cfg!(feature = "maxicode"),
+            HanXin => cfg!(feature = "hanxin"),
+            DotCode => cfg!(feature = "dotcode"),
+            GridMatrix => cfg!(feature = "gridmatrix"),
+            // The URL codec embeds ~1.7 MB of trained frequency tables.
+            AppClipCode => cfg!(feature = "appclip"),
+            Pdf417 | MicroPdf417 => cfg!(feature = "pdf417"),
+            Code16k => cfg!(feature = "code16k"),
+            Code49 => cfg!(feature = "code49"),
+            CodablockF => cfg!(feature = "codablockf"),
+            Ean13 | Ean8 | UpcA | UpcE | Ean2 | Ean5 => cfg!(feature = "ean"),
+            Code128 | Gs1_128 => cfg!(feature = "code128"),
+            Code39 => cfg!(feature = "code39"),
+            Code93 => cfg!(feature = "code93"),
+            Code11 => cfg!(feature = "code11"),
+            Itf => cfg!(feature = "itf"),
+            Std2of5 | Iata2of5 | Matrix2of5 => cfg!(feature = "twoof5"),
+            Codabar => cfg!(feature = "codabar"),
+            MsiPlessey | Plessey => cfg!(feature = "msi"),
+            Telepen => cfg!(feature = "telepen"),
+            Pharmacode | PharmacodeTwoTrack => cfg!(feature = "pharmacode"),
+            DxFilmEdge => cfg!(feature = "dxfilm"),
+            DataBarOmni
+            | DataBarStacked
+            | DataBarStackedOmni
+            | DataBarLimited
+            | DataBarExpanded
+            | DataBarExpandedStacked => cfg!(feature = "databar"),
+            Postnet | Planet | IntelligentMail | RoyalMail | Mailmark | AustraliaPost
+            | JapanPost | KixCode => cfg!(feature = "postal"),
         }
-        matches!(
-            self,
-            QrCode
-                | MicroQrCode
-                | RectMicroQrCode
-                | Aztec
-                | AztecRunes
-                | HanXin
-                | DotCode
-                | GridMatrix
-                | DataMatrix
-                | MaxiCode
-                | Pdf417
-                | MicroPdf417
-                | Code128
-                | Gs1_128
-                | Code39
-                | Code93
-                | Code11
-                | Ean13
-                | Ean8
-                | UpcA
-                | UpcE
-                | Ean2
-                | Ean5
-                | Itf
-                | Std2of5
-                | Iata2of5
-                | Matrix2of5
-                | Codabar
-                | MsiPlessey
-                | Plessey
-                | Telepen
-                | Pharmacode
-                | PharmacodeTwoTrack
-                | DataBarOmni
-                | DataBarLimited
-                | DataBarExpanded
-                | DataBarStacked
-                | DataBarStackedOmni
-                | DataBarExpandedStacked
-                | Code16k
-                | Code49
-                | CodablockF
-                | Postnet
-                | Planet
-                | IntelligentMail
-                | RoyalMail
-                | KixCode
-                | Mailmark
-                | AustraliaPost
-                | JapanPost
-                | DxFilmEdge
-        )
     }
 
     /// A short, stable, human-readable name.
@@ -393,9 +373,10 @@ mod tests {
             assert!(names.insert(s.name()), "duplicate name: {}", s.name());
             let _ = s.dimension();
         }
-        // At least QR is implemented; coverage grows over time.
-        assert!(Symbology::QrCode.is_implemented());
-        assert!(Symbology::ALL.iter().any(|s| s.is_implemented()));
+        // With every symbology feature on, the whole catalog is implemented.
+        if cfg!(feature = "all-codes") {
+            assert!(Symbology::ALL.iter().all(|s| s.is_implemented()));
+        }
     }
 
     /// The discriminants are persisted-data / wire API: spot-check the anchors of

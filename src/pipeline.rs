@@ -10,6 +10,7 @@
 use crate::geometry::Location;
 use crate::symbol::Symbol;
 use crate::symbology::Symbology;
+use alloc::{boxed::Box, vec::Vec};
 
 /// A cheap, position-independent signature of a candidate region, used to recognize
 /// the same physical code across consecutive frames without decoding it.
@@ -104,25 +105,34 @@ pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 /// directly off each frame (fast, and independent of any coarse locator) while reserving
 /// the heavier, crop-dependent [`scan_1d`] pass for located regions.
 pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    #[allow(unused_mut)]
     let mut found: Vec<Symbol> = Vec::new();
+    let _ = frame; // unused when no 2D symbology is enabled
+    #[cfg(feature = "qr")]
     if let Ok(s) = crate::codes::qr::scan(frame) {
-        found.push(s);
+        dedup_push(&mut found, s);
     }
+    #[cfg(feature = "datamatrix")]
     if let Ok(s) = crate::codes::datamatrix::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "aztec")]
     if let Ok(s) = crate::codes::aztec::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "microqr")]
     if let Ok(s) = crate::codes::microqr::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "rmqr")]
     if let Ok(s) = crate::codes::rmqr::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "pdf417")]
     if let Some(s) = crate::codes::pdf417::scan(frame) {
         dedup_push(&mut found, s);
     }
+    #[cfg(feature = "pdf417")]
     if let Ok(s) = crate::codes::pdf417::scan_micro(frame) {
         dedup_push(&mut found, s);
     }
@@ -199,18 +209,28 @@ fn scan_1d_sweep(
     use crate::traits::Decode;
 
     let mut found: Vec<Symbol> = Vec::new();
+    #[cfg(feature = "ean")]
     if let Some(s) = crate::codes::ean::scan(frame, scan_opts) {
         found.push(s);
     }
-    let candidates = crate::scan1d::scan_lines(frame, scan_opts);
-    let linear: [Box<dyn Decode>; 6] = [
+    let linear: Vec<Box<dyn Decode>> = alloc::vec![
+        #[cfg(feature = "code128")]
         Box::new(crate::codes::code128::Code128Decoder::new()),
+        #[cfg(feature = "ean")]
         Box::new(crate::codes::ean::EanDecoder::new()),
+        #[cfg(feature = "code93")]
         Box::new(crate::codes::code93::Code93Decoder::new()),
+        #[cfg(feature = "code39")]
         Box::new(crate::codes::code39::Code39Decoder::new()),
+        #[cfg(feature = "itf")]
         Box::new(crate::codes::itf::ItfDecoder::new()),
+        #[cfg(feature = "codabar")]
         Box::new(crate::codes::codabar::CodabarDecoder::new()),
     ];
+    if linear.is_empty() {
+        return found;
+    }
+    let candidates = crate::scan1d::scan_lines(frame, scan_opts);
     for cand in &candidates {
         // A scanline as easily runs against the code's reading direction as with it
         // (and a 180°-rotated code always does): try the mirrored pattern too. The

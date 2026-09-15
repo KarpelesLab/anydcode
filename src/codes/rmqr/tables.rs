@@ -423,7 +423,7 @@ pub fn format_bits(size: RmqrSize, ec_h: bool) -> u32 {
     (data << 12) | (rem & 0xFFF)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

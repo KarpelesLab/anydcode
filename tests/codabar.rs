@@ -1,5 +1,6 @@
 //! Codabar: encode → decode → re-encode identity across start/stop pairs and the
 //! full character set.
+#![cfg(all(feature = "decode", feature = "encode", feature = "codabar"))]
 
 use anyd::codes::codabar::{CodabarDecoder, CodabarEncoder, CodabarMeta};
 use anyd::segment::Segment;

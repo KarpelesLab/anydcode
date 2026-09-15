@@ -6,6 +6,9 @@
 //! preserve the exact segmentation and mode of each piece rather than collapsing
 //! everything to a single decoded string.
 
+#[cfg(feature = "alloc")]
+use alloc::{vec, vec::Vec};
+
 /// The encoding mode of a single [`Segment`].
 ///
 /// Not every mode applies to every symbology; encoders reject modes they cannot
@@ -41,6 +44,7 @@ impl Mode {
 /// - `Byte`         → raw payload bytes as stored in the symbol.
 /// - `Kanji`        → the source Shift-JIS bytes (2 per character).
 /// - `Eci`          → empty; the assignment lives in the mode.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
     /// How [`Segment::data`] is encoded.
@@ -54,6 +58,7 @@ pub struct Segment {
 /// Per-character costs are expressed in *sixths of a bit* so the fractional
 /// densities of numeric (10 bits / 3 digits) and alphanumeric (11 bits / 2
 /// characters) stay exact in integer arithmetic.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct ModeCost {
     /// The mode segments produced by this entry are tagged with.
@@ -80,6 +85,7 @@ pub struct ModeCost {
 ///
 /// Returns `None` when some byte is representable in no mode (possible only
 /// when `costs` lacks an accept-everything byte mode, e.g. Micro QR M1/M2).
+#[cfg(feature = "alloc")]
 pub fn optimize_segments(data: &[u8], costs: &[ModeCost]) -> Option<Vec<Segment>> {
     const INF: u64 = u64::MAX / 2;
     let round_up_bits = |c: u64| c.div_ceil(6) * 6;
@@ -155,6 +161,7 @@ pub fn optimize_segments(data: &[u8], costs: &[ModeCost]) -> Option<Vec<Segment>
     Some(out)
 }
 
+#[cfg(feature = "alloc")]
 impl Segment {
     /// A numeric segment from ASCII digits.
     pub fn numeric(digits: impl Into<Vec<u8>>) -> Self {
@@ -319,7 +326,7 @@ mod tests {
         for s in &segs {
             if s.mode == Mode::Byte {
                 assert!(
-                    std::str::from_utf8(&s.data).is_ok(),
+                    core::str::from_utf8(&s.data).is_ok(),
                     "byte segment split a UTF-8 char"
                 );
             }

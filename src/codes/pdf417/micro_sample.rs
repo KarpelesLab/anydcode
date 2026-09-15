@@ -29,6 +29,7 @@ use crate::imgproc::sample::sample_bilinear;
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::output::BitMatrix;
 use crate::symbol::Symbol;
+use alloc::vec::Vec;
 
 /// Reject aspect hypotheses further than this factor from the measured quad.
 const MAX_ASPECT_MISMATCH: f32 = 1.4;
@@ -104,7 +105,7 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
                 (mismatch <= MAX_ASPECT_MISMATCH).then_some((mismatch, v))
             })
             .collect();
-        order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
         for (_, v) in order {
             let w = variant_width(VAR_COLS[v] as usize);

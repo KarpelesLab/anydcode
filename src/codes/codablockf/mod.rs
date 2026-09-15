@@ -33,11 +33,25 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::vec::Vec;
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::CodablockFDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::CodablockFEncoder;
 
 /// Parameters required to re-encode a Codablock F symbol identically (lossless

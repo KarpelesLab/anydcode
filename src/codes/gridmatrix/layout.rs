@@ -15,6 +15,7 @@
 
 use super::tables::{EcLevel, Version};
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width required around a Grid Matrix symbol, in modules.
 pub const QUIET_ZONE: usize = 2;
@@ -248,7 +249,7 @@ pub fn read_ec_level(version: Version, m: &BitMatrix) -> Option<EcLevel> {
     best_ec
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

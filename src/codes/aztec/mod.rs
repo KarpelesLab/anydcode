@@ -17,17 +17,35 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod highlevel;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod layout;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod rune;
+#[cfg(feature = "scan")]
 mod sample;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::AztecDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::AztecEncoder;
+#[cfg(feature = "scan")]
 pub use sample::scan;
 
 /// Aztec Code has no mandatory quiet zone.
@@ -35,6 +53,7 @@ const QUIET_ZONE: usize = 0;
 
 /// The physical side length of a full-range symbol with `layers` layers, including
 /// the inserted reference grid.
+#[cfg(feature = "decode")]
 pub(crate) fn full_size(layers: usize) -> usize {
     let base = 14 + layers * 4;
     base + 1 + 2 * ((base / 2 - 1) / 15)

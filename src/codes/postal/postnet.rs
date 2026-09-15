@@ -11,6 +11,7 @@
 
 use super::{BarState, PostalVariant};
 use crate::error::{Error, Result};
+use alloc::vec::Vec;
 
 /// POSTNET digit patterns: for each digit `0..=9`, the five bars (`true` = tall)
 /// under the `7-4-2-1-0` weighting. Each has exactly two tall bars.
@@ -77,7 +78,7 @@ pub(super) fn encode(planet: bool, digits: &[u8]) -> Result<Vec<BarState>> {
     // frame + one 5-bar group per data digit + check group + frame.
     let mut bars = Vec::with_capacity(2 + 5 * (values.len() + 1));
     bars.push(bar(true)); // leading frame bar (always tall)
-    for &v in values.iter().chain(std::iter::once(&check)) {
+    for &v in values.iter().chain(core::iter::once(&check)) {
         for &tall in &pattern(v, planet) {
             bars.push(bar(tall));
         }
@@ -128,7 +129,9 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
 /// group is not a valid pattern.
 fn decode_groups(groups: &[BarState], planet: bool) -> Option<Vec<u8>> {
     groups
-        .chunks_exact(5)
+        .as_chunks::<5>()
+        .0
+        .iter()
         .map(|chunk| {
             let tall = [
                 chunk[0].has_ascender(),

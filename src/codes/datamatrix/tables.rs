@@ -87,7 +87,7 @@ pub fn square_by_size(symbol_size: usize) -> Option<SquareSpec> {
         .find(|s| s.symbol_size == symbol_size)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

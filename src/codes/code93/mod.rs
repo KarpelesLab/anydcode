@@ -22,14 +22,32 @@
 //! specification (<http://www.barcodeisland.com/code93.phtml>); worked example
 //! `TEST93` → C = `+`, K = `6`.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use alloc::format;
+#[cfg(feature = "decode")]
+use alloc::string::String;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone margin, in modules, emitted on each side of the pattern.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// The nine-module patterns for values 0..=46 (`1` = bar, `0` = space).
@@ -87,6 +105,7 @@ const PATTERNS: [&str; 47] = [
 const START_STOP: &str = "101011110";
 
 /// The base ASCII character for a value 0..=42, or `None` for the shift values 43..=46.
+#[cfg(feature = "decode")]
 fn base_char(value: u8) -> Option<u8> {
     Some(match value {
         0..=9 => b'0' + value,
@@ -103,6 +122,7 @@ fn base_char(value: u8) -> Option<u8> {
 }
 
 /// The value 0..=42 of a base ASCII character, or `None` if outside the base set.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn base_value(b: u8) -> Option<u8> {
     Some(match b {
         b'0'..=b'9' => b - b'0',
@@ -120,6 +140,7 @@ fn base_value(b: u8) -> Option<u8> {
 
 /// The Code 39-style shift prefix (`$ % / +`) that a Code 93 shift value 43..=46 stands
 /// in for, used to reuse the shared full-ASCII pairing rules.
+#[cfg(feature = "decode")]
 fn shift_prefix(value: u8) -> Option<u8> {
     Some(match value {
         43 => b'$',
@@ -131,6 +152,7 @@ fn shift_prefix(value: u8) -> Option<u8> {
 }
 
 /// The shift value 43..=46 for a Code 39-style prefix character.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn shift_value(prefix: u8) -> u8 {
     match prefix {
         b'$' => 43,
@@ -143,6 +165,7 @@ fn shift_value(prefix: u8) -> u8 {
 /// Full-ASCII pairing of a byte, in the Code 39 canonical form (prefix in `$ % / +`).
 /// Returns `Single(base)` for the 5 self-mapping punctuation/letter/digit classes and
 /// `Pair(prefix, letter)` otherwise; `None` for bytes `>= 128`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn fa_encode(b: u8) -> Option<Fa> {
     let pair = match b {
         0 => (b'%', b'U'),
@@ -191,6 +214,7 @@ fn fa_encode(b: u8) -> Option<Fa> {
 }
 
 /// Reverse a full-ASCII shift pair back to its ASCII byte.
+#[cfg(feature = "decode")]
 fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
     match prefix {
         b'$' => letter.is_ascii_uppercase().then_some(1 + (letter - b'A')),
@@ -219,6 +243,7 @@ fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
 }
 
 /// A shift pair or self-mapping character in the full-ASCII scheme.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fa {
     /// A byte that maps to a single base character (the byte itself).
@@ -246,9 +271,11 @@ pub struct Code93Meta {
 }
 
 /// Code 93 encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code93Encoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Code93Encoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -285,6 +312,7 @@ impl Code93Encoder {
 }
 
 /// Expand a payload to Code 93 symbol values (0..=46), per the full-ASCII flag.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn expand(data: &[u8], full_ascii: bool) -> Result<Vec<u8>> {
     let mut values = Vec::new();
     for &b in data {
@@ -318,6 +346,7 @@ fn expand(data: &[u8], full_ascii: bool) -> Result<Vec<u8>> {
     Ok(values)
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for Code93Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Code93 {
@@ -358,9 +387,11 @@ impl Encode for Code93Encoder {
 
 /// Code 93 decoder. Full-ASCII is detected in-band and both check characters are
 /// always validated, so no configuration is required.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code93Decoder;
 
+#[cfg(feature = "decode")]
 impl Code93Decoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -368,6 +399,7 @@ impl Code93Decoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for Code93Decoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -445,6 +477,7 @@ impl Decode for Code93Decoder {
 }
 
 /// Collapse Code 93 symbol values into ASCII bytes using the full-ASCII rules.
+#[cfg(feature = "decode")]
 fn collapse(values: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -469,11 +502,13 @@ fn collapse(values: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
     out.extend(pattern.bytes().map(|b| b == b'1'));
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.
+#[cfg(feature = "decode")]
 fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
     let mut runs = Vec::new();
     let mut iter = modules.iter().copied();
@@ -496,6 +531,7 @@ fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
 
 /// Rebuild the canonical `1`/`0` module string of a character from its runs,
 /// normalising element widths against the narrowest run.
+#[cfg(feature = "decode")]
 fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     let mut s = String::new();
     for &(bar, len) in runs {
@@ -508,7 +544,7 @@ fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

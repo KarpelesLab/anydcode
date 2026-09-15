@@ -11,6 +11,7 @@
 //! region's family guess and seeds its module-size estimate.
 
 use super::grid::DownGrid;
+use alloc::vec::Vec;
 
 /// A confirmed finder centre in reduced-pixel coordinates.
 #[derive(Debug, Clone, Copy)]

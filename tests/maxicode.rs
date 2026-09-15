@@ -17,6 +17,7 @@
 //!
 //! 2. **Lossless round-trips.** `encode(decode(encode(build(x)))) == encode(build(x))`
 //!    across modes 4, 5, 6 and 2/3, plus recovery from correctable errors.
+#![cfg(all(feature = "decode", feature = "encode", feature = "maxicode"))]
 
 use anyd::codes::maxicode::{MaxiCodeDecoder, MaxiCodeEncoder, MaxiCodeMeta};
 use anyd::output::{BitMatrix, Encoding};

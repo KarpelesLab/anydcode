@@ -7,6 +7,7 @@
 //!     reproduce them bit-for-bit.
 //!  2. **Round-trip identity** — encode → decode → re-encode is byte-identical and
 //!     recovers the exact segments and metadata.
+#![cfg(all(feature = "decode", feature = "encode", feature = "microqr"))]
 
 use anyd::codes::microqr::{
     MicroEcLevel, MicroMask, MicroQrDecoder, MicroQrEncoder, MicroQrMeta, MicroVersion,

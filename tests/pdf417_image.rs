@@ -24,6 +24,7 @@
 //! and stop guards, so its rotation tolerance is deliberately narrower than QR's, and
 //! the geometry model is affine — perspective tilt is out of scope and not asserted. The
 //! magnitudes above sit a comfortable margin inside the measured failure points.
+#![cfg(all(feature = "encode", feature = "scan", feature = "pdf417"))]
 
 use anyd::GrayImage;
 use anyd::codes::pdf417::{EcLevel, Pdf417Encoder, Pdf417Scanner, sample_grid, scan};

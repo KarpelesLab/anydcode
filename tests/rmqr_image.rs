@@ -1,5 +1,6 @@
 //! rMQR image-sampling tests: render → transform → scan through the finder
 //! detector, image-space format read, and sub-dot-refined homography.
+#![cfg(all(feature = "encode", feature = "scan", feature = "rmqr"))]
 
 use anyd::GrayImage;
 use anyd::codes::rmqr::{RmqrEcLevel, RmqrEncoder, SizeStrategy, scan};

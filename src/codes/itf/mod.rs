@@ -31,18 +31,34 @@
 //! [zint](https://github.com/zint/zint) (`C25InterTable`, `stop_start`). The mod-10
 //! check is hand-verified against GTIN-13 `1234567890123` → check digit `1`.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Module width of a narrow element.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const NARROW: u32 = 1;
 /// Module width of a wide element (zint uses a 3:1 ratio).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const WIDE: u32 = 3;
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// Two-of-five element widths per digit (5 elements, wide = `WIDE`, narrow = `NARROW`).
@@ -80,6 +96,7 @@ fn mod10(digits: &[u8]) -> u8 {
 }
 
 /// Validate that every byte is an ASCII digit.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("ITF payload is empty"));
@@ -92,9 +109,11 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
 }
 
 /// Interleaved 2 of 5 encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ItfEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl ItfEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -122,10 +141,12 @@ impl ItfEncoder {
 }
 
 /// Append `width` copies of `bar` to `modules`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(std::iter::repeat_n(bar, width as usize));
+    modules.extend(core::iter::repeat_n(bar, width as usize));
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for ItfEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Itf {
@@ -153,7 +174,7 @@ impl Encode for ItfEncoder {
             push_run(&mut modules, false, NARROW);
         }
         // Interleaved digit pairs: bars from the first digit, spaces from the second.
-        for pair in digits.chunks_exact(2) {
+        for pair in digits.as_chunks::<2>().0 {
             let a = (pair[0] - b'0') as usize;
             let b = (pair[1] - b'0') as usize;
             for (&bar, &space) in DIGIT_WIDTHS[a].iter().zip(&DIGIT_WIDTHS[b]) {
@@ -174,12 +195,14 @@ impl Encode for ItfEncoder {
 }
 
 /// Interleaved 2 of 5 decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ItfDecoder {
     /// Whether a trailing mod-10 check digit is expected (and verified/stripped).
     check: bool,
 }
 
+#[cfg(feature = "decode")]
 impl ItfDecoder {
     /// A new decoder that treats all decoded digits as payload.
     pub fn new() -> Self {
@@ -193,6 +216,7 @@ impl ItfDecoder {
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
+#[cfg(feature = "decode")]
 fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -214,6 +238,7 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
 }
 
 /// Recover a digit from a 5-element width pattern (wide = width > 1).
+#[cfg(feature = "decode")]
 fn digit_from_widths(w: &[u32]) -> Result<u8> {
     for (d, pat) in DIGIT_WIDTHS.iter().enumerate() {
         if w.iter().zip(pat).all(|(&a, &b)| (a > 1) == (b > 1)) {
@@ -223,6 +248,7 @@ fn digit_from_widths(w: &[u32]) -> Result<u8> {
     Err(Error::undecodable("invalid ITF digit pattern"))
 }
 
+#[cfg(feature = "decode")]
 impl Decode for ItfDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -272,7 +298,7 @@ impl Decode for ItfDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

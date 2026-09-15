@@ -43,14 +43,28 @@
 //! The payload is stored as a single [`Segment::byte`] holding that canonical ASCII
 //! text; [`DxFilmMeta`] records whether the frame-number variant is used.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
-use crate::segment::{Mode, Segment};
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::segment::Mode;
+use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
 /// DX Film Edge has no mandatory quiet zone in this abstract module model.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 0;
 
 /// Number of data bits with / without the frame number (zxing-cpp `DATA_LENGTH_*`).
@@ -69,6 +83,7 @@ struct DxData {
 }
 
 impl DxData {
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn data_len(&self) -> usize {
         if self.frame.is_some() {
             DATA_LEN_FN
@@ -91,6 +106,7 @@ impl DxData {
     }
 
     /// Parse the canonical text form, validating every field range.
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn parse(text: &str) -> Result<DxData> {
         let (p1, rest) = text
             .split_once('-')
@@ -132,6 +148,7 @@ impl DxData {
 
     /// The data-track bits (one entry per module, dark = `true`), including
     /// separators and the even-parity bit.
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn data_bits(&self) -> Vec<bool> {
         let mut bits = vec![false; self.data_len()];
         // bit 0: separator (light).
@@ -152,6 +169,7 @@ impl DxData {
 }
 
 /// Write `value` into `bits[start..start+len]`, most-significant bit first.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn write_field(bits: &mut [bool], start: usize, len: usize, value: u32) {
     for i in 0..len {
         bits[start + i] = (value >> (len - 1 - i)) & 1 != 0;
@@ -159,6 +177,7 @@ fn write_field(bits: &mut [bool], start: usize, len: usize, value: u32) {
 }
 
 /// Read `len` bits from `bits[start..]`, most-significant bit first.
+#[cfg(feature = "decode")]
 fn read_field(bits: &[bool], start: usize, len: usize) -> u32 {
     let mut v = 0u32;
     for i in 0..len {
@@ -194,12 +213,13 @@ fn clock_row(width: usize) -> Vec<bool> {
 /// The clock/data-track run lengths: `5, 1×n, 3`, summing to `width`.
 fn run_lengths(width: usize) -> Vec<usize> {
     let mut runs = vec![5];
-    runs.extend(std::iter::repeat_n(1, width - 5 - 3));
+    runs.extend(core::iter::repeat_n(1, width - 5 - 3));
     runs.push(3);
     runs
 }
 
 /// The full 2-row matrix for `dx`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn render(dx: &DxData) -> BitMatrix {
     let data = dx.data_bits();
     // start(5) + data + stop(3).
@@ -239,9 +259,11 @@ pub struct DxFilmMeta {
 }
 
 /// DX Film Edge encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DxFilmEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl DxFilmEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -277,6 +299,7 @@ impl DxFilmEncoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for DxFilmEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::DxFilmEdge {
@@ -291,9 +314,11 @@ impl Encode for DxFilmEncoder {
 }
 
 /// DX Film Edge decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DxFilmDecoder;
 
+#[cfg(feature = "decode")]
 impl DxFilmDecoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -372,6 +397,7 @@ impl DxFilmDecoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for DxFilmDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         match encoding {
@@ -384,6 +410,7 @@ impl Decode for DxFilmDecoder {
 }
 
 /// Concatenate the bytes of all data segments into UTF-8 text.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn flatten_text(segments: &[Segment]) -> Result<String> {
     let mut out = Vec::new();
     for seg in segments {

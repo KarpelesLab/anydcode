@@ -15,6 +15,7 @@ use super::gf::GaloisField;
 use super::tables::{FINDER_BOTTOM_RIGHT, FINDER_SIDE, FINDER_TOP_LEFT};
 use super::{EcLevel, Mask, Version};
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width required around a Han Xin symbol, in modules (ISO/IEC 20830 §5).
 pub const QUIET_ZONE: usize = 3;

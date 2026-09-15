@@ -30,6 +30,9 @@ use crate::output::{BitMatrix, Encoding};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
+#[cfg(feature = "decode")]
+use alloc::format;
+use alloc::{vec, vec::Vec};
 
 /// Light-module margin framing a stacked symbol (matches the linear encoders).
 const QUIET_ZONE: usize = 1;
@@ -85,6 +88,7 @@ fn row_runs(m: &BitMatrix, row: usize, width: usize) -> Vec<(bool, i32)> {
 // ======== DataBar-14 Stacked ========
 
 /// Encode a DataBar Stacked symbol from the 46 linear element widths.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub(super) fn encode_stacked(tw: &[i32; 46]) -> Encoding {
     let mut m = BitMatrix::new(STK_WIDTH, 3, QUIET_ZONE);
 
@@ -116,6 +120,7 @@ pub(super) fn encode_stacked(tw: &[i32; 46]) -> Encoding {
 }
 
 /// Encode a DataBar Stacked Omnidirectional symbol from the 46 linear element widths.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub(super) fn encode_stacked_omni(tw: &[i32; 46]) -> Encoding {
     let c_right = super::encode::omn_right_finder_index(tw);
     let mut m = BitMatrix::new(STK_WIDTH, 5, QUIET_ZONE);
@@ -215,6 +220,7 @@ fn stacked_total_widths(m: &BitMatrix, top_row: usize, bottom_row: usize) -> Res
     Ok(tw)
 }
 
+#[cfg(feature = "decode")]
 fn decode_stacked_family(
     m: &BitMatrix,
     top_row: usize,
@@ -583,6 +589,7 @@ fn row_global_blocks(
 // ======== dispatch ========
 
 /// Decode any stacked DataBar matrix, dispatching on its dimensions.
+#[cfg(feature = "decode")]
 pub(super) fn decode(m: &BitMatrix) -> Result<Symbol> {
     let (w, h) = (m.width(), m.height());
     if w == STK_WIDTH && h == 3 {

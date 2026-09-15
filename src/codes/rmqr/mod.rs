@@ -18,14 +18,31 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::{format, string::String};
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod matrix;
+#[cfg(feature = "scan")]
 mod sample;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::RmqrDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::RmqrEncoder;
+#[cfg(feature = "scan")]
 pub use sample::scan;
 
 /// An rMQR symbol size, identified by its 5-bit version indicator (0..=31).

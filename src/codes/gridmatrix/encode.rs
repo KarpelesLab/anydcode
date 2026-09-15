@@ -4,16 +4,18 @@
 //! segmentation and smallest fitting version) or renders an already-specified
 //! [`Symbol`] exactly from its [`GridMatrixMeta`].
 
+use super::data::to_segment;
 use super::data::{GmMode, canonical_segments, encode_segments, recommended_ec};
 use super::layout::render;
 use super::tables::{EcLevel, Version, blocks, smallest_version_for};
 use super::{GridMatrixMeta, gf};
 use crate::error::{Error, Result};
 use crate::output::Encoding;
-use crate::segment::{Mode, Segment};
+use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Grid Matrix encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -135,25 +137,6 @@ fn build_symbol(segs: Vec<(GmMode, Vec<u8>)>, version: Version, ec: EcLevel) -> 
     )
 }
 
-/// Map a Grid Matrix mode + bytes to a crate [`Segment`]. The decoder uses the same
-/// mapping, so decoded symbols compare equal to freshly-built ones.
-pub(super) fn to_segment(mode: GmMode, data: Vec<u8>) -> Segment {
-    match mode {
-        GmMode::Numeral => Segment {
-            mode: Mode::Numeric,
-            data,
-        },
-        GmMode::Upper | GmMode::Lower => Segment {
-            mode: Mode::Alphanumeric,
-            data,
-        },
-        GmMode::Byte | GmMode::Chinese | GmMode::Mixed => Segment {
-            mode: Mode::Byte,
-            data,
-        },
-    }
-}
-
 /// Convert the data bitstream to 7-bit codewords, pad to the version/EC capacity, and
 /// append interleaved Reed–Solomon EC — the full `total_codewords()` stream ready for
 /// placement. Mirrors zint `gm_add_ecc`.
@@ -200,7 +183,7 @@ fn add_ecc(bits: &[bool], version: Version, ec: EcLevel) -> Vec<u8> {
     cws
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

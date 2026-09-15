@@ -20,6 +20,7 @@ impl Point {
     }
 
     /// Euclidean distance to another point.
+    #[cfg(feature = "std")]
     pub fn distance(self, other: Point) -> f32 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;

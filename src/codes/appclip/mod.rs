@@ -43,15 +43,32 @@
 //! # }
 //! ```
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::string::String;
+
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod codec;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod huffman;
+#[cfg(feature = "scan")]
 mod scan;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod svg;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod url;
 
 pub use codec::{decode_payload, encode_payload};
+#[cfg(feature = "scan")]
 pub use scan::scan;
 pub use svg::{Color, LogoKind, Palette, template_palette, third_color};
 pub use url::{compress_url, decompress_url};
@@ -88,6 +105,7 @@ impl Options {
 
 /// Generate the SVG for `url`. The URL must be HTTPS and compressible to 128 bits —
 /// short hosts and common path shapes fit; arbitrary long URLs may not.
+#[cfg(all(feature = "std", feature = "encode"))]
 pub fn generate_svg(url: &str, opts: &Options) -> Result<String> {
     let payload = compress_url(url)?;
     let bits = encode_payload(&payload)?;

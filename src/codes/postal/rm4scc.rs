@@ -24,6 +24,7 @@
 
 use super::{BarState, PostalVariant};
 use crate::error::{Error, Result};
+use alloc::vec::Vec;
 
 /// The 36-character alphabet, in grid order.
 const ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -160,7 +161,9 @@ pub(super) fn decode_kix(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> 
 
 /// Decode a run of 4-bar groups into character indices.
 fn decode_groups(body: &[BarState]) -> Result<Vec<u8>> {
-    body.chunks_exact(4)
+    body.as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| {
             bars_to_char(chunk).ok_or_else(|| Error::undecodable("invalid RM4SCC character"))
         })

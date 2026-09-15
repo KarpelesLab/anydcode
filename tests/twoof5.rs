@@ -1,4 +1,5 @@
 //! Standard/IATA/Matrix 2 of 5: encode → decode → re-encode identity per variant.
+#![cfg(all(feature = "decode", feature = "encode", feature = "twoof5"))]
 
 use anyd::codes::twoof5::{TwoOf5Decoder, TwoOf5Encoder};
 use anyd::segment::Segment;

@@ -18,6 +18,7 @@
 
 use super::{BarState, PostalVariant};
 use crate::error::{Error, Result};
+use alloc::{vec, vec::Vec};
 
 /// Three bar values per intermediate character, indexed by position in
 /// [`KASUTSET`].
@@ -179,7 +180,7 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
     }
     let body = &v[2..65]; // 21 characters × 3 bars
     let mut chars = Vec::with_capacity(21);
-    for tri in body.chunks_exact(3) {
+    for tri in body.as_chunks::<3>().0 {
         let idx = JAPAN_TABLE
             .iter()
             .position(|&e| e == [tri[0], tri[1], tri[2]])

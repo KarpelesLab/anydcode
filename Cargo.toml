@@ -14,18 +14,79 @@ categories = ["encoding", "multimedia::images"]
 exclude = ["/web", "/.github", "/testdata"]
 
 [features]
-default = ["appclip"]
+default = ["std", "encode", "decode", "scan", "all-codes"]
+
+# ---- Runtime tiers ----------------------------------------------------------
+# The crate is always `#![no_std]`. `alloc` enables the owned data model
+# (`Symbol`, `Segment`, `BitMatrix`, ...) and every `Vec`-based encoder/decoder;
+# `std` adds float math, `std::error::Error` interop and image scanning. With
+# neither, only the heap-free encoders (`encode_into`) and core types remain.
+std = ["alloc"]
+alloc = []
+
+# ---- Capabilities -----------------------------------------------------------
+# Encoders for every enabled symbology (`encode_into` heap-free variants where
+# available, plus the `Symbol`-based `Encode` trait when `alloc` is on).
+encode = []
+# Structural decoders (module grid / linear pattern -> `Symbol`). Needs `alloc`.
+decode = ["alloc"]
+# Pixel front-ends: camera/still-image samplers, the frame locator, the 1D
+# scanline pipeline and image transforms. Needs float math, hence `std`.
+scan = ["std", "decode"]
+
+# ---- Symbologies ------------------------------------------------------------
+all-codes = ["matrix", "stacked", "linear", "postal"]
+matrix = ["qr", "microqr", "rmqr", "aztec", "datamatrix", "maxicode", "hanxin", "dotcode", "gridmatrix", "appclip"]
+stacked = ["pdf417", "code16k", "code49", "codablockf"]
+linear = ["ean", "code128", "code39", "code93", "code11", "itf", "twoof5", "codabar", "msi", "telepen", "pharmacode", "dxfilm", "databar"]
+
+qr = []
+microqr = []
+rmqr = []
+aztec = []
+datamatrix = []
+maxicode = []
+hanxin = []
+dotcode = []
+gridmatrix = []
 # Apple App Clip Code encode/decode. Embeds ~1.7 MB of trained Huffman frequency
-# tables (see src/codes/appclip); disable with `default-features = false` for a
-# lean build.
+# tables (see src/codes/appclip). Needs `alloc`.
 appclip = []
+# PDF417 and MicroPDF417.
+pdf417 = []
+code16k = []
+code49 = []
+codablockf = []
+# EAN-13/8, UPC-A/E and the 2/5-digit add-ons.
+ean = []
+# Code 128 and GS1-128.
+code128 = []
+code39 = []
+code93 = []
+code11 = []
+itf = []
+# Standard, IATA and Matrix 2 of 5.
+twoof5 = []
+codabar = []
+# MSI Plessey and Plessey.
+msi = []
+telepen = []
+# One- and two-track Pharmacode.
+pharmacode = []
+dxfilm = []
+# The GS1 DataBar family (Omni, Limited, Expanded and the stacked variants).
+databar = []
+# POSTNET, PLANET, IMb, RM4SCC, KIX, Mailmark, Australia Post, Japan Post.
+postal = []
+
+# ---- Front-ends -------------------------------------------------------------
 # The `anyd` command-line tool. Off by default so the library stays
 # dependency-free; enable with `cargo build --features cli`.
-cli = ["dep:oxideav-png"]
+cli = ["std", "encode", "decode", "scan", "all-codes", "dep:oxideav-png"]
 # Raw wasm32 FFI exports for the browser demo (no wasm-bindgen). Enable only when
 # building the demo for `wasm32-unknown-unknown`; it relaxes `forbid(unsafe_code)`
 # for the small FFI shim. Adds no dependencies.
-wasm = []
+wasm = ["std", "encode", "decode", "scan", "all-codes"]
 
 [dependencies]
 oxideav-png = { version = "0.1.8", optional = true, default-features = false }
@@ -54,6 +115,7 @@ all = "warn"
 [[bench]]
 name = "detect"
 harness = false
+required-features = ["scan", "encode", "all-codes"]
 
 [[example]]
 name = "qrdebug"

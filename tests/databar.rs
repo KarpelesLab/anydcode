@@ -7,6 +7,7 @@
 //!    `1` = dark module, `0` = light, left to right.
 //! 2. **Lossless round-trip** — encode -> decode -> re-encode must reproduce the
 //!    exact segments, metadata and module pattern.
+#![cfg(all(feature = "decode", feature = "encode", feature = "databar"))]
 
 use anyd::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
 use anyd::output::Encoding;

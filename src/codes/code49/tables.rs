@@ -7,6 +7,12 @@
 //! by a symbol-character value `0..=2400` (two base-49 digits).
 #![allow(clippy::unreadable_literal)]
 
+use super::Code49Meta;
+use crate::error::{Error, Result};
+use crate::segment::Segment;
+use alloc::collections::BTreeMap;
+use alloc::{vec, vec::Vec};
+
 /// Code 49 character set: symbol value (position) -> ASCII/meta char.
 /// `!` = Shift 1, `&` = Shift 2, `*` = FNC1.
 pub const INSET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%!&*";
@@ -576,3 +582,208 @@ pub static ODD_BITPATTERN: [u16; 2401] = [
     0xB91E, 0x9B1E, 0x990E, 0x8B0E, 0x8906, 0xBB0E, 0xB906, 0x9B06, 0x9902, 0xA2FC, 0xD37E, 0xD13E,
     0xAEFC,
 ];
+
+/// Symbol width in modules: start "10" (2) + 4 characters * 16 + stop "1111" (4).
+pub(crate) const ROW_WIDTH: usize = 70;
+
+/// Lay the codewords into the code-character grid and fill in every check character.
+/// Ported from the zint reference implementation (`backend/code49.c`).
+pub(crate) fn compute_grid(
+    codewords: &[u8],
+    m: u8,
+    min_rows: Option<usize>,
+) -> Result<(usize, Vec<u8>)> {
+    let count = codewords.len();
+    let mut grid: Vec<[i64; 8]> = Vec::new();
+    let mut pad_count = 0usize;
+
+    let mut rows = 0usize;
+    loop {
+        let mut row = [0i64; 8];
+        for (i, slot) in row.iter_mut().enumerate().take(7) {
+            let idx = rows * 7 + i;
+            if idx < count {
+                *slot = codewords[idx] as i64;
+            } else {
+                *slot = PAD as i64;
+                pad_count += 1;
+            }
+        }
+        grid.push(row);
+        rows += 1;
+        if rows * 7 >= count {
+            break;
+        }
+    }
+
+    if rows == 1 || rows > 6 || pad_count < 5 {
+        grid.push([PAD as i64; 8]);
+        rows += 1;
+    }
+
+    if let Some(min) = min_rows {
+        if !(2..=8).contains(&min) {
+            return Err(Error::invalid_parameter("Code 49 rows must be 2..=8"));
+        }
+        while rows < min {
+            grid.push([PAD as i64; 8]);
+            rows += 1;
+        }
+    }
+    if rows > 8 {
+        return Err(Error::capacity("Code 49 data exceeds 8 rows"));
+    }
+
+    // Row-count and mode character.
+    grid[rows - 1][6] = 7 * (rows as i64 - 2) + m as i64;
+
+    // Row check characters for all but the last row.
+    for row in grid.iter_mut().take(rows - 1) {
+        let sum: i64 = row[0..7].iter().sum();
+        row[7] = sum % 49;
+    }
+
+    // Symbol check characters (X, Y, Z), modulo 2401.
+    let mut posn = 0usize;
+    let mode_char = grid[rows - 1][6];
+    let mut x_count = mode_char * 20;
+    let mut y_count = mode_char * 16;
+    let mut z_count = mode_char * 38;
+    for row in grid.iter().take(rows - 1) {
+        for j in 0..4 {
+            let local = row[2 * j] * 49 + row[2 * j + 1];
+            x_count += X_WEIGHT[posn] as i64 * local;
+            y_count += Y_WEIGHT[posn] as i64 * local;
+            z_count += Z_WEIGHT[posn] as i64 * local;
+            posn += 1;
+        }
+    }
+
+    if rows > 6 {
+        z_count %= 2401;
+        grid[rows - 1][0] = z_count / 49;
+        grid[rows - 1][1] = z_count % 49;
+    }
+
+    let local = grid[rows - 1][0] * 49 + grid[rows - 1][1];
+    x_count += X_WEIGHT[posn] as i64 * local;
+    y_count += Y_WEIGHT[posn] as i64 * local;
+    posn += 1;
+
+    y_count %= 2401;
+    grid[rows - 1][2] = y_count / 49;
+    grid[rows - 1][3] = y_count % 49;
+
+    let local = grid[rows - 1][2] * 49 + grid[rows - 1][3];
+    x_count += X_WEIGHT[posn] as i64 * local;
+
+    x_count %= 2401;
+    grid[rows - 1][4] = x_count / 49;
+    grid[rows - 1][5] = x_count % 49;
+
+    // Last row check character.
+    let sum: i64 = grid[rows - 1][0..7].iter().sum();
+    grid[rows - 1][7] = sum % 49;
+
+    // Flatten to bytes.
+    let mut flat = Vec::with_capacity(rows * 8);
+    for row in &grid {
+        for &v in row {
+            flat.push(v as u8);
+        }
+    }
+    Ok((rows, flat))
+}
+
+/// Reconstruct the payload [`Segment`]s from a decoded [`Code49Meta`]. Shared by the
+/// decoder and the encoder's `build` path so both produce identical segments.
+///
+/// The Numeric Encodation mode (leading codeword `48`) is not reconstructed; symbols
+/// produced by this crate's encoder never use it. Because re-encoding renders from the
+/// stored grid, segment fidelity never affects the round-trip identity.
+pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
+    let mut codewords = extract_codewords(&meta.grid, meta.rows);
+    let mode_char = meta.grid[(meta.rows - 1) * 8 + 6];
+    let m = mode_char % 7;
+    match m {
+        0 => {}
+        4 => codewords.insert(0, 43), // leading Shift 1
+        5 => codewords.insert(0, 44), // leading Shift 2
+        _ => {
+            return Err(Error::undecodable(
+                "Code 49 numeric-mode payload reconstruction is not implemented",
+            ));
+        }
+    }
+
+    // Reverse the Code 49 ASCII chart: (char1[, char2]) -> source byte.
+    let mut rev: BTreeMap<(u8, u8), u8> = BTreeMap::new();
+    for (b, entry) in ASCII_TO_INSET.iter().enumerate() {
+        rev.insert((entry[0], entry[1]), b as u8);
+    }
+
+    // Codewords -> INSET characters.
+    let mut chars = Vec::with_capacity(codewords.len());
+    for &c in &codewords {
+        let ch = *INSET
+            .get(c as usize)
+            .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))?;
+        chars.push(ch);
+    }
+
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c1 = chars[i];
+        if c1 == SHIFT1 || c1 == SHIFT2 {
+            let c2 = *chars
+                .get(i + 1)
+                .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?;
+            let b = *rev
+                .get(&(c1, c2))
+                .ok_or_else(|| Error::undecodable("Code 49 unknown shifted character"))?;
+            bytes.push(b);
+            i += 2;
+        } else {
+            match rev.get(&(c1, 0)) {
+                Some(&b) => bytes.push(b),
+                None => return Err(Error::undecodable("Code 49 unknown character")),
+            }
+            i += 1;
+        }
+    }
+
+    Ok(if bytes.is_empty() {
+        Vec::new()
+    } else {
+        vec![Segment::byte(bytes)]
+    })
+}
+
+/// Recover the base-49 data codewords from the grid (dropping check/mode cells and the
+/// trailing pad characters).
+pub(crate) fn extract_codewords(grid: &[u8], rows: usize) -> Vec<u8> {
+    let mut cw = Vec::new();
+    for r in 0..rows - 1 {
+        for c in 0..7 {
+            cw.push(grid[r * 8 + c]);
+        }
+    }
+    // The last row holds data only in columns 0..2, and only when rows <= 6.
+    if rows <= 6 {
+        cw.push(grid[(rows - 1) * 8]);
+        cw.push(grid[(rows - 1) * 8 + 1]);
+    }
+    while cw.last() == Some(&PAD) {
+        cw.pop();
+    }
+    cw
+}
+
+/// Shift 1 (`!`) and Shift 2 (`&`) INSET character bytes.
+const SHIFT1: u8 = b'!';
+
+const SHIFT2: u8 = b'&';
+
+/// Pad / numeric-shift codeword value.
+const PAD: u8 = 48;

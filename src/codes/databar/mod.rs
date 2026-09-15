@@ -63,14 +63,29 @@
 //! [`Encoding::Matrix`]: crate::output::Encoding::Matrix
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod expanded;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod stacked;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod widths;
 
+#[cfg(feature = "decode")]
 pub use decode::DataBarDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::DataBarEncoder;
 
 /// Which member of the GS1 DataBar family a symbol is.

@@ -8,6 +8,7 @@
 //! luminance (needed for local variance in Sauvola thresholding).
 
 use crate::image::GrayFrame;
+use alloc::{vec, vec::Vec};
 
 /// A summed-area table over an 8-bit luminance image.
 ///

@@ -7,6 +7,17 @@
 //! precede the codeword patterns). The values are cross-checked byte-for-byte
 //! against zint's `dc_dot_patterns[]` (`backend/dotcode.c`).
 
+// Special codeword values (shared by encoder and decoder).
+pub(crate) const LATCH_A: u8 = 101;
+pub(crate) const LATCH_B_FROM_A: u8 = 102;
+pub(crate) const LATCH_BC: u8 = 106; // Latch B (from C) / Latch C (from A/B)
+pub(crate) const FNC1: u8 = 107;
+pub(crate) const FNC2: u8 = 108;
+pub(crate) const FNC3: u8 = 109; // Reader Init, or Bin-terminate-latch-A
+pub(crate) const UPPER_SHIFT_A: u8 = 110;
+pub(crate) const UPPER_SHIFT_B: u8 = 111;
+pub(crate) const BIN_LATCH: u8 = 112;
+
 /// The DotCode Galois field prime.
 pub const DC_GF: u16 = 113;
 
@@ -36,7 +47,30 @@ pub fn codeword_for_pattern(pattern: u16) -> Option<u8> {
         .map(|i| i as u8)
 }
 
-#[cfg(test)]
+/// Is `(column, row)` a reserved corner dot (holds one of the final six bits)?
+pub(crate) fn is_corner(column: usize, row: usize, width: usize, height: usize) -> bool {
+    if column == 0 && row == 0 {
+        return true;
+    }
+    if height & 1 == 1 {
+        if (column == width - 2 && row == 0) || (column == width - 1 && row == 1) {
+            return true;
+        }
+        if column == 0 && row == height - 1 {
+            return true;
+        }
+    } else {
+        if column == width - 1 && row == 0 {
+            return true;
+        }
+        if (column == 0 && row == height - 2) || (column == 1 && row == height - 1) {
+            return true;
+        }
+    }
+    (column == width - 2 && row == height - 1) || (column == width - 1 && row == height - 2)
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

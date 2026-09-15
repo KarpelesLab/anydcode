@@ -4,6 +4,7 @@
 //! [`Pdf417Meta`] (the round-trip path) or builds a fresh symbol from segments,
 //! choosing a fitting row/column geometry for the requested error-correction level.
 
+use super::tables::ROW_HEIGHT;
 use super::tables::{
     CODEWORD_PATTERNS, CODEWORD_WIDTH, START_PATTERN, START_WIDTH, STOP_PATTERN, STOP_WIDTH,
 };
@@ -14,10 +15,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
-
-/// Number of identical module rows rendered per codeword row (PDF417 rows are at
-/// least three modules tall). The decoder derives the row count from this.
-pub(super) const ROW_HEIGHT: usize = 3;
+use alloc::{vec, vec::Vec};
 
 /// Required light-module quiet zone around the symbol.
 const QUIET_ZONE: usize = 2;
@@ -237,7 +235,7 @@ fn choose_dimensions(
         .ok_or_else(|| Error::capacity("PDF417 data does not fit any valid geometry"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

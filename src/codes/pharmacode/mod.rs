@@ -26,22 +26,38 @@
 //! `131070` → sixteen thick bars (Wikipedia). Two-track is hand-verified against its
 //! bounds: `4` → `[1,1]` and `64570080` → sixteen `3`s.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::string::ToString;
+use alloc::{vec, vec::Vec};
 
 /// Module width of a thick (one-track) bar.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const WIDE: u32 = 3;
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// Inclusive value range of one-track Pharmacode.
-const ONE_TRACK_RANGE: std::ops::RangeInclusive<u32> = 3..=131070;
+const ONE_TRACK_RANGE: core::ops::RangeInclusive<u32> = 3..=131070;
 /// Inclusive value range of two-track Pharmacode.
-const TWO_TRACK_RANGE: std::ops::RangeInclusive<u32> = 4..=64570080;
+const TWO_TRACK_RANGE: core::ops::RangeInclusive<u32> = 4..=64570080;
 
 /// Parameters required to re-encode a Pharmacode symbol identically. The value lives
 /// in the numeric segment and the track count in [`Symbol::symbology`]; no extra state
@@ -50,19 +66,22 @@ const TWO_TRACK_RANGE: std::ops::RangeInclusive<u32> = 4..=64570080;
 pub struct PharmacodeMeta;
 
 /// Parse the numeric payload as a `u32`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn parse_value(payload: &[u8]) -> Result<u32> {
-    let text = std::str::from_utf8(payload)
+    let text = core::str::from_utf8(payload)
         .map_err(|_| Error::invalid_data("Pharmacode payload not UTF-8"))?;
     text.parse::<u32>()
         .map_err(|_| Error::invalid_data("Pharmacode payload is not an integer"))
 }
 
 /// Append `width` copies of `bar` to `modules`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(std::iter::repeat_n(bar, width as usize));
+    modules.extend(core::iter::repeat_n(bar, width as usize));
 }
 
 /// Render a left-to-right sequence of bar widths, joined by single-module spaces.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn render_bars(bar_widths: &[u32]) -> Vec<bool> {
     let mut modules = Vec::new();
     for (i, &w) in bar_widths.iter().enumerate() {
@@ -76,6 +95,7 @@ fn render_bars(bar_widths: &[u32]) -> Vec<bool> {
 
 /// Run-length encode into element widths, and return only the bar widths (the
 /// spaces, at odd indices, must all be narrow).
+#[cfg(feature = "decode")]
 fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -108,6 +128,7 @@ fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
 // ---------- one-track ----------
 
 /// Left-to-right bar widths for a one-track value (thin = 1, thick = `WIDE`).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn one_track_bars(mut n: u32) -> Vec<u32> {
     let mut bars = Vec::new(); // least-significant first
     while n > 0 {
@@ -124,6 +145,7 @@ fn one_track_bars(mut n: u32) -> Vec<u32> {
 }
 
 /// Recover a one-track value from its left-to-right bar widths.
+#[cfg(feature = "decode")]
 fn one_track_value(bars: &[u32]) -> Result<u32> {
     let mut value: u32 = 0;
     for &w in bars {
@@ -143,6 +165,7 @@ fn one_track_value(bars: &[u32]) -> Result<u32> {
 // ---------- two-track ----------
 
 /// Left-to-right ternary digits (bar widths 1/2/3) for a two-track value.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn two_track_bars(mut n: u32) -> Vec<u32> {
     let mut digits = Vec::new();
     while n > 0 {
@@ -160,6 +183,7 @@ fn two_track_bars(mut n: u32) -> Vec<u32> {
 }
 
 /// Recover a two-track value from its left-to-right bar widths (1/2/3).
+#[cfg(feature = "decode")]
 fn two_track_value(bars: &[u32]) -> Result<u32> {
     let mut value: u32 = 0;
     for &w in bars {
@@ -175,9 +199,11 @@ fn two_track_value(bars: &[u32]) -> Result<u32> {
 }
 
 /// Pharmacode encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PharmacodeEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl PharmacodeEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -213,6 +239,7 @@ impl PharmacodeEncoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for PharmacodeEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let value = parse_value(&symbol.payload_bytes())?;
@@ -244,11 +271,13 @@ impl Encode for PharmacodeEncoder {
 }
 
 /// Pharmacode decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PharmacodeDecoder {
     two_track: bool,
 }
 
+#[cfg(feature = "decode")]
 impl PharmacodeDecoder {
     /// A new one-track decoder.
     pub fn new() -> Self {
@@ -261,6 +290,7 @@ impl PharmacodeDecoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for PharmacodeDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -296,7 +326,7 @@ impl Decode for PharmacodeDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

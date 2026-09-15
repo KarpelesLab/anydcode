@@ -6,21 +6,19 @@
 //! returned symbol's meta.
 
 use super::Code16kMeta;
-use super::decode::reconstruct_segments;
 use super::tables::{
     C128_PATTERNS, CODE_A, CODE_B, PAD, SHIFT, START_STOP, START_VALUES, STOP_VALUES,
 };
+use super::tables::{ROW_WIDTH, checksum, reconstruct_segments};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::vec::Vec;
 
 /// The quiet zone Code 16K requires on each side, in narrow modules.
 pub(crate) const QUIET_ZONE: usize = 10;
-
-/// Fixed symbol width in modules: 7 (start) + 1 (guard) + 5*11 (chars) + 7 (stop).
-pub(crate) const ROW_WIDTH: usize = 70;
 
 /// Code 16K encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -84,7 +82,7 @@ impl Code16kEncoder {
         let mut values = Vec::with_capacity(rows * 5 - 2);
         values.push(0); // placeholder for mode char
         values.extend_from_slice(&body);
-        values.extend(std::iter::repeat_n(PAD, pads_needed + extra_pads));
+        values.extend(core::iter::repeat_n(PAD, pads_needed + extra_pads));
         values[0] = 7 * (rows as u8 - 2) + m;
         debug_assert_eq!(values.len(), rows * 5 - 2);
 
@@ -115,21 +113,6 @@ impl Encode for Code16kEncoder {
         };
         Ok(Encoding::Matrix(render(meta)?))
     }
-}
-
-/// The two modulo-107 check characters for a Code 16K data-value sequence (mode char +
-/// data + pads, without the checks). Ported from EN 12323 / zint.
-pub(crate) fn checksum(values: &[u8]) -> (u8, u8) {
-    let mut first: u32 = 0;
-    let mut second: u32 = 0;
-    for (i, &v) in values.iter().enumerate() {
-        first += (i as u32 + 2) * v as u32;
-        second += (i as u32 + 1) * v as u32;
-    }
-    let first_check = (first % 107) as u8;
-    second += first_check as u32 * (values.len() as u32 + 1);
-    let second_check = (second % 107) as u8;
-    (first_check, second_check)
 }
 
 /// Render a validated [`Code16kMeta`] into its module matrix.
@@ -255,7 +238,7 @@ fn plan(data: &[u8]) -> (u8, Vec<u8>) {
     (m, out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

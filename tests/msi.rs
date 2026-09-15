@@ -1,4 +1,5 @@
 //! MSI Plessey (all check schemes) and Plessey (CRC): round-trip identity.
+#![cfg(all(feature = "decode", feature = "encode", feature = "msi"))]
 
 use anyd::codes::msi::{MsiCheck, MsiDecoder, MsiEncoder, MsiMeta};
 use anyd::segment::Segment;

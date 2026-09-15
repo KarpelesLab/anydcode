@@ -1,4 +1,5 @@
 //! Telepen full-ASCII: round-trip identity with and without the mod-127 check.
+#![cfg(all(feature = "decode", feature = "encode", feature = "telepen"))]
 
 use anyd::codes::telepen::{TelepenDecoder, TelepenEncoder, TelepenMeta};
 use anyd::segment::Segment;

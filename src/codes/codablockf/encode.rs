@@ -6,12 +6,14 @@
 
 use super::CodablockFMeta;
 use super::tables::{C128_PATTERNS, START_A, STOP, STOP_VALUE};
+use super::tables::{Set, k1k2, row_check, sum_to_value};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// The quiet zone Codablock F requires on each side, in narrow modules.
 pub(crate) const QUIET_ZONE: usize = 10;
@@ -105,43 +107,6 @@ impl Encode for CodablockFEncoder {
     }
 }
 
-/// The two data check characters K1 and K2 (Codablock F Annex F), over the raw source.
-pub(crate) fn k1k2(data: &[u8]) -> (u8, u8) {
-    let mut s1: u32 = 0;
-    let mut s2: u32 = 0;
-    for (i, &b) in data.iter().enumerate() {
-        s1 = (s1 + (i as u32 + 1) * b as u32) % 86;
-        s2 = (s2 + i as u32 * b as u32) % 86;
-    }
-    (s1 as u8, s2 as u8)
-}
-
-/// Encode a row-indicator / check sum into a Code 128 value in the given set.
-/// Sets A and B use the same (Set B) mapping per the Codablock F spec; Set C is direct.
-pub(crate) fn sum_to_value(sum: u8, set: Set) -> u8 {
-    match set {
-        Set::C => sum,
-        _ => {
-            if sum <= 31 {
-                sum + 64
-            } else if sum <= 47 {
-                sum - 32
-            } else {
-                sum - 22
-            }
-        }
-    }
-}
-
-/// The modulo-103 Code 128 row check over the symbols preceding the check position.
-pub(crate) fn row_check(syms: &[u8]) -> u8 {
-    let mut sum = syms[0] as u32 % 103;
-    for (pos, &v) in syms.iter().enumerate().skip(1) {
-        sum = (sum + v as u32 * pos as u32) % 103;
-    }
-    sum as u8
-}
-
 /// Render a validated [`CodablockFMeta`] into its module matrix.
 pub(crate) fn render(meta: &CodablockFMeta) -> Result<BitMatrix> {
     let (rows, columns) = (meta.rows, meta.columns);
@@ -195,17 +160,6 @@ pub(crate) fn render(meta: &CodablockFMeta) -> Result<BitMatrix> {
 // ---------------------------------------------------------------------------
 // Fresh-input layout
 // ---------------------------------------------------------------------------
-
-/// A Code 128 code set (A/B used for data, C only for filler switches).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Set {
-    /// Code Set A.
-    A,
-    /// Code Set B.
-    B,
-    /// Code Set C.
-    C,
-}
 
 fn representable(set: Set, b: u8) -> bool {
     match set {
@@ -333,7 +287,7 @@ fn emit_row(grid: &mut Vec<u8>, start_set: Set, rowind: u8, data_region: &[u8]) 
     grid.push(STOP_VALUE);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

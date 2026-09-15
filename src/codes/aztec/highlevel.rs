@@ -11,6 +11,7 @@
 use super::tables::{
     DIGIT, LOWER, MIXED, PUNCT, UPPER, char_for_code, code_for_char, mode_bits, punct_pair_for_code,
 };
+use alloc::vec::Vec;
 
 /// A grow-able most-significant-first bit buffer.
 #[derive(Default)]
@@ -66,7 +67,7 @@ fn latch_path(from: usize, to: usize) -> Vec<(u32, usize)> {
     // Breadth-first over the four latchable modes.
     let mut prev: [Option<(usize, u32, usize)>; 5] = [None; 5];
     let mut visited = [false; 5];
-    let mut queue = std::collections::VecDeque::new();
+    let mut queue = alloc::collections::VecDeque::new();
     queue.push_back(from);
     visited[from] = true;
     while let Some(node) = queue.pop_front() {
@@ -322,11 +323,11 @@ pub fn stuff_bits(bits: &[bool], w: usize) -> Vec<bool> {
             }
         }
         if all_one {
-            out.extend(std::iter::repeat_n(true, w - 1));
+            out.extend(core::iter::repeat_n(true, w - 1));
             out.push(false);
             i += w - 1;
         } else if all_zero {
-            out.extend(std::iter::repeat_n(false, w - 1));
+            out.extend(core::iter::repeat_n(false, w - 1));
             out.push(true);
             i += w - 1;
         } else {
@@ -356,7 +357,7 @@ pub fn unstuff_bits(bits: &[bool], w: usize) -> Vec<bool> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

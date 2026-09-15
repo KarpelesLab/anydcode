@@ -35,6 +35,8 @@ use crate::image::GrayFrame;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
+use alloc::{string::String, vec, vec::Vec};
+use std::eprintln;
 
 const MAX_SEARCH_DIM: usize = 320;
 const MIN_VISIBLE_POSITIONS: usize = 56;
@@ -419,7 +421,7 @@ fn circle_score(field: &EdgeField, cx: f64, cy: f64, scale: f64) -> f64 {
     let mut edge_energy = 0.0;
     let mut quiet_energy = 0.0;
     for i in 0..samples {
-        let a = i as f64 / samples as f64 * std::f64::consts::TAU;
+        let a = i as f64 / samples as f64 * core::f64::consts::TAU;
         let (s, c) = a.sin_cos();
         for &r in &er {
             edge_energy += field.sample(cx + c * r, cy + s * r);
@@ -498,7 +500,7 @@ fn xform_score(field: &EdgeField, x: &Xform) -> f64 {
     let mut edge_energy = 0.0;
     let mut quiet_energy = 0.0;
     for i in 0..samples {
-        let a = i as f64 / samples as f64 * std::f64::consts::TAU;
+        let a = i as f64 / samples as f64 * core::f64::consts::TAU;
         for &r in &er {
             let (px, py) = x.point(r, a);
             edge_energy += field.sample(px, py);
@@ -581,7 +583,7 @@ fn estimate_xform(field: &EdgeField, cand: Candidate) -> Xform {
                 } else if xx >= yy {
                     0.0
                 } else {
-                    std::f64::consts::FRAC_PI_2
+                    core::f64::consts::FRAC_PI_2
                 };
                 let ratio = (l1 / l2).sqrt().clamp(1.0, 1.35);
                 if ratio >= 1.03 {

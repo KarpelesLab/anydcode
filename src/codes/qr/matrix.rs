@@ -8,6 +8,7 @@
 use super::tables::alignment_positions;
 use super::{EcLevel, Mask, Version};
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width required around a QR symbol, in modules.
 pub const QUIET_ZONE: usize = 4;
@@ -425,7 +426,7 @@ fn version_bits(version: Version) -> u32 {
     (v << 12) | (rem & 0xFFF)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

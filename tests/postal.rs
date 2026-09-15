@@ -13,6 +13,7 @@
 //!   `I`), which corresponds to the data string `BX11LT1A`.
 //! - POSTNET/PLANET: the `7-4-2-1-0` digit weighting and mod-10 check digit
 //!   (USPS DMM; Wikipedia "POSTNET" / "PLANET").
+#![cfg(all(feature = "decode", feature = "encode", feature = "postal"))]
 
 use anyd::Symbology;
 use anyd::codes::postal::{PostalDecoder, PostalEncoder, PostalVariant};

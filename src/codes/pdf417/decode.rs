@@ -10,10 +10,11 @@
 //! candidate level is tried and the one whose Reed–Solomon decode both succeeds and
 //! yields a consistent symbol-length descriptor is selected.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
-use super::encode::ROW_HEIGHT;
 use super::tables::CODEWORD_PATTERNS;
+use super::tables::ROW_HEIGHT;
 use super::{EcLevel, Pdf417Meta, compaction, ec};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
@@ -127,8 +128,8 @@ fn read_pattern(matrix: &BitMatrix, x0: usize, y: usize) -> u32 {
 }
 
 /// Build the inverse `pattern -> codeword` maps for the three clusters.
-fn build_reverse_tables() -> [HashMap<u32, u32>; 3] {
-    std::array::from_fn(|cluster| {
+fn build_reverse_tables() -> [BTreeMap<u32, u32>; 3] {
+    core::array::from_fn(|cluster| {
         CODEWORD_PATTERNS[cluster]
             .iter()
             .enumerate()
@@ -159,12 +160,13 @@ fn resolve_ec(codewords: &[u32], total: usize) -> Result<(EcLevel, Vec<u32>)> {
     Err(Error::ErrorCorrectionFailed)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
     use crate::codes::pdf417::Pdf417Encoder;
     use crate::segment::Segment;
     use crate::traits::Encode;
+    use alloc::vec;
 
     #[test]
     fn reverse_tables_are_bijective() {

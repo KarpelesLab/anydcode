@@ -8,43 +8,47 @@
 //! choosing among context-Huffman text, unsigned LEB128 decimals, a fixed 6-bit
 //! alphabet and (for paths) the shared wordbook.
 
-use std::sync::OnceLock;
-
 use super::huffman::{HuffmanCoder, MultiCoder, Trie};
 use super::tables::{
     CPQ_SYMBOLS, FIXED_TLDS, FIXED6_ALPHABET, HOST_SYMBOLS, HUFFMAN_TLDS, KNOWN_WORDS, SPQ_SYMBOLS,
     fixed6_index, known_word_index,
 };
 use crate::error::{Error, Result};
+use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
 static H_DATA: &[u8] = include_bytes!("data/h.data");
 static SPQ_DATA: &[u8] = include_bytes!("data/spq.data");
 static CPQ_DATA: &[u8] = include_bytes!("data/cpq.data");
 
-fn host_coder() -> &'static MultiCoder {
-    static C: OnceLock<MultiCoder> = OnceLock::new();
-    C.get_or_init(|| MultiCoder::new(Trie::new(H_DATA, &HOST_SYMBOLS)))
+/// Declare an accessor for a trained coder: built once per process and cached under
+/// `std`, rebuilt on each use without it (no `OnceLock` in `core`).
+macro_rules! coder {
+    ($(#[$doc:meta])* $name:ident: $ty:ty = $init:expr) => {
+        $(#[$doc])*
+        #[cfg(feature = "std")]
+        fn $name() -> &'static $ty {
+            static C: std::sync::OnceLock<$ty> = std::sync::OnceLock::new();
+            C.get_or_init(|| $init)
+        }
+        $(#[$doc])*
+        #[cfg(not(feature = "std"))]
+        fn $name() -> $ty {
+            $init
+        }
+    };
 }
 
-fn spq_coder() -> &'static MultiCoder {
-    static C: OnceLock<MultiCoder> = OnceLock::new();
-    C.get_or_init(|| MultiCoder::new(Trie::new(SPQ_DATA, &SPQ_SYMBOLS)))
-}
-
-fn cpq_coder() -> &'static MultiCoder {
-    static C: OnceLock<MultiCoder> = OnceLock::new();
-    C.get_or_init(|| MultiCoder::new(Trie::new(CPQ_DATA, &CPQ_SYMBOLS)))
-}
-
-/// TLD symbol list (alphabetical) and its Huffman coder for host format 0.
-fn tld_coder() -> &'static HuffmanCoder {
-    static C: OnceLock<HuffmanCoder> = OnceLock::new();
-    C.get_or_init(|| {
+coder!(host_coder: MultiCoder = MultiCoder::new(Trie::new(H_DATA, &HOST_SYMBOLS)));
+coder!(spq_coder: MultiCoder = MultiCoder::new(Trie::new(SPQ_DATA, &SPQ_SYMBOLS)));
+coder!(cpq_coder: MultiCoder = MultiCoder::new(Trie::new(CPQ_DATA, &CPQ_SYMBOLS)));
+coder!(
+    /// TLD symbol list (alphabetical) and its Huffman coder for host format 0.
+    tld_coder: HuffmanCoder = {
         let freqs: Vec<u16> = HUFFMAN_TLDS.iter().map(|&(_, f)| f).collect();
         let syms: Vec<&'static str> = HUFFMAN_TLDS.iter().map(|&(s, _)| s).collect();
         HuffmanCoder::new(&freqs, &syms)
-    })
-}
+    }
+);
 
 // ===================================================================================
 // Compression

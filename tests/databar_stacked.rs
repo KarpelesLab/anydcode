@@ -14,6 +14,7 @@
 //! reduces to the same value). Expanded Stacked payloads are supplied in *reduced*
 //! form (AI digits + values concatenated; FNC1 is byte `0x1D`), matching the linear
 //! Expanded convention.
+#![cfg(all(feature = "decode", feature = "encode", feature = "databar"))]
 
 use anyd::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
 use anyd::output::Encoding;

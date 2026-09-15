@@ -1,5 +1,11 @@
 //! App Clip Code tests: byte-exact URL compression against Apple's own framework
 //! output, payload codec round-trips, URL canonicalization, and SVG generation.
+#![cfg(all(
+    feature = "decode",
+    feature = "encode",
+    feature = "scan",
+    feature = "appclip"
+))]
 #![cfg(feature = "appclip")]
 
 use anyd::codes::appclip;

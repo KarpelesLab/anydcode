@@ -9,6 +9,10 @@
 //!
 //! Table and worked example verified against the Wikipedia "Code 128" article.
 
+use crate::error::{Error, Result};
+use crate::segment::Segment;
+use alloc::{vec, vec::Vec};
+
 /// The 107 Code 128 symbol patterns, indexed by symbol value `0..=106`.
 ///
 /// Each string is a run of element widths starting with a bar; every entry sums to
@@ -195,7 +199,91 @@ pub fn value_for_widths(widths: &[usize]) -> Option<u8> {
     PATTERNS.iter().position(|p| *p == s).map(|v| v as u8)
 }
 
-#[cfg(test)]
+/// The modulo-103 check character for a Start-plus-data symbol sequence.
+///
+/// The Start value has weight 1; each subsequent value has weight equal to its
+/// 1-based position after the Start.
+pub(crate) fn checksum(symbols: &[u8]) -> u8 {
+    let mut sum = symbols[0] as u32;
+    for (k, &v) in symbols.iter().enumerate().skip(1) {
+        sum += (k as u32) * v as u32;
+    }
+    (sum % 103) as u8
+}
+
+/// Reconstruct the human-readable payload [`Segment`]s from a Start-plus-data symbol
+/// sequence, and report whether the symbol is GS1-128 (leading FNC1).
+///
+/// Shared by the decoder and the encoder's `build` path so both produce identical
+/// payload segments for a given symbol-value sequence.
+pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)> {
+    let mut set = CodeSet::from_start(values[0])
+        .ok_or_else(|| Error::undecodable("Code 128 sequence has no Start"))?;
+    let gs1 = values.get(1) == Some(&FNC1);
+
+    let mut bytes = Vec::new();
+    let mut shift: Option<CodeSet> = None;
+    let mut first_data = true;
+
+    for &v in &values[1..] {
+        let active = shift.take().unwrap_or(set);
+        let is_leading = first_data;
+        first_data = false;
+
+        match active {
+            CodeSet::C => match v {
+                0..=99 => {
+                    bytes.push(b'0' + v / 10);
+                    bytes.push(b'0' + v % 10);
+                }
+                CODE_B => set = CodeSet::B,
+                CODE_A => set = CodeSet::A,
+                FNC1 => push_fnc1(&mut bytes, is_leading),
+                _ => return Err(Error::undecodable("invalid symbol in Code C")),
+            },
+            CodeSet::A => match v {
+                0..=95 => bytes.push(if v < 64 { v + 32 } else { v - 64 }),
+                96 | 97 => {} // FNC3 / FNC2: no payload byte
+                SHIFT => shift = Some(CodeSet::B),
+                CODE_C => set = CodeSet::C,
+                CODE_B => set = CodeSet::B,
+                101 => {} // FNC4 (Code A): extended latch, no payload byte
+                FNC1 => push_fnc1(&mut bytes, is_leading),
+                _ => return Err(Error::undecodable("invalid symbol in Code A")),
+            },
+            CodeSet::B => match v {
+                0..=95 => bytes.push(v + 32),
+                96 | 97 => {} // FNC3 / FNC2
+                SHIFT => shift = Some(CodeSet::A),
+                CODE_C => set = CodeSet::C,
+                100 => {} // FNC4 (Code B)
+                CODE_A => set = CodeSet::A,
+                FNC1 => push_fnc1(&mut bytes, is_leading),
+                _ => return Err(Error::undecodable("invalid symbol in Code B")),
+            },
+        }
+    }
+
+    let segments = if bytes.is_empty() {
+        Vec::new()
+    } else {
+        vec![Segment::byte(bytes)]
+    };
+    Ok((segments, gs1))
+}
+
+/// Push the payload effect of an FNC1: the leading (GS1-mode) FNC1 emits nothing; a
+/// later FNC1 is an AI separator, rendered as the GS control byte.
+fn push_fnc1(bytes: &mut Vec<u8>, is_leading: bool) {
+    if !is_leading {
+        bytes.push(GS);
+    }
+}
+
+/// GS1 AI separator byte used when a non-leading FNC1 is decoded into the payload.
+const GS: u8 = 0x1D;
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

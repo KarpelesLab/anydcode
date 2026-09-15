@@ -78,6 +78,7 @@ pub fn match_right(m: &[bool]) -> Option<u8> {
 
 /// Run-length the four elements of a 7-module EAN/UPC digit code (always exactly four
 /// runs), as module counts. Used by the edge/width-ratio decoder.
+#[cfg(feature = "scan")]
 fn widths7(code: [bool; 7]) -> [u8; 4] {
     let mut out = [0u8; 4];
     let mut idx = 0;
@@ -97,6 +98,7 @@ fn widths7(code: [bool; 7]) -> [u8; 4] {
 /// Element widths (module counts, summing to 7) of the L-code for digit `d`, ordered
 /// space,bar,space,bar. The G-code widths are these reversed and the R-code widths are
 /// identical (complementing a bit string preserves its run lengths).
+#[cfg(feature = "scan")]
 pub fn l_widths(d: u8) -> [u8; 4] {
     widths7(l_code(d))
 }
@@ -235,9 +237,10 @@ pub fn upce_expand(ns: u8, payload: &[u8; 6]) -> [u8; 11] {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     fn digits(s: &str) -> Vec<u8> {
         s.bytes().map(|b| b - b'0').collect()

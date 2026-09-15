@@ -4,6 +4,7 @@
 //! byte-identically, across modes, versions, and EC levels, and must survive
 //! correctable errors. A structural reference test cross-checks the version-1 frame
 //! geometry against zint's documented macromodule layout.
+#![cfg(all(feature = "decode", feature = "encode", feature = "gridmatrix"))]
 
 use anyd::codes::gridmatrix::{EcLevel, GmMode, GridMatrixDecoder, GridMatrixEncoder, Version};
 use anyd::output::Encoding;

@@ -59,6 +59,7 @@ use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
+use crate::imgproc::finder::{found_pattern_cross, run_center, scan_line_runs, walk_run};
 use crate::imgproc::integral::IntegralImage;
 use crate::imgproc::sample::sample_bilinear;
 use crate::imgproc::threshold::{
@@ -70,6 +71,8 @@ use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
 use crate::traits::{Analyze, Detect};
 use crate::transform::Projection;
+use alloc::{vec, vec::Vec};
+use std::eprintln;
 
 /// Image-based QR scanner: finds, samples and decodes a QR symbol in a [`GrayFrame`].
 #[derive(Debug, Default, Clone, Copy)]
@@ -417,88 +420,6 @@ struct Finder {
     count: u32,
 }
 
-/// Check that five run lengths match the finder 1:1:3:1:1 ratio; return the module
-/// size (average narrow-run width) on success.
-pub(crate) fn found_pattern_cross(counts: [i32; 5]) -> Option<f32> {
-    let total: i32 = counts.iter().sum();
-    if total < 7 {
-        return None;
-    }
-    let module = total as f32 / 7.0;
-    // Blur softens edges and adjacent dark data modules can bleed into the outer rings,
-    // so the ratios are matched with generous slack: ~0.7 module on each narrow ring and
-    // ~2.1 modules on the wide centre run. Reed–Solomon plus the geometric triple check
-    // reject the extra false positives this admits.
-    let max_var = module * 0.7;
-    let ok = (counts[0] as f32 - module).abs() < max_var
-        && (counts[1] as f32 - module).abs() < max_var
-        && (counts[2] as f32 - 3.0 * module).abs() < 3.0 * max_var
-        && (counts[3] as f32 - module).abs() < max_var
-        && (counts[4] as f32 - module).abs() < max_var;
-    ok.then_some(module)
-}
-
-/// Walk a dark-light-dark-light-dark run centered at `start` along an axis, returning
-/// the five run lengths and the end index just past the final dark run. `sample(k)`
-/// returns whether the pixel at axis position `k` is dark; the axis spans `0..len`.
-pub(crate) fn walk_run(
-    len: i32,
-    start: i32,
-    sample: impl Fn(i32) -> bool,
-) -> Option<([i32; 5], i32)> {
-    let mut counts = [0i32; 5];
-    let mut i = start;
-    while i >= 0 && sample(i) {
-        counts[2] += 1;
-        i -= 1;
-    }
-    if i < 0 {
-        return None;
-    }
-    while i >= 0 && !sample(i) {
-        counts[1] += 1;
-        i -= 1;
-    }
-    if i < 0 || counts[1] == 0 {
-        return None;
-    }
-    while i >= 0 && sample(i) {
-        counts[0] += 1;
-        i -= 1;
-    }
-    if counts[0] == 0 {
-        return None;
-    }
-    let mut j = start + 1;
-    while j < len && sample(j) {
-        counts[2] += 1;
-        j += 1;
-    }
-    if j >= len {
-        return None;
-    }
-    while j < len && !sample(j) {
-        counts[3] += 1;
-        j += 1;
-    }
-    if j >= len || counts[3] == 0 {
-        return None;
-    }
-    while j < len && sample(j) {
-        counts[4] += 1;
-        j += 1;
-    }
-    if counts[4] == 0 {
-        return None;
-    }
-    Some((counts, j))
-}
-
-/// Refined center from run lengths and the walk's end index.
-pub(crate) fn run_center(counts: [i32; 5], end: i32) -> f32 {
-    end as f32 - counts[4] as f32 - counts[3] as f32 - counts[2] as f32 / 2.0
-}
-
 /// Vertical finder cross-check through column `cx`, returning the refined center-`y`.
 fn cross_check_vertical(bin: &Binary, cx: usize, start: usize) -> Option<f32> {
     let (counts, end) = walk_run(bin.height() as i32, start as i32, |k| {
@@ -535,45 +456,6 @@ fn add_center(centers: &mut Vec<Finder>, x: f32, y: f32, module_size: f32) {
         module_size,
         count: 1,
     });
-}
-
-/// Run-length encode one line, invoking `emit(run_start, [c0..c4])` for every window of
-/// five consecutive runs that begins on a dark run — `start` is the pixel index where
-/// the middle (centre) run begins.
-pub(crate) fn scan_line_runs(
-    len: usize,
-    dark: impl Fn(usize) -> bool,
-    mut emit: impl FnMut(usize, [i32; 5]),
-) {
-    let mut runs: Vec<(bool, usize, i32)> = Vec::new();
-    let mut cur = dark(0);
-    let mut start = 0usize;
-    for p in 1..len {
-        let d = dark(p);
-        if d != cur {
-            runs.push((cur, start, (p - start) as i32));
-            cur = d;
-            start = p;
-        }
-    }
-    runs.push((cur, start, (len - start) as i32));
-    if runs.len() < 5 {
-        return;
-    }
-    for i in 0..=runs.len() - 5 {
-        if !runs[i].0 {
-            continue; // pattern must start on a dark run
-        }
-        let counts = [
-            runs[i].2,
-            runs[i + 1].2,
-            runs[i + 2].2,
-            runs[i + 3].2,
-            runs[i + 4].2,
-        ];
-        let center = &runs[i + 2];
-        emit(center.1 + (center.2 as usize) / 2, counts);
-    }
 }
 
 /// Scan the binarized frame for finder patterns and return their clustered centers.
@@ -892,7 +774,7 @@ fn order_finders(a: Finder, b: Finder, c: Finder) -> ([Point; 3], f32) {
     // Ensure (p = bottom-left, q = top-right) handedness for a non-mirrored symbol.
     let cross = (q.x - corner.x) * (p.y - corner.y) - (q.y - corner.y) * (p.x - corner.x);
     if cross < 0.0 {
-        std::mem::swap(&mut p, &mut q);
+        core::mem::swap(&mut p, &mut q);
     }
     // top-left = corner, top-right = q, bottom-left = p
     let module_size = (a.module_size + b.module_size + c.module_size) / 3.0;
@@ -1672,7 +1554,7 @@ fn candidates(frame: &GrayFrame<'_>, bin: &Binary) -> Vec<Located> {
         return Vec::new();
     }
     let mut centers = find_finders(bin);
-    centers.sort_by_key(|f| std::cmp::Reverse(f.count));
+    centers.sort_by_key(|f| core::cmp::Reverse(f.count));
     centers.truncate(MAX_FINDERS);
 
     // Scored candidate triples (real detections first, then synthesized ones).
@@ -1699,7 +1581,7 @@ fn candidates(frame: &GrayFrame<'_>, bin: &Binary) -> Vec<Located> {
         .collect();
     for a in &strong {
         for b in &strong {
-            if std::ptr::eq(a, b) {
+            if core::ptr::eq(a, b) {
                 continue;
             }
             for &sign in &[1.0f32, -1.0] {
@@ -1729,7 +1611,7 @@ fn candidates(frame: &GrayFrame<'_>, bin: &Binary) -> Vec<Located> {
         }
     }
 
-    triples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    triples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
     let mut out = Vec::new();
     for (_, tri) in triples.into_iter().take(MAX_TRIPLES) {

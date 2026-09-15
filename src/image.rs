@@ -6,6 +6,8 @@
 //! nothing on the hot path.
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
+use alloc::{vec, vec::Vec};
 
 /// A borrowed 8-bit grayscale (luminance) view of one video frame or still image.
 ///
@@ -106,6 +108,7 @@ impl<'a> GrayFrame<'a> {
 /// decoding path a zero-copy [`GrayFrame`] view over it. Pixel `0` is fully dark,
 /// `255` fully light — matching the convention that a set [`crate::output::BitMatrix`]
 /// module renders to low luminance.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrayImage {
     data: Vec<u8>,
@@ -113,6 +116,7 @@ pub struct GrayImage {
     height: usize,
 }
 
+#[cfg(feature = "alloc")]
 impl GrayImage {
     /// A new image with every pixel set to `fill`.
     ///
@@ -201,6 +205,7 @@ impl GrayImage {
     /// Returns `None` when the sample point lies outside the image so callers can
     /// substitute a background value. Coordinates are in pixel units with pixel
     /// centers at integer coordinates.
+    #[cfg(feature = "std")]
     pub fn sample_bilinear(&self, x: f32, y: f32) -> Option<f32> {
         if x < 0.0 || y < 0.0 || !x.is_finite() || !y.is_finite() {
             return None;

@@ -4,6 +4,13 @@
 //! near every planted code on populated frames and stays quiet on a blank one. Frames
 //! are synthesized by rendering real symbols (`anyd::render`) into a blank canvas, so
 //! the tests exercise the same path the benchmark times. Everything is small and fast.
+#![cfg(all(
+    feature = "encode",
+    feature = "scan",
+    feature = "code128",
+    feature = "datamatrix",
+    feature = "qr"
+))]
 
 use anyd::GrayImage;
 use anyd::codes::code128::Code128Encoder;

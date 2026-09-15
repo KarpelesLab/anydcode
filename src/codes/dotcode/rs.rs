@@ -12,6 +12,7 @@
 //! field size. The check words are written in place into the tail of `wd`.
 
 use super::tables::DC_GF;
+use alloc::{vec, vec::Vec};
 
 const GF: i32 = DC_GF as i32;
 /// Primitive element of GF(113) used to build the generator polynomial.
@@ -85,7 +86,7 @@ pub fn rsencode(nd: usize, nc: usize, wd: &mut [u8]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 
@@ -107,7 +108,7 @@ mod tests {
         let data = [50u8, 12, 100, 7, 33, 90];
         let nc = 3 + data.len() / 2;
         let mut wd = data.to_vec();
-        wd.extend(std::iter::repeat_n(0u8, nc));
+        wd.extend(core::iter::repeat_n(0u8, nc));
         rsencode(data.len(), nc, &mut wd);
         for i in 1..=nc as i32 {
             let root = pow(ALPHA, i);

@@ -1,5 +1,6 @@
 //! End-to-end QR round-trip tests: encode → decode → re-encode must be identical,
 //! across modes, EC levels and versions, and must survive correctable errors.
+#![cfg(all(feature = "decode", feature = "encode", feature = "qr"))]
 
 use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
 use anyd::output::Encoding;

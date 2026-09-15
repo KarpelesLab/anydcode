@@ -11,7 +11,20 @@
 //! the lexicographically smaller symbol is popped first, and the first-popped subtree
 //! becomes the left ('0') child.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::{string::String, string::ToString, vec, vec::Vec};
+
+/// Shared handle to a cached per-context coder.
+#[cfg(feature = "std")]
+type Shared<T> = std::sync::Arc<T>;
+#[cfg(not(feature = "std"))]
+type Shared<T> = alloc::rc::Rc<T>;
+/// Per-context coder cache: thread-safe (the coders live in process statics) under
+/// `std`, a plain cell otherwise (the coders are then built per call).
+#[cfg(feature = "std")]
+type Cache = std::sync::Mutex<BTreeMap<usize, Shared<HuffmanCoder>>>;
+#[cfg(not(feature = "std"))]
+type Cache = core::cell::RefCell<BTreeMap<usize, Shared<HuffmanCoder>>>;
 
 /// One Huffman code table: symbol index → bit string of '0'/'1'.
 pub(super) struct HuffmanCoder {
@@ -173,8 +186,8 @@ impl Trie {
 /// node reached through the previous (up to two) symbols.
 pub(super) struct MultiCoder {
     trie: Trie,
-    index: HashMap<char, usize>,
-    cache: std::sync::Mutex<HashMap<usize, std::sync::Arc<HuffmanCoder>>>,
+    index: BTreeMap<char, usize>,
+    cache: Cache,
 }
 
 impl MultiCoder {
@@ -188,7 +201,7 @@ impl MultiCoder {
         MultiCoder {
             trie,
             index,
-            cache: std::sync::Mutex::new(HashMap::new()),
+            cache: Cache::new(BTreeMap::new()),
         }
     }
 
@@ -196,12 +209,15 @@ impl MultiCoder {
         self.index.get(&c).copied()
     }
 
-    fn coder(&self, node: usize) -> std::sync::Arc<HuffmanCoder> {
+    fn coder(&self, node: usize) -> Shared<HuffmanCoder> {
+        #[cfg(feature = "std")]
         let mut cache = self.cache.lock().expect("coder cache poisoned");
+        #[cfg(not(feature = "std"))]
+        let mut cache = self.cache.borrow_mut();
         cache
             .entry(node)
             .or_insert_with(|| {
-                std::sync::Arc::new(HuffmanCoder::new(
+                Shared::new(HuffmanCoder::new(
                     &self.trie.frequencies(node),
                     self.trie.symbols,
                 ))

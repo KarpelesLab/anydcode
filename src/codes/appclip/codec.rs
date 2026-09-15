@@ -11,6 +11,7 @@
 use super::gf::{Gf, rs_decode, rs_encode};
 use super::tables::GAPS_BITS_ORDER_LUT;
 use crate::error::{Error, Result};
+use alloc::{vec, vec::Vec};
 
 struct FormatParams {
     gaps_data: usize,
@@ -193,7 +194,7 @@ fn bits_to_symbol(bits: &[bool]) -> usize {
         .fold(0usize, |acc, &b| (acc << 1) | usize::from(b))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

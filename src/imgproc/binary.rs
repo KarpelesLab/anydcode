@@ -6,6 +6,7 @@
 //! barcode's dark modules and finder blobs are the foreground throughout the toolkit.
 
 use crate::error::{Error, Result};
+use alloc::{format, vec, vec::Vec};
 
 /// A `width × height` grid of booleans, `true` meaning a dark (foreground) pixel.
 #[derive(Debug, Clone, PartialEq, Eq)]

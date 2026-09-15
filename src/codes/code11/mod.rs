@@ -17,14 +17,32 @@
 //! (<http://www.barcodeisland.com/code11.phtml>); worked example `123-45` → C = `5`,
 //! K = `2`, and the Wikipedia example `012345` → C = `2`.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use alloc::format;
+#[cfg(feature = "decode")]
+use alloc::string::String;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone margin, in narrow modules, emitted on each side of the pattern.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// Element patterns for values 0..=10 (`0`-`9` then `-`); `1` = bar, `0` = space,
@@ -47,6 +65,7 @@ const PATTERNS: [&str; 11] = [
 const START_STOP: &str = "1011001";
 
 /// The value 0..=10 of a Code 11 data character, or `None` if outside the set.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn char_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -56,6 +75,7 @@ fn char_value(b: u8) -> Option<u8> {
 }
 
 /// The ASCII character for a value 0..=10.
+#[cfg(feature = "decode")]
 fn value_char(v: u8) -> u8 {
     if v == 10 { b'-' } else { b'0' + v }
 }
@@ -79,9 +99,11 @@ pub struct Code11Meta {
 }
 
 /// Code 11 encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code11Encoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Code11Encoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -117,6 +139,7 @@ impl Code11Encoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for Code11Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Code11 {
@@ -178,17 +201,20 @@ impl Encode for Code11Encoder {
 
 /// Code 11 decoder. The number of check characters is not encoded in-band, so the
 /// decoder is told how many to strip and validate (default 1).
+#[cfg(feature = "decode")]
 #[derive(Debug, Clone, Copy)]
 pub struct Code11Decoder {
     check_count: u8,
 }
 
+#[cfg(feature = "decode")]
 impl Default for Code11Decoder {
     fn default() -> Self {
         Code11Decoder { check_count: 1 }
     }
 }
 
+#[cfg(feature = "decode")]
 impl Code11Decoder {
     /// A new decoder expecting a single (`C`) check character.
     pub fn new() -> Self {
@@ -202,6 +228,7 @@ impl Code11Decoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for Code11Decoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         if self.check_count > 2 {
@@ -289,11 +316,13 @@ impl Decode for Code11Decoder {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
     out.extend(pattern.bytes().map(|b| b == b'1'));
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.
+#[cfg(feature = "decode")]
 fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
     let mut runs = Vec::new();
     let mut iter = modules.iter().copied();
@@ -316,6 +345,7 @@ fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
 
 /// Rebuild the canonical `1`/`0` module string of a character from its runs,
 /// normalising element widths against the narrowest run.
+#[cfg(feature = "decode")]
 fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     let mut s = String::new();
     for &(bar, len) in runs {
@@ -328,7 +358,7 @@ fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

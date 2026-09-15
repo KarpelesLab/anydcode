@@ -9,6 +9,7 @@
 //!   weighted 8…1) matches the **Wikipedia "DX encoding"** article's documented stripe
 //!   weighting.
 //! - encode → decode → re-encode is byte-identical across the DX/frame ranges.
+#![cfg(all(feature = "decode", feature = "encode", feature = "dxfilm"))]
 
 use anyd::codes::dxfilm::{DxFilmDecoder, DxFilmEncoder, DxFilmMeta};
 use anyd::output::{BitMatrix, Encoding};

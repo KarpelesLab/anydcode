@@ -50,12 +50,27 @@
 //! [`Segment`]: crate::Segment
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::vec::Vec;
+
+#[cfg(feature = "decode")]
 pub mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod rs;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::DotCodeDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::DotCodeEncoder;
 
 /// Minimum symbol dimension (modules) in either axis.

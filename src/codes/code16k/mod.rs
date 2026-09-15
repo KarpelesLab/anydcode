@@ -35,11 +35,25 @@
 //! [`BitMatrix`]: crate::output::BitMatrix
 //! [`Segment`]: crate::Segment
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::vec::Vec;
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::Code16kDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::Code16kEncoder;
 
 /// Parameters required to re-encode a Code 16K symbol identically (lossless round-trip).

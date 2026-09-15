@@ -26,8 +26,11 @@
 //! run so a segment may exceed 511 bytes, and end-of-data from byte mode uses the
 //! 4-bit control `0`. All other modes use the exact AIMD014 codeword values.
 
+use crate::segment::{Mode, Segment};
+
 use super::tables::EcLevel;
 use crate::error::{Error, Result};
+use alloc::{vec, vec::Vec};
 
 /// A Grid Matrix data-encodation mode. The numeric [`GmMode::index`] matches the
 /// specification's mode numbering (Chinese = 1 … Byte = 6).
@@ -475,7 +478,26 @@ pub fn recommended_ec(version: u8) -> EcLevel {
     }
 }
 
-#[cfg(test)]
+/// Map a Grid Matrix mode + bytes to a crate [`Segment`]. The decoder uses the same
+/// mapping, so decoded symbols compare equal to freshly-built ones.
+pub(super) fn to_segment(mode: GmMode, data: Vec<u8>) -> Segment {
+    match mode {
+        GmMode::Numeral => Segment {
+            mode: Mode::Numeric,
+            data,
+        },
+        GmMode::Upper | GmMode::Lower => Segment {
+            mode: Mode::Alphanumeric,
+            data,
+        },
+        GmMode::Byte | GmMode::Chinese | GmMode::Mixed => Segment {
+            mode: Mode::Byte,
+            data,
+        },
+    }
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

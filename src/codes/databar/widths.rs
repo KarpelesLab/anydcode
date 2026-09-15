@@ -7,6 +7,7 @@
 //! two are exact inverses, exercised exhaustively in the tests.
 
 use super::tables::combins;
+use alloc::{vec, vec::Vec};
 
 /// Generate `elements` element widths encoding `val`, given the total module
 /// count `n`, the widest allowed element `max_width`, and whether narrow
@@ -148,7 +149,7 @@ pub fn interleave(
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

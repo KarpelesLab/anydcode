@@ -14,6 +14,8 @@
 /// capacity (descending order of redundancy). `L1` is the strongest protection
 /// (least data), `L5` the weakest (most data). The numeric index used by the
 /// specification tables is `level as usize + 1` (1–5).
+use alloc::vec::Vec;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EcLevel {
     /// Strongest error correction (roughly half the codewords are EC).
@@ -201,7 +203,7 @@ pub fn smallest_version_for(data_cw: usize, ec: EcLevel) -> Option<Version> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

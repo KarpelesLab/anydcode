@@ -131,8 +131,8 @@ camera and NFC center glyphs); decode covers both the structural path (ring bits
 URL) and camera detection — a grayscale ring detector (gradient-normal Hough over the
 five-ring geometry, affine/tilt refinement, rotation search, RS-arbitrated bit
 recovery) wired into `pipeline::scan_2d`. The trained
-Huffman tables embed ~1.7 MB, so the module sits behind the default-on `appclip`
-cargo feature (`default-features = false` for a lean build). Apple, App Clips and
+Huffman tables embed ~1.7 MB, so the module sits behind its own `appclip` cargo
+feature (part of the default `all-codes`; see [Cargo features](#cargo-features)). Apple, App Clips and
 related marks are trademarks of Apple Inc.
 
 [rs/appclipcode]: https://github.com/rs/appclipcode
@@ -146,6 +146,33 @@ Any-angle rotation, scale, blur, noise; envelope in `tests/micropdf417_image.rs`
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes
 > called "Coda"/NW-7. These are aliases for the same `Symbology` variants above.
+
+## Cargo features
+
+The library is always `#![no_std]`, and every capability and symbology is a cargo
+feature. The defaults turn everything on; for a lean or embedded build, disable them
+and pick what you need:
+
+```toml
+# QR + Code 128 encode/decode on a no_std target with a global allocator
+anyd = { version = "0.1", default-features = false, features = ["alloc", "encode", "decode", "qr", "code128"] }
+```
+
+| Feature | Enables |
+|---|---|
+| `std` *(default)* | `alloc` + float math: image scanning, image transforms, `std` interop |
+| `alloc` | the owned data model (`Symbol`, `Segment`, `BitMatrix`, `LinearPattern`, ...) |
+| `encode` *(default)* | encoders (`Encode` trait, needs `alloc`) |
+| `decode` *(default)* | structural decoders (`Decode` trait); implies `alloc` |
+| `scan` *(default)* | camera / still-image samplers, `detect`, `pipeline`, `scan1d`; implies `std` + `decode` |
+| `all-codes` *(default)* | every symbology below |
+| `matrix` / `stacked` / `linear` / `postal` | one family |
+| `qr` `microqr` `rmqr` `aztec` `datamatrix` `maxicode` `hanxin` `dotcode` `gridmatrix` `appclip` | 2D matrix codes |
+| `pdf417` (incl. MicroPDF417) `code16k` `code49` `codablockf` | stacked codes |
+| `ean` `code128` `code39` `code93` `code11` `itf` `twoof5` `codabar` `msi` `telepen` `pharmacode` `dxfilm` `databar` | linear codes |
+| `cli` / `wasm` | the `anyd` binary / the browser-demo FFI shim (both enable everything) |
+
+`Symbology::is_implemented()` reports which symbologies a given build carries.
 
 ## Example: QR round-trip
 

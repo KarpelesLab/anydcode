@@ -7,6 +7,7 @@
 
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
+use alloc::{vec, vec::Vec};
 
 /// Sobel gradient magnitude at every pixel, returned row-major as `width × height`.
 ///

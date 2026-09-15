@@ -32,6 +32,8 @@
 use super::rs::{Gf, RsEncoder};
 use super::{BarState, PostalVariant};
 use crate::error::{Error, Result};
+use alloc::string::String;
+use alloc::{format, string::ToString, vec, vec::Vec};
 
 /// Post code format patterns (Table 3), one per `postcode_type` `1..=6`.
 const POSTCODE_FORMAT: [&[u8; 9]; 6] = [

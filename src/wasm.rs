@@ -19,6 +19,7 @@ use crate::GrayFrame;
 use crate::output::Encoding;
 use crate::segment::Segment;
 use crate::traits::Encode;
+use alloc::{boxed::Box, format, string::String, string::ToString, vec, vec::Vec};
 
 /// Allocate `len` bytes in wasm memory and return the pointer (caller fills it).
 #[unsafe(no_mangle)]

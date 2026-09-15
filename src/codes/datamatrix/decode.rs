@@ -14,6 +14,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::vec::Vec;
 
 const PAD: u8 = 129;
 const BASE256_LATCH: u8 = 231;
@@ -127,7 +128,7 @@ fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
             }
             BASE256_LATCH => {
                 if !ascii.is_empty() {
-                    segments.push(Segment::byte(std::mem::take(&mut ascii)));
+                    segments.push(Segment::byte(core::mem::take(&mut ascii)));
                     encodations.push(Encodation::Ascii);
                 }
                 let bytes = read_base256(data, &mut i)?;

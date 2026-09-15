@@ -22,6 +22,7 @@ use crate::output::BitMatrix;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
+use alloc::{vec, vec::Vec};
 
 /// The physical side length of an Aztec Rune, in modules.
 pub(crate) const RUNE_SIZE: usize = 11;

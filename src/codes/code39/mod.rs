@@ -25,14 +25,32 @@
 //! article on Wikipedia. The full-ASCII table and the mod-43 algorithm come from the
 //! same sources.
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use alloc::format;
+#[cfg(feature = "decode")]
+use alloc::string::String;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone margin, in narrow modules, emitted on each side of the pattern.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// The 43 data characters in value order (`value == index`), each with its 12-module
@@ -87,11 +105,13 @@ const TABLE: [(u8, &str); 43] = [
 const START_STOP: &str = "100101101101";
 
 /// The value (0..=42) of a base Code 39 character, or `None` if outside the set.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn char_value(b: u8) -> Option<u8> {
     TABLE.iter().position(|&(c, _)| c == b).map(|i| i as u8)
 }
 
 /// A shift pair or self-mapping character in the full-ASCII scheme.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fa {
     /// A byte that maps to a single base character (the byte itself).
@@ -102,6 +122,7 @@ enum Fa {
 
 /// Full-ASCII Code 39 encoding of a byte (the canonical scheme). Returns `None` for
 /// bytes `>= 128`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn fa_encode(b: u8) -> Option<Fa> {
     let pair = match b {
         0 => (b'%', b'U'),
@@ -151,6 +172,7 @@ fn fa_encode(b: u8) -> Option<Fa> {
 
 /// Reverse a full-ASCII shift pair (`prefix` in `$ % / +`, plus `letter`) back to its
 /// ASCII byte, or `None` if the pair is not a valid combination.
+#[cfg(feature = "decode")]
 fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
     match prefix {
         b'$' => letter.is_ascii_uppercase().then_some(1 + (letter - b'A')),
@@ -179,6 +201,7 @@ fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
 }
 
 /// Whether a base character acts as a full-ASCII shift prefix.
+#[cfg(feature = "decode")]
 fn is_shift(b: u8) -> bool {
     matches!(b, b'$' | b'%' | b'/' | b'+')
 }
@@ -193,9 +216,11 @@ pub struct Code39Meta {
 }
 
 /// Code 39 encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code39Encoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Code39Encoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -236,6 +261,7 @@ impl Code39Encoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for Code39Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Code39 {
@@ -309,12 +335,14 @@ impl Encode for Code39Encoder {
 ///
 /// Because neither the full-ASCII decision nor check-digit presence is encoded
 /// in-band, the decoder is configured with what to expect (defaults: both off).
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code39Decoder {
     full_ascii: bool,
     check_digit: bool,
 }
 
+#[cfg(feature = "decode")]
 impl Code39Decoder {
     /// A new decoder (no full-ASCII interpretation, no check character).
     pub fn new() -> Self {
@@ -334,6 +362,7 @@ impl Code39Decoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for Code39Decoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -406,6 +435,7 @@ impl Decode for Code39Decoder {
 }
 
 /// Collapse a sequence of base characters into ASCII bytes using the full-ASCII rules.
+#[cfg(feature = "decode")]
 fn collapse_full_ascii(base: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -428,11 +458,13 @@ fn collapse_full_ascii(base: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
     out.extend(pattern.bytes().map(|b| b == b'1'));
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.
+#[cfg(feature = "decode")]
 fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
     let mut runs = Vec::new();
     let mut iter = modules.iter().copied();
@@ -455,6 +487,7 @@ fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
 
 /// Rebuild the canonical `1`/`0` module string of a character from its runs,
 /// normalising element widths against the narrowest run.
+#[cfg(feature = "decode")]
 fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     let mut s = String::new();
     for &(bar, len) in runs {
@@ -467,7 +500,7 @@ fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     s
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

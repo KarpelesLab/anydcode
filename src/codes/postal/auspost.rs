@@ -41,6 +41,7 @@ use super::rs::{Gf, RsEncoder};
 use super::{BarState, PostalVariant};
 use crate::error::{Error, Result};
 use crate::segment::{Mode, Segment};
+use alloc::{vec, vec::Vec};
 
 /// The 64-symbol graphic character set indexing the C table.
 const GDSET: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz #";
@@ -252,7 +253,9 @@ pub(super) fn encode(dpid: &[u8], custinfo: &[u8]) -> Result<Vec<BarState>> {
     // Reed–Solomon over 6-bit triples of the FCC/DPID/customer/filler region,
     // skipping the two start bars.
     let triples: Vec<u8> = dest[2..]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| (c[0] << 4) | (c[1] << 2) | c[2])
         .collect();
     for &sym in &rs_check(&triples) {
@@ -291,12 +294,16 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<Segment>)>
         return Err(Error::undecodable("Australia Post data region misaligned"));
     }
     let triples: Vec<u8> = data_region
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| (c[0] << 4) | (c[1] << 2) | c[2])
         .collect();
     let expected = rs_check(&triples);
     let got: Vec<u8> = rs_region
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|c| (c[0] << 4) | (c[1] << 2) | c[2])
         .collect();
     if expected != got {
@@ -372,7 +379,7 @@ fn parse_n(mid: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(core.len() / 2);
-    for pair in core.chunks_exact(2) {
+    for pair in core.as_chunks::<2>().0 {
         let d = N_TABLE.iter().position(|&e| e == [pair[0], pair[1]])? as u8;
         out.push(b'0' + d);
     }
@@ -392,7 +399,7 @@ fn parse_c(mid: &[u8]) -> Option<Vec<u8>> {
         }
         let mut out = Vec::with_capacity(chars);
         let mut ok = true;
-        for tri in mid[..consumed].chunks_exact(3) {
+        for tri in mid[..consumed].as_chunks::<3>().0 {
             match C_TABLE.iter().position(|&e| e == [tri[0], tri[1], tri[2]]) {
                 Some(i) => out.push(GDSET[i]),
                 None => {

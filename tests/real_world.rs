@@ -48,6 +48,13 @@
 //! test decodes far tighter *un-blurred* curvature on this same version). The feature-gated
 //! test therefore asserts the recovered front-end geometry and deliberately does not assert
 //! full decode.
+#![cfg(all(
+    feature = "decode",
+    feature = "encode",
+    feature = "scan",
+    feature = "ean",
+    feature = "qr"
+))]
 
 use anyd::GrayImage;
 use anyd::codes::qr::{EcLevel, QrEncoder, scan};
@@ -277,7 +284,9 @@ fn real_bottle_photo_front_end() {
     // ITU-R BT.601 luma, as the CLI does.
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
@@ -336,7 +345,9 @@ fn real_scene_locate_then_decode_ean() {
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
@@ -407,7 +418,9 @@ fn real_scene_locator_precision() {
         let (w, h) = (rgba.width as usize, rgba.height as usize);
         let luma: Vec<u8> = rgba
             .data
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
             .collect();
         (luma, w, h)
@@ -505,7 +518,9 @@ fn real_can_qr_curved_blurred_decode() {
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
@@ -534,7 +549,9 @@ fn real_scene_curved_ean_edge_decode() {
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
@@ -567,7 +584,9 @@ fn real_scene_text_is_not_a_barcode() {
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");
@@ -594,7 +613,9 @@ fn real_scene_qr_via_scan_all() {
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).expect("valid frame");

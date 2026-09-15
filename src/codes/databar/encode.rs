@@ -12,6 +12,7 @@ use crate::segment::{Mode, Segment};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{format, vec, vec::Vec};
 
 /// Light-module margin the encoder frames each symbol with. DataBar does not
 /// mandate a specific quiet zone; a 1X margin is used consistently so that
@@ -434,7 +435,7 @@ pub(super) fn ltd_total_widths(val: u64) -> [i32; 47] {
     tw
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

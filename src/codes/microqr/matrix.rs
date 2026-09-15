@@ -8,6 +8,7 @@
 use super::tables::{decode_format, format_bits};
 use super::{MicroMask, MicroVersion};
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width required around a Micro QR symbol, in modules (ISO/IEC 18004
 /// specifies 2 for Micro QR).
@@ -209,7 +210,7 @@ impl Canvas {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
     use crate::codes::microqr::tables::data_module_count;

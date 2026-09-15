@@ -6,14 +6,15 @@
 //! bytes so the result re-encodes identically.
 
 use super::CodablockFMeta;
-use super::encode::{Set, k1k2, row_check, sum_to_value};
 use super::tables::{START_A, STOP, STOP_VALUE, value_for_widths};
+use super::tables::{Set, k1k2, row_check, sum_to_value};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::{vec, vec::Vec};
 
 /// Codablock F structural decoder.
 #[derive(Debug, Default, Clone, Copy)]

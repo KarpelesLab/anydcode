@@ -7,7 +7,7 @@
 //! identically.
 
 use super::data::decode_segments;
-use super::encode::to_segment;
+use super::data::to_segment;
 use super::layout::{read_codewords, read_ec_level};
 use super::tables::{Version, blocks};
 use super::{GridMatrixMeta, gf};
@@ -16,6 +16,7 @@ use crate::output::{BitMatrix, Encoding};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::vec::Vec;
 
 /// Grid Matrix structural decoder.
 #[derive(Debug, Default, Clone, Copy)]

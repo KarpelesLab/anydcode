@@ -8,6 +8,7 @@
 
 use super::tables::total_bits_in_layer;
 use crate::output::BitMatrix;
+use alloc::{vec, vec::Vec};
 
 /// Fixed geometry of one Aztec symbol size.
 #[derive(Debug, Clone)]

@@ -6,17 +6,17 @@
 //! state machine to recover the segments and the exact [`MaxiCodeMeta`] needed to
 //! re-encode identically.
 
-use super::tables::{self, Cw};
+use super::tables::{self, Cw, decode_body};
 use super::{
     Carrier, MaxiCodeMeta, TOTAL_CW, body_len, correct_primary, correct_secondary, read_codewords,
     secondary_lengths,
 };
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
-use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::{format, string::String};
 
 /// MaxiCode structural decoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -130,113 +130,5 @@ fn decode_primary_3(cw: &[u8; TOTAL_CW]) -> Carrier {
         postcode,
         country: country as u16,
         service: service as u16,
-    }
-}
-
-/// Run the code-set state machine over a data-codeword body, recovering the payload
-/// bytes as [`Segment`]s (byte runs split by ECI switches). Trailing padding is
-/// dropped. This is the shared source of truth used by both the decoder and the
-/// encoder's `build*` helpers, keeping their segments identical.
-pub(crate) fn decode_body(body: &[u8]) -> Vec<Segment> {
-    let sets = tables::sets();
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut bytes: Vec<u8> = Vec::new();
-
-    let mut set = 0usize;
-    let mut last_set = 0usize;
-    let mut shift: i32 = -1;
-    let mut i = 0;
-
-    while i < body.len() {
-        let value = (body[i] & 0x3F) as usize;
-        i += 1;
-        match sets[set][value] {
-            Cw::LatchA => {
-                set = 0;
-                shift = -1;
-            }
-            Cw::LatchB => {
-                set = 1;
-                shift = -1;
-            }
-            Cw::ShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 1),
-            Cw::ShiftB => shift_to(&mut set, &mut last_set, &mut shift, 1, 1),
-            Cw::ShiftC => shift_to(&mut set, &mut last_set, &mut shift, 2, 1),
-            Cw::ShiftD => shift_to(&mut set, &mut last_set, &mut shift, 3, 1),
-            Cw::ShiftE => shift_to(&mut set, &mut last_set, &mut shift, 4, 1),
-            Cw::TwoShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 2),
-            Cw::ThreeShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 3),
-            Cw::Lock => shift = -1,
-            Cw::Pad => {} // trailing padding — ignored
-            Cw::Ns => {
-                if let Some(chunk) = body.get(i..i + 5) {
-                    let v = (chunk[0] as u32) << 24
-                        | (chunk[1] as u32) << 18
-                        | (chunk[2] as u32) << 12
-                        | (chunk[3] as u32) << 6
-                        | (chunk[4] as u32);
-                    i += 5;
-                    for d in format!("{v:09}").bytes() {
-                        bytes.push(d);
-                    }
-                } else {
-                    break;
-                }
-            }
-            Cw::Eci => {
-                if let Some((eci, consumed)) = read_eci(&body[i..]) {
-                    i += consumed;
-                    if !bytes.is_empty() {
-                        segments.push(Segment::byte(std::mem::take(&mut bytes)));
-                    }
-                    segments.push(Segment::eci(eci));
-                } else {
-                    break;
-                }
-            }
-            Cw::Byte(b) => bytes.push(b),
-        }
-        // ZXing's `if (shift-- == 0) set = lastset;`: a shift lasts exactly its span.
-        let expired = shift == 0;
-        shift -= 1;
-        if expired {
-            set = last_set;
-        }
-    }
-
-    if !bytes.is_empty() {
-        segments.push(Segment::byte(bytes));
-    }
-    if segments.is_empty() {
-        segments.push(Segment::byte(Vec::new()));
-    }
-    segments
-}
-
-/// Apply a shift of `span` characters to code set `target`.
-fn shift_to(set: &mut usize, last_set: &mut usize, shift: &mut i32, target: usize, span: i32) {
-    *last_set = *set;
-    *set = target;
-    *shift = span;
-}
-
-/// Decode an ECI assignment number from the codewords following the ECI marker,
-/// returning `(eci, codewords_consumed)`.
-fn read_eci(rest: &[u8]) -> Option<(u32, usize)> {
-    let c1 = *rest.first()? as u32;
-    if c1 < 0x20 {
-        Some((c1, 1))
-    } else if c1 < 0x30 {
-        let c2 = *rest.get(1)? as u32;
-        Some((((c1 & 0x0F) << 6) | c2, 2))
-    } else if c1 < 0x38 {
-        let c2 = *rest.get(1)? as u32;
-        let c3 = *rest.get(2)? as u32;
-        Some((((c1 & 0x07) << 12) | (c2 << 6) | c3, 3))
-    } else {
-        let c2 = *rest.get(1)? as u32;
-        let c3 = *rest.get(2)? as u32;
-        let c4 = *rest.get(3)? as u32;
-        Some((((c1 & 0x03) << 18) | (c2 << 12) | (c3 << 6) | c4, 4))
     }
 }

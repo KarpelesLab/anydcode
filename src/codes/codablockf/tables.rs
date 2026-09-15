@@ -44,3 +44,51 @@ pub fn value_for_widths(widths: &[u8]) -> Option<u8> {
     let s = core::str::from_utf8(&buf).ok()?;
     C128_PATTERNS.iter().position(|p| *p == s).map(|v| v as u8)
 }
+
+/// The modulo-103 Code 128 row check over the symbols preceding the check position.
+pub(crate) fn row_check(syms: &[u8]) -> u8 {
+    let mut sum = syms[0] as u32 % 103;
+    for (pos, &v) in syms.iter().enumerate().skip(1) {
+        sum = (sum + v as u32 * pos as u32) % 103;
+    }
+    sum as u8
+}
+
+/// The two data check characters K1 and K2 (Codablock F Annex F), over the raw source.
+pub(crate) fn k1k2(data: &[u8]) -> (u8, u8) {
+    let mut s1: u32 = 0;
+    let mut s2: u32 = 0;
+    for (i, &b) in data.iter().enumerate() {
+        s1 = (s1 + (i as u32 + 1) * b as u32) % 86;
+        s2 = (s2 + i as u32 * b as u32) % 86;
+    }
+    (s1 as u8, s2 as u8)
+}
+
+/// Encode a row-indicator / check sum into a Code 128 value in the given set.
+/// Sets A and B use the same (Set B) mapping per the Codablock F spec; Set C is direct.
+pub(crate) fn sum_to_value(sum: u8, set: Set) -> u8 {
+    match set {
+        Set::C => sum,
+        _ => {
+            if sum <= 31 {
+                sum + 64
+            } else if sum <= 47 {
+                sum - 32
+            } else {
+                sum - 22
+            }
+        }
+    }
+}
+
+/// A Code 128 code set (A/B used for data, C only for filler switches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Set {
+    /// Code Set A.
+    A,
+    /// Code Set B.
+    B,
+    /// Code Set C.
+    C,
+}

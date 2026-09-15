@@ -5,23 +5,17 @@
 //! the grid, and reconstructs the payload [`Segment`]s so the result re-encodes
 //! identically.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+use alloc::vec;
 
 use super::Code49Meta;
-use super::encode::{ROW_WIDTH, compute_grid};
-use super::tables::{ASCII_TO_INSET, EVEN_BITPATTERN, INSET, ODD_BITPATTERN, ROW_PARITY};
+use super::tables::{EVEN_BITPATTERN, ODD_BITPATTERN, ROW_PARITY};
+use super::tables::{ROW_WIDTH, compute_grid, extract_codewords, reconstruct_segments};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
-use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
-
-/// Pad / numeric-shift codeword value.
-const PAD: u8 = 48;
-/// Shift 1 (`!`) and Shift 2 (`&`) INSET character bytes.
-const SHIFT1: u8 = b'!';
-const SHIFT2: u8 = b'&';
 
 /// Code 49 structural decoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -44,12 +38,12 @@ impl Code49Decoder {
         }
 
         // Reverse lookups: 16-bit pattern -> symbol-character value.
-        let even_rev: HashMap<u16, u16> = EVEN_BITPATTERN
+        let even_rev: BTreeMap<u16, u16> = EVEN_BITPATTERN
             .iter()
             .enumerate()
             .map(|(i, &p)| (p, i as u16))
             .collect();
-        let odd_rev: HashMap<u16, u16> = ODD_BITPATTERN
+        let odd_rev: BTreeMap<u16, u16> = ODD_BITPATTERN
             .iter()
             .enumerate()
             .map(|(i, &p)| (p, i as u16))
@@ -124,89 +118,4 @@ fn row_bits(matrix: &BitMatrix, row: usize) -> Result<[bool; ROW_WIDTH]> {
         *b = matrix.get(x, row);
     }
     Ok(bits)
-}
-
-/// Recover the base-49 data codewords from the grid (dropping check/mode cells and the
-/// trailing pad characters).
-fn extract_codewords(grid: &[u8], rows: usize) -> Vec<u8> {
-    let mut cw = Vec::new();
-    for r in 0..rows - 1 {
-        for c in 0..7 {
-            cw.push(grid[r * 8 + c]);
-        }
-    }
-    // The last row holds data only in columns 0..2, and only when rows <= 6.
-    if rows <= 6 {
-        cw.push(grid[(rows - 1) * 8]);
-        cw.push(grid[(rows - 1) * 8 + 1]);
-    }
-    while cw.last() == Some(&PAD) {
-        cw.pop();
-    }
-    cw
-}
-
-/// Reconstruct the payload [`Segment`]s from a decoded [`Code49Meta`]. Shared by the
-/// decoder and the encoder's `build` path so both produce identical segments.
-///
-/// The Numeric Encodation mode (leading codeword `48`) is not reconstructed; symbols
-/// produced by this crate's encoder never use it. Because re-encoding renders from the
-/// stored grid, segment fidelity never affects the round-trip identity.
-pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
-    let mut codewords = extract_codewords(&meta.grid, meta.rows);
-    let mode_char = meta.grid[(meta.rows - 1) * 8 + 6];
-    let m = mode_char % 7;
-    match m {
-        0 => {}
-        4 => codewords.insert(0, 43), // leading Shift 1
-        5 => codewords.insert(0, 44), // leading Shift 2
-        _ => {
-            return Err(Error::undecodable(
-                "Code 49 numeric-mode payload reconstruction is not implemented",
-            ));
-        }
-    }
-
-    // Reverse the Code 49 ASCII chart: (char1[, char2]) -> source byte.
-    let mut rev: HashMap<(u8, u8), u8> = HashMap::new();
-    for (b, entry) in ASCII_TO_INSET.iter().enumerate() {
-        rev.insert((entry[0], entry[1]), b as u8);
-    }
-
-    // Codewords -> INSET characters.
-    let mut chars = Vec::with_capacity(codewords.len());
-    for &c in &codewords {
-        let ch = *INSET
-            .get(c as usize)
-            .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))?;
-        chars.push(ch);
-    }
-
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        let c1 = chars[i];
-        if c1 == SHIFT1 || c1 == SHIFT2 {
-            let c2 = *chars
-                .get(i + 1)
-                .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?;
-            let b = *rev
-                .get(&(c1, c2))
-                .ok_or_else(|| Error::undecodable("Code 49 unknown shifted character"))?;
-            bytes.push(b);
-            i += 2;
-        } else {
-            match rev.get(&(c1, 0)) {
-                Some(&b) => bytes.push(b),
-                None => return Err(Error::undecodable("Code 49 unknown character")),
-            }
-            i += 1;
-        }
-    }
-
-    Ok(if bytes.is_empty() {
-        Vec::new()
-    } else {
-        vec![Segment::byte(bytes)]
-    })
 }

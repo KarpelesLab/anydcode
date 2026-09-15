@@ -9,12 +9,12 @@
 //! Corner-forcing (masks 4–7) is not assumed on decode — consistent with the
 //! encoder, which never forces corners (see [`super`]).
 
-use super::encode::{
-    BIN_LATCH, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A, UPPER_SHIFT_B,
-    is_corner,
-};
 use super::rs::rsencode;
-use super::tables::codeword_for_pattern;
+use super::tables::{
+    BIN_LATCH, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A, UPPER_SHIFT_B,
+    codeword_for_pattern, is_corner,
+};
+
 use super::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
@@ -22,6 +22,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::{vec, vec::Vec};
 
 /// DotCode structural decoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -95,7 +96,7 @@ impl DotCodeDecoder {
         let mut block = Vec::with_capacity(data_length + 1 + ecc_length);
         block.push(mask);
         block.extend_from_slice(masked_data);
-        block.extend(std::iter::repeat_n(0u8, ecc_length));
+        block.extend(core::iter::repeat_n(0u8, ecc_length));
         rsencode(data_length + 1, ecc_length, &mut block);
         if &block[data_length + 1..] != ecc {
             return Err(Error::ErrorCorrectionFailed);
@@ -226,7 +227,7 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
 
     let flush = |bytes: &mut Vec<u8>, segments: &mut Vec<Segment>| {
         if !bytes.is_empty() {
-            segments.push(Segment::byte(std::mem::take(bytes)));
+            segments.push(Segment::byte(core::mem::take(bytes)));
         }
     };
 
@@ -450,7 +451,7 @@ fn read_eci(cw: &[u8], start: usize, bytes: &mut Vec<u8>, segments: &mut Vec<Seg
         None => return start,
     };
     if !bytes.is_empty() {
-        segments.push(Segment::byte(std::mem::take(bytes)));
+        segments.push(Segment::byte(core::mem::take(bytes)));
     }
     segments.push(Segment::eci(eci));
     next
@@ -571,7 +572,7 @@ fn flush_binary(group: &[u8], bytes: &mut Vec<u8>, segments: &mut Vec<Segment>) 
 
 fn flush_eci(eci: u32, bytes: &mut Vec<u8>, segments: &mut Vec<Segment>) {
     if !bytes.is_empty() {
-        segments.push(Segment::byte(std::mem::take(bytes)));
+        segments.push(Segment::byte(core::mem::take(bytes)));
     }
     segments.push(Segment::eci(eci));
 }

@@ -39,10 +39,12 @@ use super::tables::{
 use super::widths::{get_value, interleave};
 use super::{DataBarMeta, DataBarVariant};
 use crate::error::{Error, Result};
+#[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::Encoding;
 use crate::segment::{Mode, Segment};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
+use alloc::{format, vec, vec::Vec};
 
 /// GS1 separator (FNC1) as carried inside a reduced element string.
 const FNC1: u8 = 0x1D;
@@ -520,6 +522,7 @@ pub(super) fn element_widths(reduced: &[u8]) -> Result<Vec<i32>> {
 }
 
 /// Encode a DataBar Expanded symbol into its linear module pattern.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub(super) fn encode(symbol: &Symbol) -> Result<Encoding> {
     let reduced = extract_reduced(&symbol.segments)?;
     let widths = element_widths(&reduced)?;

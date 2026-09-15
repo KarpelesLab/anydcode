@@ -27,15 +27,33 @@
 //! [`BitMatrix`]: crate::output::BitMatrix
 //! [`Mode::Byte`]: crate::segment::Mode::Byte
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::vec::Vec;
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod placement;
+#[cfg(feature = "scan")]
 mod sample;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::DataMatrixDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::DataMatrixEncoder;
+#[cfg(feature = "scan")]
 pub use sample::{DataMatrixScanner, sample_grid, scan};
 
 /// The data-encodation scheme used for one segment.

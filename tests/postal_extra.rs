@@ -19,6 +19,7 @@
 //! - Mailmark: the "Royal Mail Mailmark barcode C/L encoding and decoding
 //!   instructions" (Sept 2015) worked examples, whose published DAFT strings are
 //!   reproduced verbatim in zint's `test_mailmark`.
+#![cfg(all(feature = "decode", feature = "encode", feature = "postal"))]
 
 use anyd::Symbology;
 use anyd::codes::postal::{PostalDecoder, PostalEncoder, PostalVariant};

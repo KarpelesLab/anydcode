@@ -6,13 +6,14 @@
 //! pinning the result in the returned symbol's meta.
 
 use super::Code128Meta;
-use super::decode::reconstruct_segments;
 use super::tables::{CODE_A, CODE_B, CODE_C, CodeSet, FNC1, PATTERNS, SHIFT, STOP, STOP_VALUE};
+use super::tables::{checksum, reconstruct_segments};
 use crate::error::{Error, Result};
 use crate::output::{Encoding, LinearPattern};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// The quiet zone Code 128 requires on each side, in narrow modules.
 const QUIET_ZONE: usize = 10;
@@ -103,23 +104,11 @@ impl Encode for Code128Encoder {
     }
 }
 
-/// The modulo-103 check character for a Start-plus-data symbol sequence.
-///
-/// The Start value has weight 1; each subsequent value has weight equal to its
-/// 1-based position after the Start.
-pub(crate) fn checksum(symbols: &[u8]) -> u8 {
-    let mut sum = symbols[0] as u32;
-    for (k, &v) in symbols.iter().enumerate().skip(1) {
-        sum += (k as u32) * v as u32;
-    }
-    (sum % 103) as u8
-}
-
 /// Append a symbol pattern (run-width string) to the module vector.
 fn append_pattern(modules: &mut Vec<bool>, widths: &str) {
     let mut bar = true;
     for w in widths.bytes().map(|b| (b - b'0') as usize) {
-        modules.extend(std::iter::repeat_n(bar, w));
+        modules.extend(core::iter::repeat_n(bar, w));
         bar = !bar;
     }
 }
@@ -307,7 +296,7 @@ fn emit_char(out: &mut Vec<u8>, set: &mut CodeSet, input: &[Code128Input], i: us
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::super::tables::START_A;
     use super::*;

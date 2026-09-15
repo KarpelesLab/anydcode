@@ -14,6 +14,7 @@ use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{format, vec, vec::Vec};
 
 /// Rectangular Micro QR encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -365,7 +366,7 @@ fn codeword_bits(segments: &[Segment], size: RmqrSize, ec: RmqrEcLevel) -> Resul
             bits.push((byte >> k) & 1 != 0);
         }
     }
-    bits.extend(std::iter::repeat_n(false, si.remainder));
+    bits.extend(core::iter::repeat_n(false, si.remainder));
     Ok(bits)
 }
 
@@ -389,7 +390,7 @@ fn render(segments: &[Segment], size: RmqrSize, ec: RmqrEcLevel) -> Result<Canva
     Ok(canvas)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

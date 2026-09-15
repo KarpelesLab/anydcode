@@ -1,4 +1,5 @@
 //! Pharmacode one-track and two-track: round-trip identity across the value ranges.
+#![cfg(all(feature = "decode", feature = "encode", feature = "pharmacode"))]
 
 use anyd::codes::pharmacode::{PharmacodeDecoder, PharmacodeEncoder};
 use anyd::segment::Segment;

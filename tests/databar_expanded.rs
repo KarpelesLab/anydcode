@@ -14,6 +14,7 @@
 //! Payloads are supplied in *reduced* form: AI numbers + values concatenated, with
 //! the GS1 separator FNC1 encoded as byte `0x1D`. This matches zint's internal
 //! "reduced" element string, so the reference module patterns line up.
+#![cfg(all(feature = "decode", feature = "encode", feature = "databar"))]
 
 use anyd::codes::databar::{DataBarDecoder, DataBarEncoder, DataBarMeta, DataBarVariant};
 use anyd::output::Encoding;

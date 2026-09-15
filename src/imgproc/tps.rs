@@ -20,6 +20,8 @@
 /// `a` is an `n×n` matrix (row-major, `a[row][col]`) and `b` is `n×m` (`m` right-hand
 /// sides as columns). Solves by Gaussian elimination with partial pivoting, consuming
 /// both inputs, and returns the `n×m` solution, or `None` if `a` is singular.
+use alloc::{vec, vec::Vec};
+
 pub fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<Vec<f64>>) -> Option<Vec<Vec<f64>>> {
     let n = a.len();
     if n == 0 || a.iter().any(|r| r.len() != n) || b.len() != n {

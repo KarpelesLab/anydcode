@@ -1,6 +1,7 @@
 //! End-to-end PDF417 round-trip tests: encode → decode → re-encode must be
 //! identical, across Text/Byte/Numeric compaction and several error-correction
 //! levels, and must survive correctable errors.
+#![cfg(all(feature = "decode", feature = "encode", feature = "pdf417"))]
 
 use anyd::codes::pdf417::{EcLevel, Pdf417Decoder, Pdf417Encoder};
 use anyd::output::Encoding;

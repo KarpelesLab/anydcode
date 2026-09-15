@@ -6,25 +6,17 @@
 //! and symbol check characters), and pins it.
 
 use super::Code49Meta;
-use super::decode::reconstruct_segments;
-use super::tables::{
-    ASCII_TO_INSET, EVEN_BITPATTERN, INSET, ODD_BITPATTERN, ROW_PARITY, X_WEIGHT, Y_WEIGHT,
-    Z_WEIGHT,
-};
+use super::tables::{ASCII_TO_INSET, EVEN_BITPATTERN, INSET, ODD_BITPATTERN, ROW_PARITY};
+use super::tables::{ROW_WIDTH, compute_grid, reconstruct_segments};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::vec::Vec;
 
 /// The quiet zone Code 49 requires on each side, in narrow modules.
 pub(crate) const QUIET_ZONE: usize = 10;
-
-/// Symbol width in modules: start "10" (2) + 4 characters * 16 + stop "1111" (4).
-pub(crate) const ROW_WIDTH: usize = 70;
-
-/// Pad / numeric-shift codeword value.
-const PAD: u8 = 48;
 
 /// Code 49 encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -124,115 +116,6 @@ fn plan_codewords(data: &[u8]) -> (Vec<u8>, u8) {
     (codewords, m)
 }
 
-/// Lay the codewords into the code-character grid and fill in every check character.
-/// Ported from the zint reference implementation (`backend/code49.c`).
-pub(crate) fn compute_grid(
-    codewords: &[u8],
-    m: u8,
-    min_rows: Option<usize>,
-) -> Result<(usize, Vec<u8>)> {
-    let count = codewords.len();
-    let mut grid: Vec<[i64; 8]> = Vec::new();
-    let mut pad_count = 0usize;
-
-    let mut rows = 0usize;
-    loop {
-        let mut row = [0i64; 8];
-        for (i, slot) in row.iter_mut().enumerate().take(7) {
-            let idx = rows * 7 + i;
-            if idx < count {
-                *slot = codewords[idx] as i64;
-            } else {
-                *slot = PAD as i64;
-                pad_count += 1;
-            }
-        }
-        grid.push(row);
-        rows += 1;
-        if rows * 7 >= count {
-            break;
-        }
-    }
-
-    if rows == 1 || rows > 6 || pad_count < 5 {
-        grid.push([PAD as i64; 8]);
-        rows += 1;
-    }
-
-    if let Some(min) = min_rows {
-        if !(2..=8).contains(&min) {
-            return Err(Error::invalid_parameter("Code 49 rows must be 2..=8"));
-        }
-        while rows < min {
-            grid.push([PAD as i64; 8]);
-            rows += 1;
-        }
-    }
-    if rows > 8 {
-        return Err(Error::capacity("Code 49 data exceeds 8 rows"));
-    }
-
-    // Row-count and mode character.
-    grid[rows - 1][6] = 7 * (rows as i64 - 2) + m as i64;
-
-    // Row check characters for all but the last row.
-    for row in grid.iter_mut().take(rows - 1) {
-        let sum: i64 = row[0..7].iter().sum();
-        row[7] = sum % 49;
-    }
-
-    // Symbol check characters (X, Y, Z), modulo 2401.
-    let mut posn = 0usize;
-    let mode_char = grid[rows - 1][6];
-    let mut x_count = mode_char * 20;
-    let mut y_count = mode_char * 16;
-    let mut z_count = mode_char * 38;
-    for row in grid.iter().take(rows - 1) {
-        for j in 0..4 {
-            let local = row[2 * j] * 49 + row[2 * j + 1];
-            x_count += X_WEIGHT[posn] as i64 * local;
-            y_count += Y_WEIGHT[posn] as i64 * local;
-            z_count += Z_WEIGHT[posn] as i64 * local;
-            posn += 1;
-        }
-    }
-
-    if rows > 6 {
-        z_count %= 2401;
-        grid[rows - 1][0] = z_count / 49;
-        grid[rows - 1][1] = z_count % 49;
-    }
-
-    let local = grid[rows - 1][0] * 49 + grid[rows - 1][1];
-    x_count += X_WEIGHT[posn] as i64 * local;
-    y_count += Y_WEIGHT[posn] as i64 * local;
-    posn += 1;
-
-    y_count %= 2401;
-    grid[rows - 1][2] = y_count / 49;
-    grid[rows - 1][3] = y_count % 49;
-
-    let local = grid[rows - 1][2] * 49 + grid[rows - 1][3];
-    x_count += X_WEIGHT[posn] as i64 * local;
-
-    x_count %= 2401;
-    grid[rows - 1][4] = x_count / 49;
-    grid[rows - 1][5] = x_count % 49;
-
-    // Last row check character.
-    let sum: i64 = grid[rows - 1][0..7].iter().sum();
-    grid[rows - 1][7] = sum % 49;
-
-    // Flatten to bytes.
-    let mut flat = Vec::with_capacity(rows * 8);
-    for row in &grid {
-        for &v in row {
-            flat.push(v as u8);
-        }
-    }
-    Ok((rows, flat))
-}
-
 /// Render a validated [`Code49Meta`] into its module matrix.
 pub(crate) fn render(meta: &Code49Meta) -> Result<BitMatrix> {
     let rows = meta.rows;
@@ -276,7 +159,7 @@ pub(crate) fn render(meta: &Code49Meta) -> Result<BitMatrix> {
             }
         }
         // Stop character "1111".
-        bits.extend(std::iter::repeat_n(true, 4));
+        bits.extend(core::iter::repeat_n(true, 4));
         debug_assert_eq!(bits.len(), ROW_WIDTH);
         for (x, &b) in bits.iter().enumerate() {
             if b {
@@ -287,9 +170,10 @@ pub(crate) fn render(meta: &Code49Meta) -> Result<BitMatrix> {
     Ok(matrix)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     /// Independent reference (zint 2.16.0, `zint --verbose --barcode=CODE49
     /// --data=ABCD1234`): the code-character grid is

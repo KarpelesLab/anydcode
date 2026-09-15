@@ -6,6 +6,7 @@
 //!     EC levels, and interior-alignment sizes. Our encoder must reproduce them
 //!     bit-for-bit.
 //!  2. **Round-trip identity** across all 32 sizes and both EC levels.
+#![cfg(all(feature = "decode", feature = "encode", feature = "rmqr"))]
 
 use anyd::codes::rmqr::{RmqrDecoder, RmqrEcLevel, RmqrEncoder, RmqrMeta, RmqrSize};
 use anyd::output::{BitMatrix, Encoding};

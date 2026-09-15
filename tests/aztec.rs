@@ -1,6 +1,7 @@
 //! End-to-end Aztec round-trip tests: encode → decode → re-encode must be identical,
 //! across encodation modes and both compact and full-range sizes, and must survive
 //! correctable errors.
+#![cfg(all(feature = "decode", feature = "encode", feature = "aztec"))]
 
 use anyd::codes::aztec::{AztecDecoder, AztecEncoder};
 use anyd::output::Encoding;

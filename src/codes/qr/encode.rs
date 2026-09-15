@@ -13,6 +13,7 @@ use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{format, vec, vec::Vec};
 
 /// QR Code encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -353,7 +354,7 @@ fn codeword_bits(segments: &[Segment], version: Version, level: EcLevel) -> Resu
             bits.push((byte >> k) & 1 != 0);
         }
     }
-    bits.extend(std::iter::repeat_n(false, remainder_bits(version)));
+    bits.extend(core::iter::repeat_n(false, remainder_bits(version)));
     Ok(bits)
 }
 
@@ -393,7 +394,7 @@ fn choose_mask(segments: &[Segment], version: Version, level: EcLevel) -> Result
     Ok((canvas, mask))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

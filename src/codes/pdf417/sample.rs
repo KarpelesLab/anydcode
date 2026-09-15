@@ -49,7 +49,7 @@
 //! whose guards are clipped by the frame edge.
 
 use super::Pdf417Decoder;
-use super::encode::ROW_HEIGHT;
+use super::tables::ROW_HEIGHT;
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
@@ -63,6 +63,7 @@ use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
 use crate::symbology::Symbology;
 use crate::traits::{Analyze, Decode, Detect};
+use alloc::{vec, vec::Vec};
 
 /// Quiet zone (light modules) recorded on the produced [`BitMatrix`]; matches the
 /// PDF417 encoder's `Encoding::Matrix` quiet zone so an upright capture round-trips to
@@ -448,7 +449,7 @@ fn median(values: &[f32]) -> f32 {
         return 0.0;
     }
     let mut v = values.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
     let mid = v.len() / 2;
     if v.len().is_multiple_of(2) {
         (v[mid - 1] + v[mid]) / 2.0
@@ -571,7 +572,7 @@ fn locate(frame: &GrayFrame<'_>, bin: &Binary) -> Option<Located> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

@@ -16,18 +16,36 @@
 //! The seven-element patterns match ZXing's `CodaBarReader.CHARACTER_ENCODINGS`
 //! table (each is a 7-bit value, MSB first, `1` = wide).
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use alloc::format;
+use alloc::{vec, vec::Vec};
 
 /// Module width of a narrow element.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const NARROW: u32 = 1;
 /// Module width of a wide element.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const WIDE: u32 = 3;
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// Data + start/stop alphabet, index-aligned with [`ENCODINGS`].
@@ -61,6 +79,7 @@ impl Default for CodabarMeta {
 }
 
 /// The index of `c` in [`ALPHABET`], or an error.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn index_of(c: u8) -> Result<usize> {
     ALPHABET.iter().position(|&a| a == c).ok_or_else(|| {
         Error::invalid_data(format!("character {:?} is not valid in Codabar", c as char))
@@ -78,9 +97,11 @@ fn is_data(c: u8) -> bool {
 }
 
 /// Codabar encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodabarEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl CodabarEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -106,17 +127,19 @@ impl CodabarEncoder {
 }
 
 /// Append the seven elements of `c` to `modules`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_char(modules: &mut Vec<bool>, c: u8) -> Result<()> {
     let value = ENCODINGS[index_of(c)?];
     for i in 0..7 {
         let wide = (value >> (6 - i)) & 1 == 1;
         let width = if wide { WIDE } else { NARROW };
         let bar = i % 2 == 0;
-        modules.extend(std::iter::repeat_n(bar, width as usize));
+        modules.extend(core::iter::repeat_n(bar, width as usize));
     }
     Ok(())
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for CodabarEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Codabar {
@@ -155,9 +178,11 @@ impl Encode for CodabarEncoder {
 }
 
 /// Codabar decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodabarDecoder;
 
+#[cfg(feature = "decode")]
 impl CodabarDecoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -166,6 +191,7 @@ impl CodabarDecoder {
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
+#[cfg(feature = "decode")]
 fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -187,6 +213,7 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
 }
 
 /// Recover a character from its seven element widths (wide = width > 1).
+#[cfg(feature = "decode")]
 fn char_from_widths(w: &[u32]) -> Result<u8> {
     let mut value = 0u8;
     for (i, &width) in w.iter().enumerate() {
@@ -201,6 +228,7 @@ fn char_from_widths(w: &[u32]) -> Result<u8> {
         .ok_or_else(|| Error::undecodable("invalid Codabar character pattern"))
 }
 
+#[cfg(feature = "decode")]
 impl Decode for CodabarDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -248,7 +276,7 @@ impl Decode for CodabarDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

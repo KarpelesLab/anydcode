@@ -56,6 +56,14 @@
 //!   while distortions *along* the bars (cylinder H, wave, fold H) are shrugged off — no
 //!   breakpoint was found within the swept range (cylinder H ≥1.5 rad, wave ≥20 px,
 //!   fold H ≥85°).
+#![cfg(all(
+    feature = "decode",
+    feature = "encode",
+    feature = "scan",
+    feature = "code128",
+    feature = "datamatrix",
+    feature = "qr"
+))]
 
 use anyd::GrayImage;
 use anyd::codes::code128::{Code128Decoder, Code128Encoder};

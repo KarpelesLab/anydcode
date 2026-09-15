@@ -176,7 +176,7 @@ pub fn decode_format(raw: u16) -> Option<(u8, u8)> {
     if best_dist <= 3 { best } else { None }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

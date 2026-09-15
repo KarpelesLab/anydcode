@@ -1,5 +1,6 @@
 //! Code 93 end-to-end tests: an independent checksum reference vector plus
 //! encode → decode → re-encode identity across standard and full-ASCII payloads.
+#![cfg(all(feature = "decode", feature = "encode", feature = "code93"))]
 
 use anyd::codes::code93::{Code93Decoder, Code93Encoder};
 use anyd::output::Encoding;

@@ -1,6 +1,7 @@
 //! End-to-end Data Matrix round-trip tests: encode → decode → re-encode must be
 //! byte-identical, across square sizes and ASCII / Base256 encodation, and must
 //! survive correctable errors.
+#![cfg(all(feature = "decode", feature = "encode", feature = "datamatrix"))]
 
 use anyd::codes::datamatrix::{DataMatrixDecoder, DataMatrixEncoder};
 use anyd::output::Encoding;

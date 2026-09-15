@@ -13,6 +13,7 @@ use crate::segment::{Mode, Segment};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// ASCII codeword: pad / end-of-message.
 const PAD: u8 = 129;
@@ -261,7 +262,7 @@ fn render(spec: &SquareSpec, full: &[u8]) -> crate::output::BitMatrix {
     render_borders(spec, &mapping)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

@@ -62,6 +62,7 @@ use crate::pipeline::{Candidate, Hints};
 use crate::symbol::Symbol;
 use crate::symbology::Symbology;
 use crate::traits::{Analyze, Detect};
+use alloc::{vec, vec::Vec};
 
 /// Image-based Data Matrix scanner: finds, samples and decodes a Data Matrix symbol
 /// in a [`GrayFrame`].
@@ -441,7 +442,7 @@ fn refine_corners(
     centroid: Point,
     module_px: f32,
 ) -> [Point; 4] {
-    let lines: [Line; 4] = std::array::from_fn(|i| {
+    let lines: [Line; 4] = core::array::from_fn(|i| {
         let a = corners[i];
         let b = corners[(i + 1) % 4];
         edge_line(bin, a, b, centroid, module_px).unwrap_or_else(|| {
@@ -453,7 +454,7 @@ fn refine_corners(
         })
     });
     // New corner i is where edge (i-1) meets edge i.
-    std::array::from_fn(|i| {
+    core::array::from_fn(|i| {
         let prev = lines[(i + 3) % 4];
         let cur = lines[i];
         intersect(prev, cur).unwrap_or(corners[i])
@@ -557,7 +558,7 @@ fn order_clockwise(pts: &mut [Point; 4], centroid: Point) {
     pts.sort_by(|a, b| {
         let aa = (a.y - centroid.y).atan2(a.x - centroid.x);
         let bb = (b.y - centroid.y).atan2(b.x - centroid.x);
-        aa.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal)
+        aa.partial_cmp(&bb).unwrap_or(core::cmp::Ordering::Equal)
     });
 }
 

@@ -9,6 +9,12 @@
 //!   gradient orientation ([`anyd::imgproc::orient`]) locates the reading axis, the
 //!   crop is rotated upright and rescanned, and the reported outline is mapped back
 //!   into the original frame.
+#![cfg(all(
+    feature = "encode",
+    feature = "scan",
+    feature = "code128",
+    feature = "ean"
+))]
 
 use anyd::codes::code128::Code128Encoder;
 use anyd::codes::ean::EanEncoder;

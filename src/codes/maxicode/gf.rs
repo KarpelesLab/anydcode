@@ -12,6 +12,8 @@
 //! what [`decode`] relies on to detect and correct errors.
 
 /// Primitive polynomial for the MaxiCode field (`x^6 + x + 1`), with the `x^6` bit.
+use alloc::{vec, vec::Vec};
+
 const PRIMITIVE: u16 = 0x43;
 
 /// Index of the first consecutive root of the RS generator polynomial (`α^1`).
@@ -262,7 +264,7 @@ fn sub_shift(dst: &mut Vec<u8>, src: &[u8], scale: u8, shift: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

@@ -5,6 +5,7 @@
 //!    documented symbol are reproduced from its Code 128 codeword grid, and the symbol
 //!    decodes back to the original text.
 //! 2. `encode -> decode -> re-encode` identity across sizes.
+#![cfg(all(feature = "decode", feature = "encode", feature = "codablockf"))]
 
 use anyd::codes::codablockf::{CodablockFDecoder, CodablockFEncoder, CodablockFMeta};
 use anyd::output::Encoding;

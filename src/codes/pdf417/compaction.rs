@@ -14,6 +14,7 @@
 
 use crate::error::{Error, Result};
 use crate::segment::{Mode, Segment};
+use alloc::{vec, vec::Vec};
 
 const LATCH_TEXT: u32 = 900;
 const LATCH_BYTE: u32 = 901;
@@ -61,7 +62,7 @@ fn is_alpha_lower(c: u8) -> bool {
 
 fn mixed_value(c: u8) -> Option<u8> {
     (0..25)
-        .chain(std::iter::once(26))
+        .chain(core::iter::once(26))
         .find(|&v| MIXED_RAW[v as usize] == c)
 }
 
@@ -541,7 +542,7 @@ fn mul_add(dec: &mut Vec<u32>, mul: u32, add: u32) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 
@@ -566,7 +567,7 @@ mod tests {
     }
 
     fn roundtrip(seg: Segment) {
-        let stream = encode_segments(std::slice::from_ref(&seg)).unwrap();
+        let stream = encode_segments(core::slice::from_ref(&seg)).unwrap();
         // Simulate a symbol-length descriptor for decode_segments.
         let mut data = vec![(stream.len() + 1) as u32];
         data.extend_from_slice(&stream);

@@ -32,14 +32,28 @@
 //! reference implementation [zint](https://github.com/zint/zint) (`telepen.c`); it is
 //! hand-verified for `"ABC"` → check value `56` (`'8'`).
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 /// Start guard bit stream (byte 0x5F, LSB first).
 const START_BITS: [bool; 8] = [true, true, true, true, true, false, true, false];
@@ -54,6 +68,7 @@ pub struct TelepenMeta {
 }
 
 /// The even-parity byte for an ASCII value (parity in bit 7).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn even_parity(value: u8) -> u8 {
     if value.count_ones() % 2 == 1 {
         value | 0x80
@@ -69,6 +84,7 @@ fn check_value(data: &[u8]) -> u8 {
 }
 
 /// Append a byte's 8 bits, LSB first, to `bits`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_byte(bits: &mut Vec<bool>, byte: u8) {
     for i in 0..8 {
         bits.push((byte >> i) & 1 == 1);
@@ -76,6 +92,7 @@ fn push_byte(bits: &mut Vec<bool>, byte: u8) {
 }
 
 /// Convert a bit stream to alternating (bar, space, ...) element widths.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn bits_to_widths(bits: &[bool]) -> Vec<u32> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -117,22 +134,24 @@ fn bits_to_widths(bits: &[bool]) -> Vec<u32> {
 }
 
 /// Render alternating (bar, space, ...) element widths into modules.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn widths_to_modules(widths: &[u32]) -> Vec<bool> {
     let mut modules = Vec::new();
     for (i, &w) in widths.iter().enumerate() {
-        modules.extend(std::iter::repeat_n(i % 2 == 0, w as usize));
+        modules.extend(core::iter::repeat_n(i % 2 == 0, w as usize));
     }
     modules
 }
 
 /// Reverse of [`bits_to_widths`]: element widths back to the bit stream.
+#[cfg(feature = "decode")]
 fn widths_to_bits(widths: &[u32]) -> Result<Vec<bool>> {
     if !widths.len().is_multiple_of(2) {
         return Err(Error::undecodable("odd Telepen element count"));
     }
     let mut bits = Vec::new();
     let mut in_block = false;
-    for pair in widths.chunks_exact(2) {
+    for pair in widths.as_chunks::<2>().0 {
         match (pair[0] > 1, pair[1] > 1) {
             (false, false) => bits.push(true), // "1"
             (true, false) => {
@@ -167,9 +186,11 @@ fn widths_to_bits(widths: &[u32]) -> Result<Vec<bool>> {
 }
 
 /// Telepen encoder (full-ASCII mode).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TelepenEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl TelepenEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -191,6 +212,7 @@ impl TelepenEncoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for TelepenEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::Telepen {
@@ -231,11 +253,13 @@ impl Encode for TelepenEncoder {
 }
 
 /// Telepen decoder (full-ASCII mode).
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TelepenDecoder {
     check: bool,
 }
 
+#[cfg(feature = "decode")]
 impl TelepenDecoder {
     /// A new decoder that expects no check character.
     pub fn new() -> Self {
@@ -249,6 +273,7 @@ impl TelepenDecoder {
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
+#[cfg(feature = "decode")]
 fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -269,6 +294,7 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     Ok(runs)
 }
 
+#[cfg(feature = "decode")]
 impl Decode for TelepenDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -290,7 +316,7 @@ impl Decode for TelepenDecoder {
         }
 
         let mut bytes = Vec::with_capacity(body.len() / 8);
-        for group in body.chunks_exact(8) {
+        for group in body.as_chunks::<8>().0 {
             let mut e = 0u8;
             for (i, &bit) in group.iter().enumerate() {
                 if bit {
@@ -321,7 +347,7 @@ impl Decode for TelepenDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

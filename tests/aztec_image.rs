@@ -1,5 +1,6 @@
 //! Aztec image-sampling tests: render → transform → scan through the bullseye
 //! detector and core homography.
+#![cfg(all(feature = "encode", feature = "scan", feature = "aztec"))]
 
 use anyd::GrayImage;
 use anyd::codes::aztec::{AztecEncoder, scan};

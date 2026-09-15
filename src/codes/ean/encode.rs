@@ -16,6 +16,7 @@ use crate::segment::{Mode, Segment};
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{format, vec, vec::Vec};
 
 /// Light-module quiet zone recorded for a symbol containing a main pattern.
 const QUIET_MAIN: usize = 9;
@@ -122,7 +123,7 @@ impl Encode for EanEncoder {
                     "an add-on symbol cannot itself carry an add-on",
                 ));
             }
-            modules.extend(std::iter::repeat_n(false, ADDON_GAP));
+            modules.extend(core::iter::repeat_n(false, ADDON_GAP));
             modules.extend(render_addon(addon)?);
         }
         Ok(Encoding::Linear(LinearPattern {

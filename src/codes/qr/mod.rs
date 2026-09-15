@@ -10,15 +10,31 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod matrix;
+#[cfg(feature = "scan")]
 pub(crate) mod sample;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::QrDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::QrEncoder;
+#[cfg(feature = "scan")]
 pub use sample::{QrScanner, sample_grid, scan};
 
 /// QR error-correction level, in ascending order of recovery capacity.

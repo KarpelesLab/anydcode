@@ -1,45 +1,84 @@
-//! Per-symbology implementations. Each submodule provides encode/decode (and later
-//! detection) for one symbology family. Only [`qr`] is implemented so far; the other
-//! modules are pre-declared stubs whose encode/decode return
-//! [`crate::Error::Unsupported`] until filled in. Query
-//! [`crate::Symbology::is_implemented`] for current coverage.
-
-pub mod qr;
-
-// 1D linear families.
-pub mod codabar;
-pub mod code11;
-pub mod code128;
-pub mod code39;
-pub mod code93;
-pub mod dxfilm;
-pub mod ean;
-pub mod itf;
-pub mod msi;
-pub mod pharmacode;
-pub mod telepen;
-pub mod twoof5;
-
-// GS1 DataBar (formerly RSS).
-pub mod databar;
+//! Per-symbology implementations. Each submodule provides encode/decode (and, with
+//! the `scan` feature, image detection) for one symbology family, and is compiled
+//! only when its cargo feature is enabled (`qr`, `ean`, `pdf417`, ... — or the
+//! `matrix` / `stacked` / `linear` / `postal` / `all-codes` groups). Query
+//! [`crate::Symbology::is_implemented`] for the coverage of the current build.
+//!
+//! Inside each module the encoder is gated on the `encode` feature, the structural
+//! decoder on `decode`, and pixel samplers on `scan`.
 
 // 2D matrix families.
-#[cfg(feature = "appclip")]
+#[cfg(all(feature = "alloc", feature = "appclip"))]
 pub mod appclip;
+#[cfg(all(feature = "alloc", feature = "aztec"))]
 pub mod aztec;
+#[cfg(all(feature = "alloc", feature = "datamatrix"))]
 pub mod datamatrix;
+#[cfg(all(feature = "alloc", feature = "dotcode"))]
 pub mod dotcode;
+#[cfg(all(feature = "alloc", feature = "gridmatrix"))]
 pub mod gridmatrix;
+#[cfg(all(feature = "alloc", feature = "hanxin"))]
 pub mod hanxin;
+#[cfg(all(feature = "alloc", feature = "maxicode"))]
 pub mod maxicode;
+#[cfg(all(feature = "alloc", feature = "microqr"))]
 pub mod microqr;
+#[cfg(all(feature = "alloc", feature = "qr"))]
+pub mod qr;
+/// QR's GF(256) Reed–Solomon alone, for Micro QR / rMQR builds without QR itself.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "qr"),
+    any(feature = "microqr", feature = "rmqr")
+))]
+pub(crate) mod qr {
+    #[allow(dead_code)]
+    pub mod gf;
+}
+#[cfg(all(feature = "alloc", feature = "rmqr"))]
 pub mod rmqr;
 
 // 2D stacked families.
+#[cfg(all(feature = "alloc", feature = "codablockf"))]
 pub mod codablockf;
+#[cfg(all(feature = "alloc", feature = "code16k"))]
 pub mod code16k;
+#[cfg(all(feature = "alloc", feature = "code49"))]
 pub mod code49;
+#[cfg(all(feature = "alloc", feature = "pdf417"))]
 pub mod pdf417;
 
+// 1D linear families.
+#[cfg(all(feature = "alloc", feature = "codabar"))]
+pub mod codabar;
+#[cfg(all(feature = "alloc", feature = "code11"))]
+pub mod code11;
+#[cfg(all(feature = "alloc", feature = "code128"))]
+pub mod code128;
+#[cfg(all(feature = "alloc", feature = "code39"))]
+pub mod code39;
+#[cfg(all(feature = "alloc", feature = "code93"))]
+pub mod code93;
+#[cfg(all(feature = "alloc", feature = "dxfilm"))]
+pub mod dxfilm;
+#[cfg(all(feature = "alloc", feature = "ean"))]
+pub mod ean;
+#[cfg(all(feature = "alloc", feature = "itf"))]
+pub mod itf;
+#[cfg(all(feature = "alloc", feature = "msi"))]
+pub mod msi;
+#[cfg(all(feature = "alloc", feature = "pharmacode"))]
+pub mod pharmacode;
+#[cfg(all(feature = "alloc", feature = "telepen"))]
+pub mod telepen;
+#[cfg(all(feature = "alloc", feature = "twoof5"))]
+pub mod twoof5;
+
+// GS1 DataBar (formerly RSS).
+#[cfg(all(feature = "alloc", feature = "databar"))]
+pub mod databar;
+
 // Postal (height-modulated / 4-state).
+#[cfg(all(feature = "alloc", feature = "postal"))]
 pub mod postal;

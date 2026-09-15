@@ -7,7 +7,10 @@
 //! reference implementation. See [`super`] for the lossless-round-trip design.
 
 use super::rs::rsencode;
-use super::tables::DC_DOT_PATTERNS;
+use super::tables::{
+    BIN_LATCH, DC_DOT_PATTERNS, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A,
+    UPPER_SHIFT_B, is_corner,
+};
 use super::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
@@ -15,17 +18,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
-
-// Special codeword values (shared by encoder and decoder).
-pub(crate) const LATCH_A: u8 = 101;
-pub(crate) const LATCH_B_FROM_A: u8 = 102;
-pub(crate) const LATCH_BC: u8 = 106; // Latch B (from C) / Latch C (from A/B)
-pub(crate) const FNC1: u8 = 107;
-pub(crate) const FNC2: u8 = 108;
-pub(crate) const FNC3: u8 = 109; // Reader Init, or Bin-terminate-latch-A
-pub(crate) const UPPER_SHIFT_A: u8 = 110;
-pub(crate) const UPPER_SHIFT_B: u8 = 111;
-pub(crate) const BIN_LATCH: u8 = 112;
+use alloc::{vec, vec::Vec};
 
 // ---------------------------------------------------------------------------
 // Data encodation state machine (Annex F)
@@ -575,8 +568,8 @@ pub(crate) fn select_size(data_length: usize, width: Option<usize>) -> Result<(u
         }
         (w, h)
     } else {
-        let h = ((min_area as f64 * 0.666).sqrt()) as f32;
-        let w = ((min_area as f64 * 1.5).sqrt()) as f32;
+        let h = crate::math::sqrt(min_area as f64 * 0.666) as f32;
+        let w = crate::math::sqrt(min_area as f64 * 1.5) as f32;
         let mut height = h as usize;
         let mut width = w as usize;
         if (width + height) % 2 == 1 {
@@ -676,7 +669,7 @@ fn build_masked_block(data: &[u8], mask: u8) -> Vec<u8> {
         let weight = (step * j as u16) % 113;
         block.push(((weight + d as u16) % 113) as u8);
     }
-    block.extend(std::iter::repeat_n(0u8, ecc_length));
+    block.extend(core::iter::repeat_n(0u8, ecc_length));
     rsencode(data_length + 1, ecc_length, &mut block);
     block
 }
@@ -696,29 +689,6 @@ fn make_dotstream(block: &[u8]) -> Vec<bool> {
         }
     }
     bits
-}
-
-/// Is `(column, row)` a reserved corner dot (holds one of the final six bits)?
-pub(crate) fn is_corner(column: usize, row: usize, width: usize, height: usize) -> bool {
-    if column == 0 && row == 0 {
-        return true;
-    }
-    if height & 1 == 1 {
-        if (column == width - 2 && row == 0) || (column == width - 1 && row == 1) {
-            return true;
-        }
-        if column == 0 && row == height - 1 {
-            return true;
-        }
-    } else {
-        if column == width - 1 && row == 0 {
-            return true;
-        }
-        if (column == 0 && row == height - 2) || (column == 1 && row == height - 1) {
-            return true;
-        }
-    }
-    (column == width - 2 && row == height - 1) || (column == width - 1 && row == height - 2)
 }
 
 /// Fold the padded dot stream onto the checkerboard, returning a dark-module grid
@@ -1116,7 +1086,7 @@ impl Encode for DotCodeEncoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 
@@ -1206,9 +1176,10 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod bitmap_tests {
     use super::*;
+    use alloc::string::String;
 
     fn grid_to_rows(grid: &[bool], width: usize, height: usize) -> Vec<String> {
         (0..height)

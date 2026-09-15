@@ -11,6 +11,7 @@
 //! with light (`255`) so quiet zones survive.
 
 use crate::image::GrayImage;
+use alloc::vec::Vec;
 
 /// Background luminance used to fill areas exposed by a geometric transform.
 const BACKGROUND: f32 = 255.0;

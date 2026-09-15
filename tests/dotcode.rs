@@ -1,5 +1,6 @@
 //! DotCode integration tests: an independent reference bitmap plus
 //! encode→decode→re-encode round-trip identity across code sets and sizes.
+#![cfg(all(feature = "decode", feature = "encode", feature = "dotcode"))]
 
 use anyd::codes::dotcode::{DotCodeDecoder, DotCodeEncoder};
 use anyd::output::Encoding;

@@ -29,19 +29,41 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod compaction;
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod ec;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod micro;
+#[cfg(feature = "scan")]
 mod micro_sample;
+#[cfg(feature = "scan")]
 mod sample;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::Pdf417Decoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::Pdf417Encoder;
-pub use micro::{MicroPdf417Decoder, MicroPdf417Encoder};
+#[cfg(feature = "decode")]
+pub use micro::MicroPdf417Decoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+pub use micro::MicroPdf417Encoder;
+#[cfg(feature = "scan")]
 pub use micro_sample::scan_micro;
+#[cfg(feature = "scan")]
 pub use sample::{Pdf417Scanner, sample_grid, scan};
 
 use crate::error::Error;

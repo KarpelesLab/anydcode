@@ -408,7 +408,9 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     // ITU-R BT.601 luma from RGBA.
     let luma: Vec<u8> = rgba
         .data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
         .collect();
     let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;

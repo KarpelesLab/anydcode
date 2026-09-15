@@ -1,5 +1,6 @@
 //! Code 11 end-to-end tests: independent checksum reference vectors plus
 //! encode → decode → re-encode identity across 0/1/2 check characters.
+#![cfg(all(feature = "decode", feature = "encode", feature = "code11"))]
 
 use anyd::codes::code11::{Code11Decoder, Code11Encoder};
 use anyd::output::Encoding;

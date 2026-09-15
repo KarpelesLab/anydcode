@@ -15,6 +15,7 @@
 
 use crate::image::GrayFrame;
 use crate::imgproc::threshold::otsu_threshold;
+use alloc::{vec, vec::Vec};
 
 /// A reduced-resolution view of one frame plus its binarization.
 #[derive(Debug)]

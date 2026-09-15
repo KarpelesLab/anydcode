@@ -1,6 +1,7 @@
 //! Code 39 end-to-end tests: independent reference vectors plus encode → decode →
 //! re-encode identity across the option matrix (standard/full-ASCII, with/without a
 //! mod-43 check character).
+#![cfg(all(feature = "decode", feature = "encode", feature = "code39"))]
 
 use anyd::codes::code39::{Code39Decoder, Code39Encoder};
 use anyd::output::Encoding;

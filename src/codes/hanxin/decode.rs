@@ -16,6 +16,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::{format, vec, vec::Vec};
 
 /// Han Xin Code structural decoder.
 #[derive(Debug, Default, Clone, Copy)]

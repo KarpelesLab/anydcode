@@ -54,6 +54,7 @@ use crate::image::GrayFrame;
 use crate::output::{Encoding, LinearPattern};
 use crate::symbol::Symbol;
 use crate::traits::Decode;
+use alloc::{vec, vec::Vec};
 
 /// Default half-set of scan angles in degrees; scans run at `0` and `±` each step.
 const MAX_ANGLE_DEG: f32 = 6.0;

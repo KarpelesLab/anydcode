@@ -9,6 +9,8 @@
 //! vectors, most-significant coefficient first.
 
 /// Primitive polynomial for the Data Matrix field, without the implicit `x^8` bit.
+use alloc::{vec, vec::Vec};
+
 const PRIMITIVE: u16 = 0x12D;
 
 /// Index of the first consecutive root of the RS generator polynomial (`α^1`).
@@ -254,7 +256,7 @@ fn sub_shift(dst: &mut Vec<u8>, src: &[u8], scale: u8, shift: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

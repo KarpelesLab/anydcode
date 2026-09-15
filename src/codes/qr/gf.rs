@@ -5,6 +5,8 @@
 //! represented as coefficient vectors, **most-significant coefficient first**.
 
 /// Primitive polynomial for the QR field, without the implicit `x^8` bit.
+use alloc::{vec, vec::Vec};
+
 const PRIMITIVE: u16 = 0x11D;
 
 /// Precomputed exponent/log tables: `EXP[i] = α^i` (for `i` in `0..255`) and
@@ -253,7 +255,7 @@ fn sub_shift(dst: &mut Vec<u8>, src: &[u8], scale: u8, shift: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

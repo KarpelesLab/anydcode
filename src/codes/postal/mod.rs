@@ -78,20 +78,41 @@
 //! [`Segment::numeric`]: crate::segment::Segment::numeric
 //! [`Segment::alphanumeric`]: crate::segment::Segment::alphanumeric
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::{vec, vec::Vec};
+
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod auspost;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod imb;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod japanpost;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod mailmark;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod postnet;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod rm4scc;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod rs;
 
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
-use crate::segment::{Mode, Segment};
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::segment::Mode;
+use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
 
 /// Number of module rows in a rendered postal matrix (ascender / tracker /
 /// descender bands).
@@ -104,6 +125,7 @@ const ROWS: usize = 3;
 /// (the demo page, PNG export) pads by exactly this many modules, and bars flush
 /// against the canvas edge are both unsightly and unscannable from a printed or
 /// photographed copy.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET: usize = 2;
 
 /// The state of a single postal bar (its height / extension pattern).
@@ -183,6 +205,7 @@ impl PostalVariant {
     }
 
     /// The variant a [`Symbology`] maps to, if it is a postal one.
+    #[cfg(all(feature = "alloc", feature = "encode"))]
     fn from_symbology(s: Symbology) -> Option<PostalVariant> {
         Some(match s {
             Symbology::Postnet => PostalVariant::Postnet,
@@ -217,9 +240,11 @@ impl PostalMeta {
 }
 
 /// Postal (height-modulated / 4-state) encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PostalEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl PostalEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -335,6 +360,7 @@ impl PostalEncoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for PostalEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let variant =
@@ -370,9 +396,11 @@ impl Encode for PostalEncoder {
 }
 
 /// Postal (height-modulated / 4-state) decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PostalDecoder;
 
+#[cfg(feature = "decode")]
 impl PostalDecoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -380,6 +408,7 @@ impl PostalDecoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for PostalDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let matrix = match encoding {
@@ -445,6 +474,7 @@ impl Decode for PostalDecoder {
 // ---- Symbol / matrix helpers ----------------------------------------------
 
 /// Assemble a symbol carrying a single numeric segment for `variant`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn numeric_symbol(variant: PostalVariant, digits: Vec<u8>) -> Symbol {
     Symbol::new(
         variant.symbology(),
@@ -454,6 +484,7 @@ fn numeric_symbol(variant: PostalVariant, digits: Vec<u8>) -> Symbol {
 }
 
 /// Assemble a symbol carrying a single alphanumeric segment for `variant`.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn alnum_symbol(variant: PostalVariant, data: Vec<u8>) -> Symbol {
     Symbol::new(
         variant.symbology(),
@@ -463,6 +494,7 @@ fn alnum_symbol(variant: PostalVariant, data: Vec<u8>) -> Symbol {
 }
 
 /// Assemble a decoded symbol with the correct symbology and metadata.
+#[cfg(feature = "decode")]
 fn build_symbol(variant: PostalVariant, segments: Vec<Segment>) -> Symbol {
     Symbol::new(
         variant.symbology(),
@@ -472,6 +504,7 @@ fn build_symbol(variant: PostalVariant, segments: Vec<Segment>) -> Symbol {
 }
 
 /// The bytes of the first numeric segment.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn numeric_data(symbol: &Symbol) -> Result<Vec<u8>> {
     symbol
         .segments
@@ -482,6 +515,7 @@ fn numeric_data(symbol: &Symbol) -> Result<Vec<u8>> {
 }
 
 /// The bytes of the first data segment (numeric or alphanumeric).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn alnum_data(symbol: &Symbol) -> Result<Vec<u8>> {
     symbol
         .segments
@@ -492,6 +526,7 @@ fn alnum_data(symbol: &Symbol) -> Result<Vec<u8>> {
 }
 
 /// The IMb `(tracking, routing)` fields from the symbol's two numeric segments.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn imb_fields(symbol: &Symbol) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut numerics = symbol
         .segments
@@ -506,6 +541,7 @@ fn imb_fields(symbol: &Symbol) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Render a bar sequence to the 3-row [`BitMatrix`] (see module docs).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn bars_to_matrix(bars: &[BarState]) -> BitMatrix {
     let width = if bars.is_empty() {
         0
@@ -527,6 +563,7 @@ fn bars_to_matrix(bars: &[BarState]) -> BitMatrix {
 }
 
 /// Recover the bar sequence from a 3-row postal [`BitMatrix`].
+#[cfg(feature = "decode")]
 fn matrix_to_bars(m: &BitMatrix) -> Result<Vec<BarState>> {
     if m.height() != ROWS {
         return Err(Error::undecodable("postal matrix must be 3 rows tall"));

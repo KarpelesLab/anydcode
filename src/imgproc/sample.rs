@@ -96,6 +96,7 @@ pub fn sample_grid_binary(
 mod tests {
     use super::*;
     use crate::geometry::Point;
+    use alloc::vec;
 
     fn matrices_equal(a: &BitMatrix, b: &BitMatrix) -> bool {
         if a.width() != b.width() || a.height() != b.height() {

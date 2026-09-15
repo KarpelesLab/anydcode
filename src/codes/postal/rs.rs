@@ -17,6 +17,8 @@ pub(super) struct Gf {
     alog: Vec<u8>,
 }
 
+use alloc::{vec, vec::Vec};
+
 impl Gf {
     /// Build the field of order `1 << m` with primitive polynomial `poly`.
     pub(super) fn new(poly: u16, m: u32) -> Gf {

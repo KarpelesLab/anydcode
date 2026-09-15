@@ -13,6 +13,7 @@ use crate::output::Encoding;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Encode;
+use alloc::{format, string::ToString, vec::Vec};
 
 // Code set indices.
 const SET_A: usize = 0;
@@ -54,7 +55,7 @@ impl MaxiCodeEncoder {
             ));
         }
         let body = encode_body(data, mode)?;
-        let segments = super::decode::decode_body(&body);
+        let segments = super::tables::decode_body(&body);
         Ok(Symbol::new(
             Symbology::MaxiCode,
             segments,
@@ -79,7 +80,7 @@ impl MaxiCodeEncoder {
     ) -> Result<Symbol> {
         let carrier = normalize_carrier(mode, postcode, country, service)?;
         let body = encode_body(data, mode)?;
-        let segments = super::decode::decode_body(&body);
+        let segments = super::tables::decode_body(&body);
         Ok(Symbol::new(
             Symbology::MaxiCode,
             segments,
@@ -283,7 +284,7 @@ fn emit_latch(out: &mut Vec<u8>, from: usize, to: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

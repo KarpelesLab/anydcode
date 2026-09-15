@@ -38,7 +38,10 @@
 //! tables) are those of ISO/IEC 24728, cross-checked against the (BSD-3-Clause) zint
 //! project's `pdf417_tabs.h`.
 
-use std::collections::HashMap;
+use alloc::collections::BTreeMap;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use alloc::vec;
+use alloc::vec::Vec;
 
 use super::tables::CODEWORD_PATTERNS;
 use super::{EcLevel, Pdf417Meta, Pdf417Variant, compaction, ec};
@@ -47,7 +50,10 @@ use crate::output::{BitMatrix, Encoding};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
 
 /// Number of identical module rows rendered per codeword row. The decoder derives the
 /// row count from this, so any consistent value round-trips; 2 is MicroPDF417's
@@ -146,9 +152,11 @@ fn variant_for(cols: usize, rows: usize) -> Option<usize> {
 }
 
 /// MicroPDF417 encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MicroPdf417Encoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl MicroPdf417Encoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -185,6 +193,7 @@ impl MicroPdf417Encoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for MicroPdf417Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::MicroPdf417 {
@@ -324,9 +333,11 @@ fn choose_variant(stream_len: usize, columns: Option<usize>) -> Result<usize> {
 }
 
 /// MicroPDF417 structural decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MicroPdf417Decoder;
 
+#[cfg(feature = "decode")]
 impl MicroPdf417Decoder {
     /// A new decoder.
     pub fn new() -> Self {
@@ -419,6 +430,7 @@ impl MicroPdf417Decoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for MicroPdf417Decoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         match encoding {
@@ -431,8 +443,8 @@ impl Decode for MicroPdf417Decoder {
 }
 
 /// Build the inverse `pattern -> codeword` maps for the three data clusters.
-fn reverse_tables() -> [HashMap<u32, u32>; 3] {
-    std::array::from_fn(|cluster| {
+fn reverse_tables() -> [BTreeMap<u32, u32>; 3] {
+    core::array::from_fn(|cluster| {
         CODEWORD_PATTERNS[cluster]
             .iter()
             .enumerate()
@@ -453,7 +465,7 @@ fn read_pattern(matrix: &BitMatrix, x0: usize, y: usize) -> u32 {
     pattern
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

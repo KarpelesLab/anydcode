@@ -17,6 +17,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
+use alloc::{vec, vec::Vec};
 
 /// Aztec Code structural decoder.
 #[derive(Debug, Default, Clone, Copy)]

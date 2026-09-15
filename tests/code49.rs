@@ -5,6 +5,7 @@
 //!    numeric-mode symbol) are reproduced module-for-module from their code-character
 //!    grids, exercising the even/odd encodation-pattern tables.
 //! 2. `encode -> decode -> re-encode` identity, plus payload recovery.
+#![cfg(all(feature = "decode", feature = "encode", feature = "code49"))]
 
 use anyd::codes::code49::{Code49Decoder, Code49Encoder, Code49Meta};
 use anyd::output::Encoding;

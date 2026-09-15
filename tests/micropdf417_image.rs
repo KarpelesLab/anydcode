@@ -1,5 +1,6 @@
 //! MicroPDF417 image-sampling tests: render → transform → scan through the
 //! dark-cloud corner detector and aspect-ordered variant search.
+#![cfg(all(feature = "encode", feature = "scan", feature = "pdf417"))]
 
 use anyd::GrayImage;
 use anyd::codes::pdf417::{MicroPdf417Encoder, scan_micro};

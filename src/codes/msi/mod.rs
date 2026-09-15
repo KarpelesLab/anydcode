@@ -30,14 +30,28 @@
 //! mapping, CRC grid `111101001` and start/stop) matches the reference implementation
 //! [zint](https://github.com/zint/zint) (`plessey.c`).
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
 use crate::error::{Error, Result};
-use crate::output::{Encoding, LinearPattern};
+use crate::output::Encoding;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::output::LinearPattern;
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
-use crate::traits::{Decode, Encode};
+#[cfg(feature = "decode")]
+use crate::traits::Decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+use crate::traits::Encode;
+use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width in narrow modules on each side.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 const QUIET_ZONE: usize = 10;
 
 /// MSI Plessey check-digit scheme.
@@ -125,6 +139,7 @@ fn apply_check(data: &[u8], scheme: MsiCheck) -> Result<Vec<u8>> {
 }
 
 /// Number of check digits a scheme appends.
+#[cfg(feature = "decode")]
 fn check_len(scheme: MsiCheck) -> usize {
     match scheme {
         MsiCheck::None => 0,
@@ -133,6 +148,7 @@ fn check_len(scheme: MsiCheck) -> usize {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("MSI payload is empty"));
@@ -147,11 +163,13 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
 // ---------- shared helpers ----------
 
 /// Push module booleans from a `"10"` string (`'1'` = bar).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn push_bits(modules: &mut Vec<bool>, bits: &str) {
     modules.extend(bits.bytes().map(|b| b == b'1'));
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
+#[cfg(feature = "decode")]
 fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
@@ -174,6 +192,7 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
 
 // ---------- MSI encoding ----------
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn msi_encode(digits: &[u8]) -> Vec<bool> {
     let mut modules = Vec::new();
     push_bits(&mut modules, "110"); // start
@@ -191,6 +210,7 @@ fn msi_encode(digits: &[u8]) -> Vec<bool> {
     modules
 }
 
+#[cfg(feature = "decode")]
 fn msi_decode(modules: &[bool], scheme: MsiCheck) -> Result<Vec<u8>> {
     // start(3) + n*12 + stop(4)
     if modules.len() < 3 + 12 + 4 || !(modules.len() - 7).is_multiple_of(12) {
@@ -246,6 +266,7 @@ const PLESSEY_START: [u32; 8] = [3, 1, 3, 1, 1, 3, 3, 1];
 const PLESSEY_STOP: [u32; 9] = [3, 3, 1, 3, 1, 1, 3, 1, 3];
 
 /// Value of a Plessey hex digit.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn hex_value(c: u8) -> Result<u8> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
@@ -254,6 +275,7 @@ fn hex_value(c: u8) -> Result<u8> {
     }
 }
 
+#[cfg(feature = "decode")]
 fn hex_char(v: u8) -> u8 {
     if v < 10 { b'0' + v } else { b'A' + (v - 10) }
 }
@@ -275,17 +297,20 @@ fn plessey_crc(data_bits: &[u8]) -> [u8; 8] {
 }
 
 /// Render an alternating (bar, space, ...) width sequence.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn render_widths(modules: &mut Vec<bool>, widths: &[u32]) {
     for (i, &w) in widths.iter().enumerate() {
-        modules.extend(std::iter::repeat_n(i % 2 == 0, w as usize));
+        modules.extend(core::iter::repeat_n(i % 2 == 0, w as usize));
     }
 }
 
 /// One data/CRC bit → its bar/space widths (`0` → 1,3; `1` → 3,1).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn bit_widths(bit: u8) -> [u32; 2] {
     if bit == 1 { [3, 1] } else { [1, 3] }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 fn plessey_encode(digits: &[u8]) -> Result<Vec<bool>> {
     // Data bits, 4 per digit, LSB first.
     let mut data_bits = Vec::with_capacity(digits.len() * 4);
@@ -310,10 +335,12 @@ fn plessey_encode(digits: &[u8]) -> Result<Vec<bool>> {
 }
 
 /// Match a run slice against a width pattern by wide/narrow class.
+#[cfg(feature = "decode")]
 fn matches_widths(runs: &[u32], pattern: &[u32]) -> bool {
     runs.len() == pattern.len() && runs.iter().zip(pattern).all(|(&r, &p)| (r > 1) == (p > 1))
 }
 
+#[cfg(feature = "decode")]
 fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
     let runs = rle(modules)?;
     let (sl, tl) = (PLESSEY_START.len(), PLESSEY_STOP.len());
@@ -332,7 +359,7 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
     }
     // Each bit is a (bar, space) pair.
     let mut bits = Vec::with_capacity(body.len() / 2);
-    for pair in body.chunks_exact(2) {
+    for pair in body.as_chunks::<2>().0 {
         let bit = match (pair[0] > 1, pair[1] > 1) {
             (false, true) => 0u8, // narrow bar, wide space
             (true, false) => 1u8, // wide bar, narrow space
@@ -349,7 +376,7 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
         return Err(Error::undecodable("Plessey CRC mismatch"));
     }
     let mut digits = Vec::with_capacity(data_bits.len() / 4);
-    for chunk in data_bits.chunks_exact(4) {
+    for chunk in data_bits.as_chunks::<4>().0 {
         let mut v = 0u8;
         for (bit, &b) in chunk.iter().enumerate() {
             v |= b << bit;
@@ -362,9 +389,11 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
 // ---------- public API ----------
 
 /// MSI Plessey / Plessey encoder.
+#[cfg(all(feature = "alloc", feature = "encode"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MsiEncoder;
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl MsiEncoder {
     /// A new encoder.
     pub fn new() -> Self {
@@ -398,6 +427,7 @@ impl MsiEncoder {
     }
 }
 
+#[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for MsiEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let meta = match &symbol.meta {
@@ -425,12 +455,14 @@ impl Encode for MsiEncoder {
 }
 
 /// MSI Plessey / Plessey decoder.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MsiDecoder {
     plessey: bool,
     check: MsiCheck,
 }
 
+#[cfg(feature = "decode")]
 impl MsiDecoder {
     /// A new MSI Plessey decoder that expects no check digit.
     pub fn new() -> Self {
@@ -457,6 +489,7 @@ impl MsiDecoder {
     }
 }
 
+#[cfg(feature = "decode")]
 impl Decode for MsiDecoder {
     fn decode(&self, encoding: &Encoding) -> Result<Symbol> {
         let pattern = match encoding {
@@ -483,7 +516,7 @@ impl Decode for MsiDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
 

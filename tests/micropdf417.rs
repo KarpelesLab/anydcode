@@ -14,6 +14,7 @@
 //! 2. **Lossless round-trip.** `encode → decode → re-encode` must reproduce the exact
 //!    segments, metadata and module matrix across Text/Byte/Numeric compaction and
 //!    every column count.
+#![cfg(all(feature = "decode", feature = "encode", feature = "pdf417"))]
 
 use anyd::codes::pdf417::{MicroPdf417Decoder, MicroPdf417Encoder};
 use anyd::output::{BitMatrix, Encoding};

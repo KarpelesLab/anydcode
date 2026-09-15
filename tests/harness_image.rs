@@ -29,6 +29,7 @@
 //! only sampled affinely, so it is exercised without perspective. Magnitudes are set a
 //! comfortable margin inside the sampler's measured failure points — see the
 //! `known-hard` test for cases deliberately pushed to the edge of what still passes.
+#![cfg(all(feature = "encode", feature = "scan", feature = "qr"))]
 
 use anyd::GrayImage;
 use anyd::codes::qr::{EcLevel, QrEncoder, QrScanner, sample_grid, scan};

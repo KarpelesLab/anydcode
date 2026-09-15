@@ -21,7 +21,8 @@
 //! representation (the decoder ignores all `0` cells); the encoder additionally sets
 //! the fixed [`ORIENTATION`] modules, matching a real symbol's module bitmap.
 
-use std::sync::OnceLock;
+use crate::segment::Segment;
+use alloc::{format, vec::Vec};
 
 /// Grid width in modules.
 pub const WIDTH: usize = 30;
@@ -140,11 +141,25 @@ const SRC_C: &str = "\u{C0}\u{C1}\u{C2}\u{C3}\u{C4}\u{C5}\u{C6}\u{C7}\u{C8}\u{C9
 const SRC_D: &str = "\u{E0}\u{E1}\u{E2}\u{E3}\u{E4}\u{E5}\u{E6}\u{E7}\u{E8}\u{E9}\u{EA}\u{EB}\u{EC}\u{ED}\u{EE}\u{EF}\u{F0}\u{F1}\u{F2}\u{F3}\u{F4}\u{F5}\u{F6}\u{F7}\u{F8}\u{F9}\u{FA}\u{FFFA}\u{1C}\u{1D}\u{1E}\u{FFFB}\u{FB}\u{FC}\u{FD}\u{FE}\u{FF}\u{A1}\u{A8}\u{AB}\u{AF}\u{B0}\u{B4}\u{B7}\u{B8}\u{BB}\u{BF}\u{8A}\u{8B}\u{8C}\u{8D}\u{8E}\u{8F}\u{90}\u{91}\u{92}\u{93}\u{94}\u{FFF7} \u{FFF2}\u{FFF9}\u{FFF4}\u{FFF8}";
 const SRC_E: &str = "\u{0}\u{1}\u{2}\u{3}\u{4}\u{5}\u{6}\u{7}\u{8}\u{9}\n\u{B}\u{C}\r\u{E}\u{F}\u{10}\u{11}\u{12}\u{13}\u{14}\u{15}\u{16}\u{17}\u{18}\u{19}\u{1A}\u{FFFA}\u{FFFC}\u{FFFC}\u{1B}\u{FFFB}\u{1C}\u{1D}\u{1E}\u{1F}\u{9F}\u{A0}\u{A2}\u{A3}\u{A4}\u{A5}\u{A6}\u{A7}\u{A9}\u{AD}\u{AE}\u{B6}\u{95}\u{96}\u{97}\u{98}\u{99}\u{9A}\u{9B}\u{9C}\u{9D}\u{9E}\u{FFF7} \u{FFF2}\u{FFF3}\u{FFF9}\u{FFF8}";
 
-fn parse_set(src: &str) -> [Cw; 64] {
+/// Parse one 64-character code-set source string at compile time.
+const fn parse_set(src: &str) -> [Cw; 64] {
+    let bytes = src.as_bytes();
     let mut out = [Cw::Pad; 64];
-    let mut n = 0;
-    for ch in src.chars() {
-        let cp = ch as u32;
+    let (mut i, mut n) = (0, 0);
+    while i < bytes.len() {
+        // Decode one UTF-8 scalar (the sources only use 1–3 byte sequences).
+        let b0 = bytes[i] as u32;
+        let (cp, len) = if b0 < 0x80 {
+            (b0, 1)
+        } else if b0 < 0xE0 {
+            (((b0 & 0x1F) << 6) | (bytes[i + 1] as u32 & 0x3F), 2)
+        } else {
+            let b1 = bytes[i + 1] as u32 & 0x3F;
+            (
+                ((b0 & 0x0F) << 12) | (b1 << 6) | (bytes[i + 2] as u32 & 0x3F),
+                3,
+            )
+        };
         out[n] = match cp {
             0xFFF0 => Cw::ShiftA,
             0xFFF1 => Cw::ShiftB,
@@ -160,27 +175,28 @@ fn parse_set(src: &str) -> [Cw; 64] {
             0xFFFB => Cw::Ns,
             0xFFFC => Cw::Pad,
             b if b <= 0xFF => Cw::Byte(b as u8),
-            other => panic!("invalid MaxiCode set character U+{other:04X}"),
+            _ => panic!("invalid MaxiCode set character"),
         };
+        i += len;
         n += 1;
     }
-    assert_eq!(n, 64, "MaxiCode code set must have 64 entries");
+    assert!(n == 64, "MaxiCode code set must have 64 entries");
     out
 }
 
 /// The five MaxiCode code sets (A..=E), each a 64-entry table indexed by codeword
 /// value.
+pub static SETS: [[Cw; 64]; 5] = [
+    parse_set(SRC_A),
+    parse_set(SRC_B),
+    parse_set(SRC_C),
+    parse_set(SRC_D),
+    parse_set(SRC_E),
+];
+
+/// Borrow [`SETS`].
 pub fn sets() -> &'static [[Cw; 64]; 5] {
-    static SETS: OnceLock<[[Cw; 64]; 5]> = OnceLock::new();
-    SETS.get_or_init(|| {
-        [
-            parse_set(SRC_A),
-            parse_set(SRC_B),
-            parse_set(SRC_C),
-            parse_set(SRC_D),
-            parse_set(SRC_E),
-        ]
-    })
+    &SETS
 }
 
 /// The codeword value that encodes `byte` in code set `set` (0=A..4=E), if any.
@@ -191,7 +207,115 @@ pub fn value_in_set(set: usize, byte: u8) -> Option<u8> {
         .map(|p| p as u8)
 }
 
-#[cfg(test)]
+/// Run the code-set state machine over a data-codeword body, recovering the payload
+/// bytes as [`Segment`]s (byte runs split by ECI switches). Trailing padding is
+/// dropped. This is the shared source of truth used by both the decoder and the
+/// encoder's `build*` helpers, keeping their segments identical.
+pub(crate) fn decode_body(body: &[u8]) -> Vec<Segment> {
+    let sets = sets();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut bytes: Vec<u8> = Vec::new();
+
+    let mut set = 0usize;
+    let mut last_set = 0usize;
+    let mut shift: i32 = -1;
+    let mut i = 0;
+
+    while i < body.len() {
+        let value = (body[i] & 0x3F) as usize;
+        i += 1;
+        match sets[set][value] {
+            Cw::LatchA => {
+                set = 0;
+                shift = -1;
+            }
+            Cw::LatchB => {
+                set = 1;
+                shift = -1;
+            }
+            Cw::ShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 1),
+            Cw::ShiftB => shift_to(&mut set, &mut last_set, &mut shift, 1, 1),
+            Cw::ShiftC => shift_to(&mut set, &mut last_set, &mut shift, 2, 1),
+            Cw::ShiftD => shift_to(&mut set, &mut last_set, &mut shift, 3, 1),
+            Cw::ShiftE => shift_to(&mut set, &mut last_set, &mut shift, 4, 1),
+            Cw::TwoShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 2),
+            Cw::ThreeShiftA => shift_to(&mut set, &mut last_set, &mut shift, 0, 3),
+            Cw::Lock => shift = -1,
+            Cw::Pad => {} // trailing padding — ignored
+            Cw::Ns => {
+                if let Some(chunk) = body.get(i..i + 5) {
+                    let v = (chunk[0] as u32) << 24
+                        | (chunk[1] as u32) << 18
+                        | (chunk[2] as u32) << 12
+                        | (chunk[3] as u32) << 6
+                        | (chunk[4] as u32);
+                    i += 5;
+                    for d in format!("{v:09}").bytes() {
+                        bytes.push(d);
+                    }
+                } else {
+                    break;
+                }
+            }
+            Cw::Eci => {
+                if let Some((eci, consumed)) = read_eci(&body[i..]) {
+                    i += consumed;
+                    if !bytes.is_empty() {
+                        segments.push(Segment::byte(core::mem::take(&mut bytes)));
+                    }
+                    segments.push(Segment::eci(eci));
+                } else {
+                    break;
+                }
+            }
+            Cw::Byte(b) => bytes.push(b),
+        }
+        // ZXing's `if (shift-- == 0) set = lastset;`: a shift lasts exactly its span.
+        let expired = shift == 0;
+        shift -= 1;
+        if expired {
+            set = last_set;
+        }
+    }
+
+    if !bytes.is_empty() {
+        segments.push(Segment::byte(bytes));
+    }
+    if segments.is_empty() {
+        segments.push(Segment::byte(Vec::new()));
+    }
+    segments
+}
+
+/// Apply a shift of `span` characters to code set `target`.
+fn shift_to(set: &mut usize, last_set: &mut usize, shift: &mut i32, target: usize, span: i32) {
+    *last_set = *set;
+    *set = target;
+    *shift = span;
+}
+
+/// Decode an ECI assignment number from the codewords following the ECI marker,
+/// returning `(eci, codewords_consumed)`.
+fn read_eci(rest: &[u8]) -> Option<(u32, usize)> {
+    let c1 = *rest.first()? as u32;
+    if c1 < 0x20 {
+        Some((c1, 1))
+    } else if c1 < 0x30 {
+        let c2 = *rest.get(1)? as u32;
+        Some((((c1 & 0x0F) << 6) | c2, 2))
+    } else if c1 < 0x38 {
+        let c2 = *rest.get(1)? as u32;
+        let c3 = *rest.get(2)? as u32;
+        Some((((c1 & 0x07) << 12) | (c2 << 6) | c3, 3))
+    } else {
+        let c2 = *rest.get(1)? as u32;
+        let c3 = *rest.get(2)? as u32;
+        let c4 = *rest.get(3)? as u32;
+        Some((((c1 & 0x03) << 18) | (c2 << 12) | (c3 << 6) | c4, 4))
+    }
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
     use std::collections::HashSet;

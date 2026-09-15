@@ -33,6 +33,8 @@
 pub mod binary;
 pub mod components;
 pub mod edges;
+#[cfg(any(feature = "qr", feature = "microqr", feature = "rmqr"))]
+pub(crate) mod finder;
 pub mod homography;
 pub mod integral;
 pub mod line;

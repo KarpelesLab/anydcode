@@ -29,6 +29,7 @@
 //! well-resolved edge but degrades as modules-per-edge grows, hence the size-graded
 //! tilt column. Magnitudes are set a comfortable margin inside the sampler's measured
 //! failure points; the `known_hard_edge_cases` test pins a few points near the edge.
+#![cfg(all(feature = "encode", feature = "scan", feature = "datamatrix"))]
 
 use anyd::codes::datamatrix::{DataMatrixEncoder, DataMatrixScanner, sample_grid, scan};
 use anyd::output::{BitMatrix, Encoding};

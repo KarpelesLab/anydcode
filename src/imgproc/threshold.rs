@@ -134,6 +134,7 @@ pub fn adaptive_binarize_sauvola(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::{vec, vec::Vec};
 
     /// Render a `w×h` frame from a closure giving luminance at each pixel.
     fn render<F: Fn(usize, usize) -> u8>(w: usize, h: usize, f: F) -> Vec<u8> {

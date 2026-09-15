@@ -5,12 +5,16 @@
 //! the encoder output abstract means the same result can be rasterized at any scale
 //! or fed straight back into a decoder for round-trip verification.
 
+#[cfg(feature = "alloc")]
+use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
 use core::fmt;
 
 /// A 2D grid of dark/light modules for matrix and stacked symbologies.
 ///
 /// `true` means a dark module. The grid excludes the quiet zone; [`BitMatrix::quiet_zone`]
 /// records how many light modules of margin the symbology requires around it.
+#[cfg(feature = "alloc")]
 #[derive(Clone, PartialEq, Eq)]
 pub struct BitMatrix {
     width: usize,
@@ -20,6 +24,7 @@ pub struct BitMatrix {
     pub quiet_zone: usize,
 }
 
+#[cfg(feature = "alloc")]
 impl BitMatrix {
     /// A new all-light matrix of the given size.
     pub fn new(width: usize, height: usize, quiet_zone: usize) -> Self {
@@ -62,6 +67,7 @@ impl BitMatrix {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl fmt::Debug for BitMatrix {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(
@@ -83,6 +89,7 @@ impl fmt::Debug for BitMatrix {
 ///
 /// Each element is one narrow module; `true` is a bar, `false` a space. Wider bars
 /// are runs of consecutive `true`s. The quiet zone (in modules) frames both ends.
+#[cfg(feature = "alloc")]
 #[derive(Clone, PartialEq, Eq)]
 pub struct LinearPattern {
     /// One entry per narrow module across the code, `true` = bar.
@@ -91,6 +98,7 @@ pub struct LinearPattern {
     pub quiet_zone: usize,
 }
 
+#[cfg(feature = "alloc")]
 impl fmt::Debug for LinearPattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -108,6 +116,7 @@ impl fmt::Debug for LinearPattern {
 
 /// The output of encoding a [`crate::Symbol`]: matrix geometry for 2D codes, a linear
 /// pattern for 1D codes.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Encoding {
     /// A 2D module grid.

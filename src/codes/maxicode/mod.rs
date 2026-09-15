@@ -37,12 +37,27 @@
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 
+// With neither `encode` nor `decode` only the metadata types remain; their shared
+// helpers are then unused.
+#![cfg_attr(
+    not(any(feature = "encode", feature = "decode")),
+    allow(dead_code, unused_imports)
+)]
+
+use alloc::{string::String, vec, vec::Vec};
+
+#[cfg(feature = "decode")]
 mod decode;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 mod encode;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
+#[cfg(feature = "decode")]
 pub use decode::MaxiCodeDecoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::MaxiCodeEncoder;
 
 use crate::output::BitMatrix;
@@ -105,6 +120,7 @@ pub(crate) fn secondary_lengths(mode: u8) -> (usize, usize) {
 
 /// Compute and store the Reed–Solomon check symbols in place: primary (10 data + 10
 /// EC over `cw[0..20]`) and secondary (even/odd interleaved).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub(crate) fn add_error_correction(cw: &mut [u8; TOTAL_CW], mode: u8) {
     // Primary: always Enhanced EC, 10 data + 10 check codewords.
     let primary_ec = gf::encode(&cw[0..10], 10);
@@ -124,6 +140,7 @@ pub(crate) fn add_error_correction(cw: &mut [u8; TOTAL_CW], mode: u8) {
 
 /// Reed–Solomon-correct the primary block (`cw[0..20]`) in place. This recovers the
 /// mode codeword before the secondary block can be de-interleaved.
+#[cfg(feature = "decode")]
 pub(crate) fn correct_primary(cw: &mut [u8; TOTAL_CW]) -> crate::error::Result<()> {
     let fixed = gf::decode(&cw[0..20], 10).ok_or(crate::error::Error::ErrorCorrectionFailed)?;
     cw[0..20].copy_from_slice(&fixed);
@@ -131,6 +148,7 @@ pub(crate) fn correct_primary(cw: &mut [u8; TOTAL_CW]) -> crate::error::Result<(
 }
 
 /// Reed–Solomon-correct the secondary even/odd interleaves in place.
+#[cfg(feature = "decode")]
 pub(crate) fn correct_secondary(cw: &mut [u8; TOTAL_CW], mode: u8) -> crate::error::Result<()> {
     let (dlen, eclen) = secondary_lengths(mode);
     let half = eclen / 2;
@@ -147,6 +165,7 @@ pub(crate) fn correct_secondary(cw: &mut [u8; TOTAL_CW], mode: u8) -> crate::err
 
 /// Render the 144 codewords into the module grid (data modules, orientation
 /// modules, light finder region).
+#[cfg(all(feature = "alloc", feature = "encode"))]
 pub(crate) fn render_matrix(cw: &[u8; TOTAL_CW]) -> BitMatrix {
     let mut m = BitMatrix::new(tables::WIDTH, tables::HEIGHT, 1);
     for (row, cells) in tables::MAXI_GRID.iter().enumerate() {
@@ -165,6 +184,7 @@ pub(crate) fn render_matrix(cw: &[u8; TOTAL_CW]) -> BitMatrix {
 }
 
 /// Read the 144 codewords back out of a module grid.
+#[cfg(feature = "decode")]
 pub(crate) fn read_codewords(m: &BitMatrix) -> [u8; TOTAL_CW] {
     let mut cw = [0u8; TOTAL_CW];
     for (row, cells) in tables::MAXI_GRID.iter().enumerate() {

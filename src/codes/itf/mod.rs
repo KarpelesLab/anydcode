@@ -39,26 +39,35 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::traits::Encode;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Module width of a narrow element.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const NARROW: u32 = 1;
 /// Module width of a wide element (zint uses a 3:1 ratio).
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const WIDE: u32 = 3;
 /// Quiet-zone width in narrow modules on each side.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// Two-of-five element widths per digit (5 elements, wide = `WIDE`, narrow = `NARROW`).
@@ -79,7 +88,7 @@ const DIGIT_WIDTHS: [[u32; 5]; 10] = [
 ];
 
 /// Parameters required to re-encode an Interleaved 2 of 5 symbol identically.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ItfMeta {
     /// Whether a trailing mod-10 check digit is present.
     pub check: bool,
@@ -96,7 +105,7 @@ fn mod10(digits: &[u8]) -> u8 {
 }
 
 /// Validate that every byte is an ASCII digit.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("ITF payload is empty"));
@@ -109,17 +118,67 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
 }
 
 /// Interleaved 2 of 5 encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ItfEncoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl ItfEncoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Number of modules [`ItfEncoder::encode_into`] emits for `data_len` payload
+    /// digits, excluding quiet zones (exact).
+    pub const fn max_modules(data_len: usize, meta: &ItfMeta) -> usize {
+        // start (4) + 9 modules per digit + stop (5).
+        4 + 9 * (data_len + meta.check as usize) + 5
+    }
+
+    /// Heap-free encoding: write the symbol for ASCII `digits` under `meta` to `out`.
+    ///
+    /// `digits` must be non-empty ASCII digits whose count (plus the check digit, if
+    /// `meta.check`) is even. The input is validated before the first module is
+    /// written. Size a [`LinearBuf`](crate::output::LinearBuf) with
+    /// [`ItfEncoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        digits: &[u8],
+        meta: &ItfMeta,
+        out: &mut S,
+    ) -> Result<()> {
+        ensure_digits(digits)?;
+        if !(digits.len() + usize::from(meta.check)).is_multiple_of(2) {
+            return Err(Error::invalid_data("ITF requires an even digit count"));
+        }
+        let check = meta.check.then(|| b'0' + mod10(digits));
+        let mut all = digits.iter().copied().chain(check);
+
+        out.begin(QUIET_ZONE)?;
+        // Start pattern: narrow bar, narrow space, narrow bar, narrow space.
+        for _ in 0..2 {
+            push_run(out, true, NARROW)?;
+            push_run(out, false, NARROW)?;
+        }
+        // Interleaved digit pairs: bars from the first digit, spaces from the second.
+        while let (Some(a), Some(b)) = (all.next(), all.next()) {
+            let a = (a - b'0') as usize;
+            let b = (b - b'0') as usize;
+            for (&bar, &space) in DIGIT_WIDTHS[a].iter().zip(&DIGIT_WIDTHS[b]) {
+                push_run(out, true, bar)?;
+                push_run(out, false, space)?;
+            }
+        }
+        // Stop pattern: wide bar, narrow space, narrow bar.
+        push_run(out, true, WIDE)?;
+        push_run(out, false, NARROW)?;
+        push_run(out, true, NARROW)
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl ItfEncoder {
     /// Build a symbol from `digits`, optionally appending a mod-10 check digit.
     ///
     /// Returns [`Error::InvalidData`] if the resulting digit count (including the
@@ -140,10 +199,10 @@ impl ItfEncoder {
     }
 }
 
-/// Append `width` copies of `bar` to `modules`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(core::iter::repeat_n(bar, width as usize));
+/// Append `width` copies of `bar` to `out`.
+#[cfg(feature = "encode")]
+fn push_run(out: &mut impl LinearSink, bar: bool, width: u32) -> Result<()> {
+    out.push_run(bar, width as usize)
 }
 
 #[cfg(all(feature = "alloc", feature = "encode"))]
@@ -158,39 +217,9 @@ impl Encode for ItfEncoder {
             SymbolMeta::Itf(m) => m,
             _ => return Err(Error::invalid_parameter("ITF symbol missing ItfMeta")),
         };
-        let mut digits = symbol.payload_bytes();
-        ensure_digits(&digits)?;
-        if meta.check {
-            digits.push(b'0' + mod10(&digits));
-        }
-        if !digits.len().is_multiple_of(2) {
-            return Err(Error::invalid_data("ITF requires an even digit count"));
-        }
-
-        let mut modules = Vec::new();
-        // Start pattern: narrow bar, narrow space, narrow bar, narrow space.
-        for _ in 0..2 {
-            push_run(&mut modules, true, NARROW);
-            push_run(&mut modules, false, NARROW);
-        }
-        // Interleaved digit pairs: bars from the first digit, spaces from the second.
-        for pair in digits.as_chunks::<2>().0 {
-            let a = (pair[0] - b'0') as usize;
-            let b = (pair[1] - b'0') as usize;
-            for (&bar, &space) in DIGIT_WIDTHS[a].iter().zip(&DIGIT_WIDTHS[b]) {
-                push_run(&mut modules, true, bar);
-                push_run(&mut modules, false, space);
-            }
-        }
-        // Stop pattern: wide bar, narrow space, narrow bar.
-        push_run(&mut modules, true, WIDE);
-        push_run(&mut modules, false, NARROW);
-        push_run(&mut modules, true, NARROW);
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&symbol.payload_bytes(), meta, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 

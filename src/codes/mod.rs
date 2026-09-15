@@ -64,7 +64,7 @@ pub mod code93;
 pub mod dxfilm;
 #[cfg(all(feature = "alloc", feature = "ean"))]
 pub mod ean;
-#[cfg(all(feature = "alloc", feature = "itf"))]
+#[cfg(feature = "itf")]
 pub mod itf;
 #[cfg(all(feature = "alloc", feature = "msi"))]
 pub mod msi;

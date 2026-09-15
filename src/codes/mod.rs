@@ -56,7 +56,7 @@ pub mod codabar;
 pub mod code11;
 #[cfg(all(feature = "alloc", feature = "code128"))]
 pub mod code128;
-#[cfg(all(feature = "alloc", feature = "code39"))]
+#[cfg(feature = "code39")]
 pub mod code39;
 #[cfg(all(feature = "alloc", feature = "code93"))]
 pub mod code93;

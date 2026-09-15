@@ -23,7 +23,7 @@ if [ "$#" -eq 0 ]; then
   done
 fi
 for c in "${CODES[@]}"; do
-  for f in "$c" "$c,alloc" "$c,alloc,encode" "$c,decode" "$c,alloc,encode,decode" "$c,scan"; do
+  for f in "$c" "$c,encode" "$c,alloc" "$c,alloc,encode" "$c,decode" "$c,alloc,encode,decode" "$c,scan"; do
     check "$f"
   done
 done

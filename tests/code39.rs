@@ -129,3 +129,40 @@ fn corrupt_check_is_rejected() {
         .decode(&encoding);
     assert!(result.is_err());
 }
+
+/// The heap-free `encode_into` path writes exactly the modules `Encode` returns.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::codes::code39::Code39Meta;
+    use anyd::output::LinearBuf;
+    let enc = Code39Encoder::new();
+    for (data, full_ascii) in [
+        (&b"CODE39"[..], false),
+        (b"", false),
+        (b"HELLO-WORLD 123 $/+%", false),
+        (b"Hello, World!\x00\x7f", true),
+    ] {
+        for check_digit in [false, true] {
+            let symbol = enc.build(data, full_ascii, check_digit).unwrap();
+            let Encoding::Linear(expected) = enc.encode(&symbol).unwrap() else {
+                panic!("Code 39 encodes to a linear pattern");
+            };
+            let meta = Code39Meta {
+                full_ascii,
+                check_digit,
+            };
+            let mut storage = [0u8; 128];
+            let mut buf = LinearBuf::new(&mut storage);
+            enc.encode_into(data, &meta, &mut buf).unwrap();
+            assert_eq!(buf, expected);
+            assert!(buf.len() <= Code39Encoder::max_modules(data.len(), &meta));
+            if !full_ascii {
+                assert_eq!(buf.len(), Code39Encoder::max_modules(data.len(), &meta));
+            }
+            // Too-small storage reports a capacity error instead of panicking.
+            let mut tiny = [0u8; 2];
+            let err = enc.encode_into(data, &meta, &mut LinearBuf::new(&mut tiny));
+            assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+}

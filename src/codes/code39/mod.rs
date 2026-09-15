@@ -33,11 +33,17 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
@@ -47,10 +53,13 @@ use crate::traits::Encode;
 use alloc::format;
 #[cfg(feature = "decode")]
 use alloc::string::String;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Quiet-zone margin, in narrow modules, emitted on each side of the pattern.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// The 43 data characters in value order (`value == index`), each with its 12-module
@@ -105,13 +114,13 @@ const TABLE: [(u8, &str); 43] = [
 const START_STOP: &str = "100101101101";
 
 /// The value (0..=42) of a base Code 39 character, or `None` if outside the set.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn char_value(b: u8) -> Option<u8> {
     TABLE.iter().position(|&(c, _)| c == b).map(|i| i as u8)
 }
 
 /// A shift pair or self-mapping character in the full-ASCII scheme.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fa {
     /// A byte that maps to a single base character (the byte itself).
@@ -122,7 +131,7 @@ enum Fa {
 
 /// Full-ASCII Code 39 encoding of a byte (the canonical scheme). Returns `None` for
 /// bytes `>= 128`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn fa_encode(b: u8) -> Option<Fa> {
     let pair = match b {
         0 => (b'%', b'U'),
@@ -207,7 +216,7 @@ fn is_shift(b: u8) -> bool {
 }
 
 /// Parameters required to re-encode a Code 39 symbol identically (lossless round-trip).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Code39Meta {
     /// Whether the payload was encoded with the full-ASCII extension.
     pub full_ascii: bool,
@@ -216,17 +225,88 @@ pub struct Code39Meta {
 }
 
 /// Code 39 encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code39Encoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl Code39Encoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Number of modules [`Code39Encoder::encode_into`] emits for `data_len` payload
+    /// bytes, excluding quiet zones: an upper bound when `full_ascii` is on (bytes
+    /// that need a shift pair take two characters).
+    pub const fn max_modules(data_len: usize, meta: &Code39Meta) -> usize {
+        let chars = if meta.full_ascii {
+            2 * data_len
+        } else {
+            data_len
+        };
+        (chars + meta.check_digit as usize + 2) * 13 - 1
+    }
+
+    /// Heap-free encoding: write the symbol for `data` under `meta` to `out`.
+    ///
+    /// Without full-ASCII every byte must be one of the 43 base characters; with it,
+    /// every byte must be ASCII. The input is validated before the first module is
+    /// written. Size a [`LinearBuf`](crate::output::LinearBuf) with
+    /// [`Code39Encoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        data: &[u8],
+        meta: &Code39Meta,
+        out: &mut S,
+    ) -> Result<()> {
+        let valid = if meta.full_ascii {
+            data.iter().all(|&b| b < 128)
+        } else {
+            data.iter().all(|&b| char_value(b).is_some())
+        };
+        if !valid {
+            return Err(Error::invalid_data(if meta.full_ascii {
+                "byte is not representable in Code 39"
+            } else {
+                "byte is not a Code 39 character"
+            }));
+        }
+
+        // Emit: * gap v gap v ... gap *
+        out.begin(QUIET_ZONE)?;
+        push_pattern(out, START_STOP)?;
+        let mut sum = 0u32;
+        let mut emit = |out: &mut S, c: u8| -> Result<()> {
+            let v = char_value(c).expect("validated Code 39 character");
+            sum += u32::from(v);
+            out.push(false)?;
+            push_pattern(out, TABLE[v as usize].1)
+        };
+        for &b in data {
+            if meta.full_ascii {
+                match fa_encode(b).expect("validated ASCII byte") {
+                    Fa::Single(c) => emit(out, c)?,
+                    Fa::Pair(p, l) => {
+                        emit(out, p)?;
+                        emit(out, l)?;
+                    }
+                }
+            } else {
+                emit(out, b)?;
+            }
+        }
+        if meta.check_digit {
+            out.push(false)?;
+            push_pattern(out, TABLE[(sum % 43) as usize].1)?;
+        }
+        out.push(false)?;
+        push_pattern(out, START_STOP)
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl Code39Encoder {
     /// Build a reproducible [`Symbol`] from raw `data`.
     ///
     /// When `full_ascii` is `false`, every byte must be one of the 43 base characters;
@@ -277,57 +357,9 @@ impl Encode for Code39Encoder {
                 ));
             }
         };
-        let data = symbol.payload_bytes();
-
-        // Expand the payload to base-character values.
-        let mut values: Vec<u8> = Vec::new();
-        if meta.full_ascii {
-            for &b in &data {
-                match fa_encode(b) {
-                    Some(Fa::Single(c)) => values.push(char_value(c).unwrap()),
-                    Some(Fa::Pair(p, l)) => {
-                        values.push(char_value(p).unwrap());
-                        values.push(char_value(l).unwrap());
-                    }
-                    None => {
-                        return Err(Error::invalid_data(format!(
-                            "byte {b:#04x} is not representable in Code 39"
-                        )));
-                    }
-                }
-            }
-        } else {
-            for &b in &data {
-                match char_value(b) {
-                    Some(v) => values.push(v),
-                    None => {
-                        return Err(Error::invalid_data(format!(
-                            "byte {b:#04x} is not a Code 39 character"
-                        )));
-                    }
-                }
-            }
-        }
-
-        if meta.check_digit {
-            let sum: u32 = values.iter().map(|&v| v as u32).sum();
-            values.push((sum % 43) as u8);
-        }
-
-        // Emit: * gap v gap v ... gap *
-        let mut modules: Vec<bool> = Vec::new();
-        push_pattern(&mut modules, START_STOP);
-        for &v in &values {
-            modules.push(false);
-            push_pattern(&mut modules, TABLE[v as usize].1);
-        }
-        modules.push(false);
-        push_pattern(&mut modules, START_STOP);
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&symbol.payload_bytes(), meta, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 
@@ -458,9 +490,9 @@ fn collapse_full_ascii(base: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
-    out.extend(pattern.bytes().map(|b| b == b'1'));
+#[cfg(feature = "encode")]
+fn push_pattern(out: &mut impl LinearSink, pattern: &str) -> Result<()> {
+    pattern.bytes().try_for_each(|b| out.push(b == b'1'))
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.

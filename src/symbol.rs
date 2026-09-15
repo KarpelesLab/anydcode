@@ -159,6 +159,6 @@ impl Symbol {
     /// The ordered list of data modes used, ignoring control segments. Handy for tests
     /// and diagnostics.
     pub fn modes(&self) -> Vec<Mode> {
-        self.segments.iter().map(|s| s.mode.clone()).collect()
+        self.segments.iter().map(|s| s.mode).collect()
     }
 }

@@ -104,9 +104,9 @@ pub use error::{Error, Result};
 pub use image::GrayFrame;
 #[cfg(feature = "alloc")]
 pub use image::GrayImage;
-pub use segment::Mode;
 #[cfg(feature = "alloc")]
 pub use segment::Segment;
+pub use segment::{Mode, SegmentView};
 #[cfg(feature = "alloc")]
 pub use symbol::{Symbol, SymbolMeta};
 pub use symbology::{Dimension, Symbology};

@@ -14,7 +14,7 @@ use alloc::{vec, vec::Vec};
 /// Not every mode applies to every symbology; encoders reject modes they cannot
 /// represent. The set is a superset chosen to cover the roadmap in
 /// [`crate::Symbology`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Digits `0-9`, packed densely (QR: 3 digits / 10 bits).
     Numeric,
@@ -33,6 +33,59 @@ impl Mode {
     /// Whether this mode carries payload bytes (as opposed to being a control switch).
     pub fn is_data(&self) -> bool {
         !matches!(self, Mode::Eci(_))
+    }
+}
+
+/// A borrowed, mode-tagged payload piece: the heap-free counterpart of [`Segment`]
+/// accepted by the `encode_into` encoders. Data interpretation per mode is the same
+/// as for [`Segment::data`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentView<'a> {
+    /// How `data` is encoded.
+    pub mode: Mode,
+    /// The raw payload for this segment.
+    pub data: &'a [u8],
+}
+
+impl<'a> SegmentView<'a> {
+    /// A numeric segment from ASCII digits.
+    pub const fn numeric(digits: &'a [u8]) -> Self {
+        SegmentView {
+            mode: Mode::Numeric,
+            data: digits,
+        }
+    }
+
+    /// An alphanumeric segment.
+    pub const fn alphanumeric(data: &'a [u8]) -> Self {
+        SegmentView {
+            mode: Mode::Alphanumeric,
+            data,
+        }
+    }
+
+    /// A raw byte segment.
+    pub const fn byte(data: &'a [u8]) -> Self {
+        SegmentView {
+            mode: Mode::Byte,
+            data,
+        }
+    }
+
+    /// A Kanji (Shift-JIS) segment.
+    pub const fn kanji(data: &'a [u8]) -> Self {
+        SegmentView {
+            mode: Mode::Kanji,
+            data,
+        }
+    }
+
+    /// An ECI mode switch (no payload).
+    pub const fn eci(assignment: u32) -> Self {
+        SegmentView {
+            mode: Mode::Eci(assignment),
+            data: &[],
+        }
     }
 }
 
@@ -152,7 +205,7 @@ pub fn optimize_segments(data: &[u8], costs: &[ModeCost]) -> Option<Vec<Segment>
     for i in 1..=data.len() {
         if i == data.len() || tags[i] != tags[start] {
             out.push(Segment {
-                mode: costs[tags[start] as usize].mode.clone(),
+                mode: costs[tags[start] as usize].mode,
                 data: data[start..i].to_vec(),
             });
             start = i;
@@ -163,6 +216,14 @@ pub fn optimize_segments(data: &[u8], costs: &[ModeCost]) -> Option<Vec<Segment>
 
 #[cfg(feature = "alloc")]
 impl Segment {
+    /// Borrow this segment as a [`SegmentView`].
+    pub fn view(&self) -> SegmentView<'_> {
+        SegmentView {
+            mode: self.mode,
+            data: &self.data,
+        }
+    }
+
     /// A numeric segment from ASCII digits.
     pub fn numeric(digits: impl Into<Vec<u8>>) -> Self {
         Segment {

@@ -24,28 +24,39 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::traits::Encode;
-#[cfg(all(feature = "alloc", feature = "encode"))]
-use alloc::format;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Module width of a narrow element.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-const NARROW: u32 = 1;
+#[cfg(feature = "encode")]
+const NARROW: usize = 1;
 /// Module width of a wide element.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-const WIDE: u32 = 3;
+#[cfg(feature = "encode")]
+const WIDE: usize = 3;
+/// Modules in the widest character: every Codabar character has at most three wide
+/// elements among its seven.
+#[cfg(feature = "encode")]
+const MAX_CHAR_MODULES: usize = 4 * NARROW + 3 * WIDE;
 /// Quiet-zone width in narrow modules on each side.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// Data + start/stop alphabet, index-aligned with [`ENCODINGS`].
@@ -61,7 +72,7 @@ const ENCODINGS: [u8; 20] = [
 ];
 
 /// Parameters required to re-encode a Codabar symbol identically.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodabarMeta {
     /// Start character, one of `A B C D`.
     pub start: u8,
@@ -78,12 +89,10 @@ impl Default for CodabarMeta {
     }
 }
 
-/// The index of `c` in [`ALPHABET`], or an error.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn index_of(c: u8) -> Result<usize> {
-    ALPHABET.iter().position(|&a| a == c).ok_or_else(|| {
-        Error::invalid_data(format!("character {:?} is not valid in Codabar", c as char))
-    })
+/// The index of `c` in [`ALPHABET`], if present.
+#[cfg(feature = "encode")]
+fn index_of(c: u8) -> Option<usize> {
+    ALPHABET.iter().position(|&a| a == c)
 }
 
 /// Whether `c` is a valid start/stop character.
@@ -97,17 +106,58 @@ fn is_data(c: u8) -> bool {
 }
 
 /// Codabar encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CodabarEncoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl CodabarEncoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Upper bound on the modules [`CodabarEncoder::encode_into`] emits for
+    /// `data_len` payload characters, excluding quiet zones (the exact width depends
+    /// on how many wide elements each character has).
+    pub const fn max_modules(data_len: usize) -> usize {
+        (data_len + 2) * (MAX_CHAR_MODULES + 1) - 1
+    }
+
+    /// Heap-free encoding: write `meta.start`, `data`, `meta.stop` to `out`.
+    ///
+    /// `meta.start`/`meta.stop` must be one of `A B C D` and every data byte one of
+    /// `0-9 - $ : / . +`. The input is validated before the first module is written.
+    /// Size a [`LinearBuf`](crate::output::LinearBuf) with
+    /// [`CodabarEncoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        data: &[u8],
+        meta: &CodabarMeta,
+        out: &mut S,
+    ) -> Result<()> {
+        if !is_guard(meta.start) || !is_guard(meta.stop) {
+            return Err(Error::invalid_data(
+                "Codabar start/stop must be A, B, C or D",
+            ));
+        }
+        if !data.iter().all(|&c| is_data(c)) {
+            return Err(Error::invalid_data("invalid Codabar data character"));
+        }
+
+        out.begin(QUIET_ZONE)?;
+        push_char(out, meta.start)?;
+        for &c in data {
+            out.push(false)?; // narrow inter-character gap
+            push_char(out, c)?;
+        }
+        out.push(false)?;
+        push_char(out, meta.stop)
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl CodabarEncoder {
     /// Build a symbol from `data` framed by `start`/`stop` (each one of `A B C D`).
     pub fn build(&self, start: u8, data: &[u8], stop: u8) -> Result<Symbol> {
         if !is_guard(start) || !is_guard(stop) {
@@ -126,15 +176,14 @@ impl CodabarEncoder {
     }
 }
 
-/// Append the seven elements of `c` to `modules`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_char(modules: &mut Vec<bool>, c: u8) -> Result<()> {
-    let value = ENCODINGS[index_of(c)?];
+/// Append the seven elements of the (validated) character `c` to `out`.
+#[cfg(feature = "encode")]
+fn push_char(out: &mut impl LinearSink, c: u8) -> Result<()> {
+    let value = ENCODINGS[index_of(c).expect("validated Codabar character")];
     for i in 0..7 {
         let wide = (value >> (6 - i)) & 1 == 1;
         let width = if wide { WIDE } else { NARROW };
-        let bar = i % 2 == 0;
-        modules.extend(core::iter::repeat_n(bar, width as usize));
+        out.push_run(i % 2 == 0, width)?;
     }
     Ok(())
 }
@@ -155,25 +204,9 @@ impl Encode for CodabarEncoder {
                 ));
             }
         };
-        let data = symbol.payload_bytes();
-
-        let mut chars = Vec::with_capacity(data.len() + 2);
-        chars.push(meta.start);
-        chars.extend_from_slice(&data);
-        chars.push(meta.stop);
-
-        let mut modules = Vec::new();
-        for (i, &c) in chars.iter().enumerate() {
-            if i > 0 {
-                modules.push(false); // narrow inter-character gap
-            }
-            push_char(&mut modules, c)?;
-        }
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&symbol.payload_bytes(), meta, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 

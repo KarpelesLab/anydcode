@@ -50,7 +50,7 @@ pub mod code49;
 pub mod pdf417;
 
 // 1D linear families.
-#[cfg(all(feature = "alloc", feature = "codabar"))]
+#[cfg(feature = "codabar")]
 pub mod codabar;
 #[cfg(feature = "code11")]
 pub mod code11;

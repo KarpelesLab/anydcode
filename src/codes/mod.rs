@@ -68,7 +68,7 @@ pub mod ean;
 pub mod itf;
 #[cfg(feature = "msi")]
 pub mod msi;
-#[cfg(all(feature = "alloc", feature = "pharmacode"))]
+#[cfg(feature = "pharmacode")]
 pub mod pharmacode;
 #[cfg(feature = "telepen")]
 pub mod telepen;

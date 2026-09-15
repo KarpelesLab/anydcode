@@ -34,25 +34,38 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::traits::Encode;
+#[cfg(feature = "alloc")]
 use alloc::string::ToString;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Module width of a thick (one-track) bar.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-const WIDE: u32 = 3;
+#[cfg(feature = "encode")]
+const WIDE: u8 = 3;
 /// Quiet-zone width in narrow modules on each side.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
+/// Most bars in a symbol of either variant: 131070 is sixteen thick one-track bars
+/// and 64570080 sixteen full two-track bars.
+#[cfg(feature = "encode")]
+const MAX_BARS: usize = 16;
 
 /// Inclusive value range of one-track Pharmacode.
 const ONE_TRACK_RANGE: core::ops::RangeInclusive<u32> = 3..=131070;
@@ -62,7 +75,7 @@ const TWO_TRACK_RANGE: core::ops::RangeInclusive<u32> = 4..=64570080;
 /// Parameters required to re-encode a Pharmacode symbol identically. The value lives
 /// in the numeric segment and the track count in [`Symbol::symbology`]; no extra state
 /// is needed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PharmacodeMeta;
 
 /// Parse the numeric payload as a `u32`.
@@ -74,23 +87,47 @@ fn parse_value(payload: &[u8]) -> Result<u32> {
         .map_err(|_| Error::invalid_data("Pharmacode payload is not an integer"))
 }
 
-/// Append `width` copies of `bar` to `modules`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(core::iter::repeat_n(bar, width as usize));
+/// Left-to-right bar widths of one symbol, stored inline.
+#[cfg(feature = "encode")]
+struct Bars {
+    /// Widths filled from the right: the bars are `widths[MAX_BARS - len..]`.
+    widths: [u8; MAX_BARS],
+    len: usize,
+}
+
+#[cfg(feature = "encode")]
+impl Bars {
+    /// Build from bijective numeral digits produced least-significant first.
+    ///
+    /// # Panics
+    /// If more than [`MAX_BARS`] digits are produced (values are range-checked first).
+    fn from_lsb_first(mut next_digit: impl FnMut() -> Option<u8>) -> Self {
+        let mut bars = Bars {
+            widths: [0; MAX_BARS],
+            len: 0,
+        };
+        while let Some(d) = next_digit() {
+            bars.len += 1;
+            bars.widths[MAX_BARS - bars.len] = d;
+        }
+        bars
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.widths[MAX_BARS - self.len..]
+    }
 }
 
 /// Render a left-to-right sequence of bar widths, joined by single-module spaces.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn render_bars(bar_widths: &[u32]) -> Vec<bool> {
-    let mut modules = Vec::new();
+#[cfg(feature = "encode")]
+fn render_bars(out: &mut impl LinearSink, bar_widths: &[u8]) -> Result<()> {
     for (i, &w) in bar_widths.iter().enumerate() {
         if i > 0 {
-            push_run(&mut modules, false, 1);
+            out.push(false)?;
         }
-        push_run(&mut modules, true, w);
+        out.push_run(true, w as usize)?;
     }
-    modules
+    Ok(())
 }
 
 /// Run-length encode into element widths, and return only the bar widths (the
@@ -128,20 +165,19 @@ fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
 // ---------- one-track ----------
 
 /// Left-to-right bar widths for a one-track value (thin = 1, thick = `WIDE`).
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn one_track_bars(mut n: u32) -> Vec<u32> {
-    let mut bars = Vec::new(); // least-significant first
-    while n > 0 {
-        if n % 2 == 1 {
-            bars.push(1); // thin, value 1
+#[cfg(feature = "encode")]
+fn one_track_bars(mut n: u32) -> Bars {
+    Bars::from_lsb_first(|| {
+        if n == 0 {
+            None
+        } else if n % 2 == 1 {
             n = (n - 1) / 2;
+            Some(1) // thin, value 1
         } else {
-            bars.push(WIDE); // thick, value 2
             n = (n - 2) / 2;
+            Some(WIDE) // thick, value 2
         }
-    }
-    bars.reverse(); // most-significant (leftmost) first
-    bars
+    })
 }
 
 /// Recover a one-track value from its left-to-right bar widths.
@@ -165,21 +201,21 @@ fn one_track_value(bars: &[u32]) -> Result<u32> {
 // ---------- two-track ----------
 
 /// Left-to-right ternary digits (bar widths 1/2/3) for a two-track value.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn two_track_bars(mut n: u32) -> Vec<u32> {
-    let mut digits = Vec::new();
-    while n > 0 {
+#[cfg(feature = "encode")]
+fn two_track_bars(mut n: u32) -> Bars {
+    Bars::from_lsb_first(|| {
+        if n == 0 {
+            return None;
+        }
         let r = n % 3;
         if r == 0 {
-            digits.push(3);
             n = n / 3 - 1;
+            Some(3)
         } else {
-            digits.push(r);
             n /= 3;
+            Some(r as u8)
         }
-    }
-    digits.reverse();
-    digits
+    })
 }
 
 /// Recover a two-track value from its left-to-right bar widths (1/2/3).
@@ -199,17 +235,60 @@ fn two_track_value(bars: &[u32]) -> Result<u32> {
 }
 
 /// Pharmacode encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PharmacodeEncoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl PharmacodeEncoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Upper bound on the modules [`PharmacodeEncoder::encode_into`] emits for
+    /// `symbology`, excluding quiet zones: sixteen bars of width 3 joined by fifteen
+    /// single-module spaces, the widest value of either variant.
+    pub const fn max_modules(symbology: Symbology) -> usize {
+        match symbology {
+            Symbology::Pharmacode | Symbology::PharmacodeTwoTrack => MAX_BARS * 3 + (MAX_BARS - 1),
+            _ => 0,
+        }
+    }
+
+    /// Heap-free encoding: write `value` as `symbology` ([`Symbology::Pharmacode`],
+    /// `3..=131070`, or [`Symbology::PharmacodeTwoTrack`], `4..=64570080`) to `out`.
+    ///
+    /// The value is range-checked before the first module is written. Size a
+    /// [`LinearBuf`](crate::output::LinearBuf) with [`PharmacodeEncoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        symbology: Symbology,
+        value: u32,
+        out: &mut S,
+    ) -> Result<()> {
+        let bars = match symbology {
+            Symbology::Pharmacode => {
+                if !ONE_TRACK_RANGE.contains(&value) {
+                    return Err(Error::capacity("one-track Pharmacode value out of range"));
+                }
+                one_track_bars(value)
+            }
+            Symbology::PharmacodeTwoTrack => {
+                if !TWO_TRACK_RANGE.contains(&value) {
+                    return Err(Error::capacity("two-track Pharmacode value out of range"));
+                }
+                two_track_bars(value)
+            }
+            _ => return Err(Error::invalid_parameter("not a Pharmacode symbology")),
+        };
+        out.begin(QUIET_ZONE)?;
+        render_bars(out, bars.as_slice())
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl PharmacodeEncoder {
     /// Build a one-track symbol for `value` (`3..=131070`).
     pub fn build(&self, value: u32) -> Result<Symbol> {
         if !ONE_TRACK_RANGE.contains(&value) {
@@ -243,30 +322,14 @@ impl PharmacodeEncoder {
 impl Encode for PharmacodeEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let value = parse_value(&symbol.payload_bytes())?;
-        let bars = match symbol.symbology {
-            Symbology::Pharmacode => {
-                if !ONE_TRACK_RANGE.contains(&value) {
-                    return Err(Error::capacity("one-track Pharmacode value out of range"));
-                }
-                one_track_bars(value)
-            }
-            Symbology::PharmacodeTwoTrack => {
-                if !TWO_TRACK_RANGE.contains(&value) {
-                    return Err(Error::capacity("two-track Pharmacode value out of range"));
-                }
-                two_track_bars(value)
-            }
-            _ => return Err(Error::invalid_parameter("not a Pharmacode symbology")),
-        };
         if !matches!(symbol.meta, SymbolMeta::Pharmacode(_)) {
             return Err(Error::invalid_parameter(
                 "Pharmacode symbol missing PharmacodeMeta",
             ));
         }
-        Ok(Encoding::Linear(LinearPattern {
-            modules: render_bars(&bars),
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(symbol.symbology, value, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 
@@ -333,14 +396,14 @@ mod tests {
     #[test]
     fn one_track_bounds() {
         // Documented bounds: 3 = two thin bars, 131070 = sixteen thick bars.
-        assert_eq!(one_track_bars(3), vec![1, 1]);
-        assert_eq!(one_track_bars(131070), vec![WIDE; 16]);
+        assert_eq!(one_track_bars(3).as_slice(), [1, 1]);
+        assert_eq!(one_track_bars(131070).as_slice(), [WIDE; 16]);
     }
 
     #[test]
     fn two_track_bounds() {
-        assert_eq!(two_track_bars(4), vec![1, 1]);
-        assert_eq!(two_track_bars(64570080), vec![3; 16]);
+        assert_eq!(two_track_bars(4).as_slice(), [1, 1]);
+        assert_eq!(two_track_bars(64570080).as_slice(), [3; 16]);
     }
 
     #[test]

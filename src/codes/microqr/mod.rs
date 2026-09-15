@@ -9,7 +9,7 @@
 //! Layout mirrors the QR module:
 //! - `tables`  — per-version codeword/EC counts, field-width tables, format BCH.
 //! - `matrix`  — module placement, edge timing, masking and format information.
-//! - `encode`  — [`Symbol`] → [`BitMatrix`].
+//! - `encode`  — segments → module grid (heap-free), and [`Symbol`] → [`BitMatrix`].
 //! - `decode`  — [`BitMatrix`] → [`Symbol`].
 //!
 //! [`Symbol`]: crate::Symbol
@@ -24,7 +24,7 @@
 
 #[cfg(feature = "decode")]
 mod decode;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod matrix;
@@ -35,7 +35,7 @@ mod tables;
 
 #[cfg(feature = "decode")]
 pub use decode::MicroQrDecoder;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 pub use encode::MicroQrEncoder;
 #[cfg(feature = "scan")]
 pub use sample::scan;
@@ -123,7 +123,7 @@ impl MicroMask {
 }
 
 /// Micro QR-specific parameters needed to re-encode a symbol identically.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MicroQrMeta {
     /// Symbol version (size).
     pub version: MicroVersion,

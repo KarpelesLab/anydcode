@@ -49,7 +49,7 @@ fn assert_matrix(enc: &Encoding, size: usize, flat: &str) {
 
 /// Encode against a reference bitmap, then assert full round-trip identity.
 fn check(seg: Segment, m: MicroQrMeta, size: usize, flat: &str) {
-    let sym = symbol(seg, m.clone());
+    let sym = symbol(seg, m);
     let enc = MicroQrEncoder::new().encode(&sym).unwrap();
     assert_matrix(&enc, size, flat);
 
@@ -293,4 +293,91 @@ fn build_text_mixed_splits() {
     let encoding = enc.encode(&sym).unwrap();
     let decoded = MicroQrDecoder::new().decode(&encoding).unwrap();
     assert_eq!(decoded.segments, sym.segments);
+}
+
+/// The heap-free `encode_into` path reproduces `build` + `Encode` exactly, both with
+/// pinned parameters and when choosing version and mask itself.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::output::BitMatrix;
+    use anyd::segment::SegmentView;
+
+    let enc = MicroQrEncoder::new();
+    let mut storage = [0u8; MicroQrEncoder::MAX_BUFFER_LEN];
+    for text in [
+        "",
+        "7",
+        "01234567",
+        "HELLO WORLD",
+        "Micro QR!",
+        "0123456789012345678901234567890123",
+    ] {
+        for level in [
+            MicroEcLevel::Detection,
+            MicroEcLevel::L,
+            MicroEcLevel::M,
+            MicroEcLevel::Q,
+        ] {
+            let Ok(symbol) = enc.build_text(text, level) else {
+                continue;
+            };
+            let Encoding::Matrix(expected) = enc.encode(&symbol).unwrap() else {
+                panic!("Micro QR encodes to a matrix");
+            };
+            let SymbolMeta::MicroQr(meta) = symbol.meta else {
+                panic!("Micro QR meta")
+            };
+            let views: Vec<SegmentView<'_>> = symbol.segments.iter().map(|s| s.view()).collect();
+
+            let (grid, pinned) = enc
+                .encode_into(
+                    &views,
+                    level,
+                    Some(meta.version),
+                    Some(meta.mask),
+                    &mut storage,
+                )
+                .unwrap();
+            assert_eq!(grid, expected);
+            assert_eq!(pinned, meta);
+
+            let (grid, auto) = enc
+                .encode_into(&views, level, None, None, &mut storage)
+                .unwrap();
+            assert_eq!(grid, expected);
+            assert_eq!(auto, meta);
+
+            let len = MicroQrEncoder::buffer_len(meta.version);
+            assert!(
+                enc.encode_into(&views, level, None, None, &mut storage[..len])
+                    .is_ok()
+            );
+            let err = enc.encode_into(&views, level, None, None, &mut storage[..len - 1]);
+            assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+
+    // Unsupported version/level pairs and oversized data are errors, not panics.
+    let digits = [SegmentView::numeric(b"123")];
+    let err = enc.encode_into(
+        &digits,
+        MicroEcLevel::Q,
+        Some(MicroVersion::M2),
+        None,
+        &mut storage,
+    );
+    assert!(matches!(err, Err(anyd::Error::InvalidParameter { .. })));
+    let long = [SegmentView::byte(&[b'x'; 40])];
+    let err = enc.encode_into(&long, MicroEcLevel::L, None, None, &mut storage);
+    assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+
+    // Single-mode convenience round-trips through the decoder.
+    let (grid, meta) = enc
+        .encode_text_into(b"HELLO", MicroEcLevel::L, &mut storage)
+        .unwrap();
+    let decoded = MicroQrDecoder::new()
+        .decode(&Encoding::Matrix(BitMatrix::from(&grid)))
+        .unwrap();
+    assert_eq!(decoded.text().as_deref(), Some("HELLO"));
+    assert_eq!(decoded.meta, SymbolMeta::MicroQr(meta));
 }

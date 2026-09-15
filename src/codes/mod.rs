@@ -22,15 +22,14 @@ pub mod gridmatrix;
 pub mod hanxin;
 #[cfg(all(feature = "alloc", feature = "maxicode"))]
 pub mod maxicode;
-#[cfg(all(feature = "alloc", feature = "microqr"))]
+#[cfg(feature = "microqr")]
 pub mod microqr;
 #[cfg(feature = "qr")]
 pub mod qr;
 /// QR's GF(256) Reed–Solomon alone, for Micro QR / rMQR builds without QR itself.
 #[cfg(all(
-    feature = "alloc",
     not(feature = "qr"),
-    any(feature = "microqr", feature = "rmqr")
+    any(feature = "microqr", all(feature = "alloc", feature = "rmqr"))
 ))]
 pub(crate) mod qr {
     #[allow(dead_code)]

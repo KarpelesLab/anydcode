@@ -7,126 +7,100 @@
 
 use super::tables::{decode_format, format_bits};
 use super::{MicroMask, MicroVersion};
+#[cfg(feature = "alloc")]
 use crate::output::BitMatrix;
-use alloc::{vec, vec::Vec};
+use crate::output::MatrixBuf;
 
 /// Quiet-zone width required around a Micro QR symbol, in modules (ISO/IEC 18004
 /// specifies 2 for Micro QR).
 pub const QUIET_ZONE: usize = 2;
 
-/// A square module grid plus a parallel map of reserved (function-pattern) cells.
-pub struct Canvas {
+/// A square Micro QR module grid over a bit-packed [`MatrixBuf`]. Which cells are
+/// function patterns is computed ([`is_function_module`]), not stored.
+pub struct Canvas<'a> {
     size: usize,
-    /// `true` = dark module.
-    dark: Vec<bool>,
-    /// `true` = function-pattern / reserved cell (not part of the data stream).
-    reserved: Vec<bool>,
+    grid: MatrixBuf<'a>,
 }
 
-impl Canvas {
-    /// Build a canvas for `version` with all function patterns placed and reserved,
+impl<'a> Canvas<'a> {
+    /// Bytes of storage a canvas for `version` needs.
+    pub const fn storage_len(version: MicroVersion) -> usize {
+        let size = 11 + 2 * version as usize; // M1 = 0 … M4 = 3
+        MatrixBuf::bytes_for(size, size)
+    }
+
+    /// Build a canvas for `version` over `storage` with all function patterns placed,
     /// but no data or format bits yet.
-    pub fn new(version: MicroVersion) -> Self {
+    ///
+    /// # Errors
+    /// [`crate::Error::Capacity`] if `storage` is shorter than [`Canvas::storage_len`].
+    pub fn new(version: MicroVersion, storage: &'a mut [u8]) -> crate::Result<Self> {
         let size = version.size();
-        let mut c = Canvas {
-            size,
-            dark: vec![false; size * size],
-            reserved: vec![false; size * size],
-        };
+        let grid = MatrixBuf::new(storage, size, size, QUIET_ZONE)?;
+        let mut c = Canvas { size, grid };
         c.place_finder();
         c.place_timing();
-        c.reserve_format();
-        c
+        Ok(c)
     }
 
     /// Rebuild a canvas from an already-sampled matrix of the given version.
-    pub fn from_matrix(version: MicroVersion, matrix: &BitMatrix) -> Self {
-        let mut c = Canvas::new(version);
-        for y in 0..c.size {
-            for x in 0..c.size {
-                c.dark[y * c.size + x] = matrix.get(x, y);
+    #[cfg(feature = "alloc")]
+    pub fn from_matrix(
+        version: MicroVersion,
+        matrix: &BitMatrix,
+        storage: &'a mut [u8],
+    ) -> crate::Result<Self> {
+        let size = version.size();
+        let mut grid = MatrixBuf::new(storage, size, size, QUIET_ZONE)?;
+        for y in 0..size {
+            for x in 0..size {
+                if matrix.get(x, y) {
+                    grid.set(x, y, true);
+                }
             }
         }
-        c
-    }
-
-    fn idx(&self, x: usize, y: usize) -> usize {
-        y * self.size + x
+        Ok(Canvas { size, grid })
     }
 
     /// Module value at `(x, y)`.
     pub fn get(&self, x: usize, y: usize) -> bool {
-        self.dark[self.idx(x, y)]
+        self.grid.get(x, y)
     }
 
-    fn set(&mut self, x: usize, y: usize, dark: bool) {
-        let i = self.idx(x, y);
-        self.dark[i] = dark;
-    }
-
-    fn set_fn(&mut self, x: usize, y: usize, dark: bool) {
-        let i = self.idx(x, y);
-        self.dark[i] = dark;
-        self.reserved[i] = true;
-    }
-
-    fn reserve(&mut self, x: usize, y: usize) {
-        let i = self.idx(x, y);
-        self.reserved[i] = true;
+    /// The finished module grid.
+    pub fn into_grid(self) -> MatrixBuf<'a> {
+        self.grid
     }
 
     fn place_finder(&mut self) {
-        // 7x7 finder at the top-left corner.
+        // 7x7 finder at the top-left corner; its separator is light, as a fresh grid.
         for dy in 0..7 {
             for dx in 0..7 {
                 let ring = dx == 0 || dx == 6 || dy == 0 || dy == 6;
                 let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
-                self.set_fn(dx, dy, ring || core);
+                self.grid.set(dx, dy, ring || core);
             }
-        }
-        // Separator: light L on the inner edges (column 7 rows 0..7, row 7 cols 0..7).
-        for i in 0..8 {
-            self.set_fn(7, i, false);
-            self.set_fn(i, 7, false);
         }
     }
 
     fn place_timing(&mut self) {
         // Horizontal timing along the top row, vertical along the left column.
-        for i in 8..self.size {
-            self.set_fn(i, 0, i % 2 == 0);
-            self.set_fn(0, i, i % 2 == 0);
-        }
-    }
-
-    fn reserve_format(&mut self) {
-        for i in 1..=8 {
-            self.reserve(8, i); // vertical strip, column 8
-            self.reserve(i, 8); // horizontal strip, row 8
+        for i in (8..self.size).step_by(2) {
+            self.grid.set(i, 0, true);
+            self.grid.set(0, i, true);
         }
     }
 
     /// The ordered `(x, y)` data-module coordinates: two columns at a time from the
     /// right, zig-zagging up then down. No interior timing column to skip.
-    pub fn data_path(&self) -> Vec<(usize, usize)> {
-        let s = self.size;
-        let mut path = Vec::new();
-        let mut upward = true;
-        let mut col = s as i32 - 1;
-        while col > 0 {
-            for i in 0..s {
-                let y = if upward { s - 1 - i } else { i };
-                for c in [col, col - 1] {
-                    let x = c as usize;
-                    if !self.reserved[self.idx(x, y)] {
-                        path.push((x, y));
-                    }
-                }
-            }
-            upward = !upward;
-            col -= 2;
+    pub fn data_path(&self) -> DataPath {
+        DataPath {
+            size: self.size,
+            col: self.size - 1,
+            row: 0,
+            left: false,
+            upward: true,
         }
-        path
     }
 
     /// Whether the Micro QR mask flips the module at `(x, y)`.
@@ -140,13 +114,13 @@ impl Canvas {
         }
     }
 
-    /// XOR the mask pattern across all non-reserved (data) modules.
+    /// XOR the mask pattern across all data modules. Applying the same mask twice
+    /// restores the original grid.
     pub fn apply_mask(&mut self, mask: MicroMask) {
         for y in 0..self.size {
             for x in 0..self.size {
-                let i = self.idx(x, y);
-                if !self.reserved[i] && Canvas::mask_bit(mask, x, y) {
-                    self.dark[i] ^= true;
+                if Canvas::mask_bit(mask, x, y) && !is_function_module(x, y) {
+                    self.grid.toggle(x, y);
                 }
             }
         }
@@ -156,27 +130,14 @@ impl Canvas {
     pub fn place_format(&mut self, symbol_number: u8, mask: MicroMask) {
         let bits = format_bits(symbol_number, mask.index());
         for i in 0..8 {
-            self.set_fn(8, 1 + i, (bits >> i) & 1 != 0); // vertical strip
-            self.set_fn(1 + i, 8, (bits >> (14 - i)) & 1 != 0); // horizontal strip
+            self.grid.set(8, 1 + i, (bits >> i) & 1 != 0); // vertical strip
+            self.grid.set(1 + i, 8, (bits >> (14 - i)) & 1 != 0); // horizontal strip
         }
     }
 
     /// Write one data bit into the module at `(x, y)`.
     pub fn place_data_bit(&mut self, x: usize, y: usize, dark: bool) {
-        self.set(x, y, dark);
-    }
-
-    /// Convert to a [`BitMatrix`] with the Micro QR quiet zone recorded.
-    pub fn to_bitmatrix(&self) -> BitMatrix {
-        let mut m = BitMatrix::new(self.size, self.size, QUIET_ZONE);
-        for y in 0..self.size {
-            for x in 0..self.size {
-                if self.dark[self.idx(x, y)] {
-                    m.set(x, y, true);
-                }
-            }
-        }
-        m
+        self.grid.set(x, y, dark);
     }
 
     /// The ISO/IEC 18004 Micro QR mask evaluation score (higher is better): it
@@ -210,6 +171,56 @@ impl Canvas {
     }
 }
 
+/// Iterator over the data-module coordinates of a version, in placement order.
+pub struct DataPath {
+    size: usize,
+    /// Right column of the current two-column strip.
+    col: usize,
+    /// Step within the strip's vertical sweep.
+    row: usize,
+    /// Whether the next module is the strip's left column.
+    left: bool,
+    upward: bool,
+}
+
+impl Iterator for DataPath {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        loop {
+            if self.row == self.size {
+                // Strip finished: the last strip is columns 2 and 1.
+                if self.col <= 2 {
+                    return None;
+                }
+                self.col -= 2;
+                self.row = 0;
+                self.upward = !self.upward;
+            }
+            let y = if self.upward {
+                self.size - 1 - self.row
+            } else {
+                self.row
+            };
+            let x = if self.left { self.col - 1 } else { self.col };
+            if self.left {
+                self.row += 1;
+            }
+            self.left = !self.left;
+            if !is_function_module(x, y) {
+                return Some((x, y));
+            }
+        }
+    }
+}
+
+/// Whether `(x, y)` is a function-pattern / reserved module: the finder with its
+/// separator and format strips (the top-left 9×9 block) or an edge timing pattern.
+/// The layout is the same for every version.
+pub fn is_function_module(x: usize, y: usize) -> bool {
+    (x <= 8 && y <= 8) || x == 0 || y == 0
+}
+
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
@@ -223,13 +234,20 @@ mod tests {
             MicroVersion::M3,
             MicroVersion::M4,
         ] {
-            let c = Canvas::new(v);
-            let path = c.data_path();
-            assert_eq!(path.len(), data_module_count(v), "{v:?}");
+            let side = v.size();
+            assert_eq!(
+                Canvas::storage_len(v),
+                MatrixBuf::bytes_for(side, side),
+                "{v:?}"
+            );
+            let mut storage = [0u8; Canvas::storage_len(MicroVersion::M4)];
+            let c = Canvas::new(v, &mut storage).unwrap();
             let mut seen = std::collections::HashSet::new();
-            for p in &path {
-                assert!(seen.insert(*p), "duplicate module {p:?} in {v:?}");
+            for p in c.data_path() {
+                assert!(!is_function_module(p.0, p.1));
+                assert!(seen.insert(p), "duplicate module {p:?} in {v:?}");
             }
+            assert_eq!(seen.len(), data_module_count(v), "{v:?}");
         }
     }
 }

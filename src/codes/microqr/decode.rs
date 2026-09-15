@@ -35,7 +35,8 @@ impl MicroQrDecoder {
         }
         let version = MicroVersion::from_size(matrix.width())
             .ok_or_else(|| Error::undecodable("grid size is not a valid Micro QR version"))?;
-        let canvas = Canvas::from_matrix(version, matrix);
+        let mut storage = [0u8; Canvas::storage_len(MicroVersion::M4)];
+        let canvas = Canvas::from_matrix(version, matrix, &mut storage)?;
         let (sn, mask_idx) = canvas
             .read_format()
             .ok_or_else(|| Error::undecodable("unreadable Micro QR format information"))?;
@@ -49,11 +50,10 @@ impl MicroQrDecoder {
         let mask = MicroMask::new(mask_idx).unwrap();
 
         // Read masked data modules along the path, unmasking as we go.
-        let path = canvas.data_path();
-        let mut bits: Vec<bool> = Vec::with_capacity(path.len());
-        for &(x, y) in &path {
-            bits.push(canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y));
-        }
+        let bits: Vec<bool> = canvas
+            .data_path()
+            .map(|(x, y)| canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y))
+            .collect();
         debug_assert_eq!(bits.len(), data_module_count(version));
 
         let data = deinterleave_and_correct(&bits, version, ec_level)?;

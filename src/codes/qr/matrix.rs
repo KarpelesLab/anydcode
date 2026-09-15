@@ -472,6 +472,11 @@ mod tests {
     fn data_path_covers_all_data_modules() {
         for v in 1..=40 {
             let version = Version::new(v).unwrap();
+            let side = version.size();
+            assert_eq!(
+                Canvas::storage_len(version),
+                MatrixBuf::bytes_for(side, side)
+            );
             let mut storage = [0u8; Canvas::storage_len(Version(40))];
             let c = Canvas::new(version, &mut storage).unwrap();
             let mut seen = std::collections::HashSet::new();

@@ -1,23 +1,48 @@
-//! Micro QR encoding: [`Symbol`] → [`BitMatrix`].
+//! Micro QR encoding: segments → module grid.
 //!
-//! The [`MicroQrEncoder`] reproduces an exact symbol from a fully-specified
-//! [`MicroQrMeta`] (the round-trip path), or builds a fresh symbol from segments,
-//! choosing the smallest fitting version and the highest-scoring mask.
+//! The core, [`MicroQrEncoder::encode_into`], allocates nothing: the codewords live
+//! on the stack (Micro QR holds at most 24) and the module grid is written to a
+//! caller-provided buffer. It can pick the smallest fitting version and the
+//! highest-scoring mask itself. With `alloc`, the [`Encode`](crate::traits::Encode)
+//! impl reproduces an exact symbol from a fully-specified [`MicroQrMeta`] (the
+//! round-trip path) and the `build*` methods make fresh symbols — both on top of
+//! that core.
 
 use super::matrix::Canvas;
 use super::tables::{
-    char_count_bits, data_bit_capacity, ec_params, has_short_final_codeword, micro_mode_value,
-    mode_indicator_bits, symbol_number, terminator_bits,
+    char_count_bits, data_bit_capacity, ec_params, micro_mode_value, mode_indicator_bits,
+    symbol_number, terminator_bits,
 };
 use super::{MicroEcLevel, MicroMask, MicroQrMeta, MicroVersion};
 use crate::codes::qr::gf;
 use crate::error::{Error, Result};
-use crate::output::Encoding;
-use crate::segment::{Mode, ModeCost, Segment, optimize_segments};
+use crate::output::MatrixBuf;
+#[cfg(feature = "alloc")]
+use crate::output::{BitMatrix, Encoding};
+use crate::segment::{Mode, SegmentView};
+#[cfg(feature = "alloc")]
+use crate::segment::{ModeCost, Segment, optimize_segments};
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
+#[cfg(feature = "alloc")]
 use crate::traits::Encode;
-use alloc::{format, vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::{vec, vec::Vec};
+
+/// Most data codewords in any Micro QR symbol (M4-L).
+const MAX_DATA_CW: usize = 16;
+/// Most EC codewords in any Micro QR symbol (M4-Q).
+const MAX_EC_CW: usize = 14;
+
+/// Every version, smallest first.
+const VERSIONS: [MicroVersion; 4] = [
+    MicroVersion::M1,
+    MicroVersion::M2,
+    MicroVersion::M3,
+    MicroVersion::M4,
+];
 
 /// Micro QR Code encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -29,18 +54,139 @@ impl MicroQrEncoder {
         MicroQrEncoder
     }
 
-    /// Build a reproducible [`Symbol`] from `segments` at error-correction `level`,
-    /// choosing the smallest fitting version and the highest-scoring mask. `level`
-    /// must be supported by the chosen version (use [`MicroEcLevel::Detection`] to
-    /// permit the tiny M1 numeric-only symbol).
-    pub fn build(&self, segments: Vec<Segment>, level: MicroEcLevel) -> Result<Symbol> {
-        let version = choose_version(&segments, level)?;
-        let mask = choose_mask(&segments, version, level)?;
+    /// Length of the `encode_into` grid buffer that holds any version (M4).
+    pub const MAX_BUFFER_LEN: usize = Canvas::storage_len(MicroVersion::M4);
+
+    /// Length of the `encode_into` grid buffer for `version`.
+    pub const fn buffer_len(version: MicroVersion) -> usize {
+        Canvas::storage_len(version)
+    }
+
+    /// Heap-free encoding of `segments` at error-correction `level` into `storage`.
+    ///
+    /// `version` and `mask` pin those choices when given; otherwise the smallest
+    /// version that fits (and supports `level` and every segment's mode) and the
+    /// highest-scoring mask are chosen. `storage` must be at least
+    /// [`MicroQrEncoder::buffer_len`] bytes for the resulting version
+    /// ([`MicroQrEncoder::MAX_BUFFER_LEN`] always suffices). Returns the grid
+    /// together with the pinned parameters.
+    ///
+    /// ```
+    /// use anyd::codes::microqr::{MicroEcLevel, MicroQrEncoder};
+    /// use anyd::segment::SegmentView;
+    ///
+    /// let mut storage = [0u8; MicroQrEncoder::MAX_BUFFER_LEN];
+    /// let segments = [SegmentView::numeric(b"01234567")];
+    /// let (grid, meta) = MicroQrEncoder::new()
+    ///     .encode_into(&segments, MicroEcLevel::L, None, None, &mut storage)
+    ///     .unwrap();
+    /// assert_eq!((grid.width(), meta.version.number()), (13, 2));
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Capacity`] when the data does not fit or `storage` is too short;
+    /// [`Error::InvalidParameter`] for a version that does not support `level`;
+    /// [`Error::InvalidData`] for bytes or modes a version cannot represent.
+    pub fn encode_into<'a>(
+        &self,
+        segments: &[SegmentView<'_>],
+        level: MicroEcLevel,
+        version: Option<MicroVersion>,
+        mask: Option<MicroMask>,
+        storage: &'a mut [u8],
+    ) -> Result<(MatrixBuf<'a>, MicroQrMeta)> {
+        let version = match version {
+            Some(v) => v,
+            None => choose_version(segments, level)?,
+        };
+        if storage.len() < Self::buffer_len(version) {
+            return Err(Error::capacity(
+                "Micro QR encode buffer too small for version",
+            ));
+        }
+        let sn = symbol_number(version, level).ok_or_else(|| {
+            Error::invalid_parameter("unsupported Micro QR version/EC combination")
+        })?;
+        let (codewords, data_bits, total_bits) = codewords(segments, version, level)?;
+
+        let mut canvas = Canvas::new(version, storage)?;
+        for (i, (x, y)) in canvas.data_path().take(total_bits).enumerate() {
+            // Data bits come first (M1/M3 place only the final codeword's high
+            // nibble), then the EC codewords.
+            let bit = if i < data_bits {
+                i
+            } else {
+                MAX_DATA_CW * 8 + (i - data_bits)
+            };
+            if (codewords[bit / 8] >> (7 - bit % 8)) & 1 != 0 {
+                canvas.place_data_bit(x, y, true);
+            }
+        }
+
+        let mask = match mask {
+            Some(m) => m,
+            None => {
+                // Score every mask in place, undoing each (masking is an involution);
+                // ties resolve to the lowest index.
+                let mut best = (MicroMask(0), None);
+                for m in 0..4 {
+                    let candidate = MicroMask(m);
+                    canvas.apply_mask(candidate);
+                    canvas.place_format(sn, candidate);
+                    let score = canvas.evaluate();
+                    if best.1.is_none_or(|s| score > s) {
+                        best = (candidate, Some(score));
+                    }
+                    canvas.apply_mask(candidate);
+                }
+                best.0
+            }
+        };
+        canvas.apply_mask(mask);
+        canvas.place_format(sn, mask);
         let meta = MicroQrMeta {
             version,
             ec_level: level,
             mask,
         };
+        Ok((canvas.into_grid(), meta))
+    }
+
+    /// Heap-free convenience: encode `text` as a single numeric, alphanumeric or byte
+    /// segment (the densest mode that holds every byte), at the smallest fitting
+    /// version with the highest-scoring mask. Buffer as for
+    /// [`MicroQrEncoder::encode_into`].
+    ///
+    /// Unlike [`MicroQrEncoder::build_text`] this never splits the text into
+    /// mixed-mode segments, so mixed payloads may need a larger version.
+    pub fn encode_text_into<'a>(
+        &self,
+        text: &[u8],
+        level: MicroEcLevel,
+        storage: &'a mut [u8],
+    ) -> Result<(MatrixBuf<'a>, MicroQrMeta)> {
+        let mode = if !text.is_empty() && text.iter().all(u8::is_ascii_digit) {
+            Mode::Numeric
+        } else if !text.is_empty() && text.iter().all(|&b| alnum_value(b).is_some()) {
+            Mode::Alphanumeric
+        } else {
+            Mode::Byte
+        };
+        let segment = SegmentView { mode, data: text };
+        self.encode_into(&[segment], level, None, None, storage)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl MicroQrEncoder {
+    /// Build a reproducible [`Symbol`] from `segments` at error-correction `level`,
+    /// choosing the smallest fitting version and the highest-scoring mask. `level`
+    /// must be supported by the chosen version (use [`MicroEcLevel::Detection`] to
+    /// permit the tiny M1 numeric-only symbol).
+    pub fn build(&self, segments: Vec<Segment>, level: MicroEcLevel) -> Result<Symbol> {
+        let views: Vec<SegmentView<'_>> = segments.iter().map(Segment::view).collect();
+        let mut storage = [0u8; Self::MAX_BUFFER_LEN];
+        let (_, meta) = self.encode_into(&views, level, None, None, &mut storage)?;
         Ok(Symbol::new(
             Symbology::MicroQrCode,
             segments,
@@ -63,19 +209,15 @@ impl MicroQrEncoder {
         }
         // Mode availability and count-field widths differ per version, so
         // optimize per version, smallest first, and take the first fit.
-        for version in [
-            MicroVersion::M1,
-            MicroVersion::M2,
-            MicroVersion::M3,
-            MicroVersion::M4,
-        ] {
+        for version in VERSIONS {
             let Some(cap) = data_bit_capacity(version, level) else {
                 continue; // level not supported at this version
             };
             let Some(segs) = optimize_segments(bytes, &mode_costs(version)) else {
                 continue; // some byte not representable at this version
             };
-            if let Some(len) = segments_bit_len(&segs, version)
+            let views: Vec<SegmentView<'_>> = segs.iter().map(Segment::view).collect();
+            if let Some(len) = segments_bit_len(&views, version)
                 && len <= cap
             {
                 return self.build(segs, level);
@@ -88,6 +230,7 @@ impl MicroQrEncoder {
 }
 
 /// Segmenter cost model for a version: only the modes it permits.
+#[cfg(feature = "alloc")]
 fn mode_costs(version: MicroVersion) -> Vec<ModeCost> {
     fn is_digit(b: u8) -> bool {
         b.is_ascii_digit()
@@ -118,6 +261,7 @@ fn mode_costs(version: MicroVersion) -> Vec<ModeCost> {
     .collect()
 }
 
+#[cfg(feature = "alloc")]
 impl Encode for MicroQrEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if symbol.symbology != Symbology::MicroQrCode {
@@ -133,29 +277,50 @@ impl Encode for MicroQrEncoder {
                 ));
             }
         };
-        let canvas = render(&symbol.segments, meta.version, meta.ec_level, meta.mask)?;
-        Ok(Encoding::Matrix(canvas.to_bitmatrix()))
+        let views: Vec<SegmentView<'_>> = symbol.segments.iter().map(Segment::view).collect();
+        let mut storage = [0u8; Self::MAX_BUFFER_LEN];
+        let (grid, _) = self.encode_into(
+            &views,
+            meta.ec_level,
+            Some(meta.version),
+            Some(meta.mask),
+            &mut storage,
+        )?;
+        Ok(Encoding::Matrix(BitMatrix::from(&grid)))
     }
 }
 
-/// Accumulates bits most-significant-first.
-struct BitWriter {
-    bits: Vec<bool>,
+/// A most-significant-bit-first bit stream destination.
+trait BitSink {
+    fn push(&mut self, value: u32, len: usize);
 }
 
-impl BitWriter {
-    fn new() -> Self {
-        BitWriter { bits: Vec::new() }
-    }
+/// Counts bits without storing them (for capacity checks).
+struct BitCounter(usize);
 
+impl BitSink for BitCounter {
+    fn push(&mut self, _value: u32, len: usize) {
+        self.0 += len;
+    }
+}
+
+/// Writes bits into a zeroed byte array; bits past its end are counted but dropped,
+/// so callers check [`BitWriter::bits`] against the capacity afterwards.
+struct BitWriter<'s> {
+    bytes: &'s mut [u8],
+    bits: usize,
+}
+
+impl BitSink for BitWriter<'_> {
     fn push(&mut self, value: u32, len: usize) {
         for k in (0..len).rev() {
-            self.bits.push((value >> k) & 1 != 0);
+            if (value >> k) & 1 != 0
+                && let Some(byte) = self.bytes.get_mut(self.bits / 8)
+            {
+                *byte |= 0x80 >> (self.bits % 8);
+            }
+            self.bits += 1;
         }
-    }
-
-    fn len(&self) -> usize {
-        self.bits.len()
     }
 }
 
@@ -192,7 +357,7 @@ fn kanji_value(hi: u8, lo: u8) -> Option<u32> {
 }
 
 /// Write one segment's header and payload bits.
-fn write_segment(w: &mut BitWriter, seg: &Segment, version: MicroVersion) -> Result<()> {
+fn write_segment(w: &mut impl BitSink, seg: &SegmentView<'_>, version: MicroVersion) -> Result<()> {
     let mib = mode_indicator_bits(version);
     if mib > 0 {
         let mv = micro_mode_value(&seg.mode)
@@ -202,7 +367,7 @@ fn write_segment(w: &mut BitWriter, seg: &Segment, version: MicroVersion) -> Res
     let ccb = char_count_bits(version, &seg.mode).ok_or_else(|| {
         Error::invalid_data("segment mode not permitted at this Micro QR version")
     })?;
-    match &seg.mode {
+    match seg.mode {
         Mode::Numeric => {
             w.push(seg.data.len() as u32, ccb);
             for chunk in seg.data.chunks(3) {
@@ -239,7 +404,7 @@ fn write_segment(w: &mut BitWriter, seg: &Segment, version: MicroVersion) -> Res
         }
         Mode::Byte => {
             w.push(seg.data.len() as u32, ccb);
-            for &b in &seg.data {
+            for &b in seg.data {
                 w.push(b as u32, 8);
             }
         }
@@ -261,22 +426,17 @@ fn write_segment(w: &mut BitWriter, seg: &Segment, version: MicroVersion) -> Res
 
 /// Total encoded bit length of all segments at a version, or `None` if any segment's
 /// mode is not representable at that version.
-fn segments_bit_len(segments: &[Segment], version: MicroVersion) -> Option<usize> {
-    let mut w = BitWriter::new();
+fn segments_bit_len(segments: &[SegmentView<'_>], version: MicroVersion) -> Option<usize> {
+    let mut counter = BitCounter(0);
     for seg in segments {
-        write_segment(&mut w, seg, version).ok()?;
+        write_segment(&mut counter, seg, version).ok()?;
     }
-    Some(w.len())
+    Some(counter.0)
 }
 
 /// The smallest version (at `level`) whose data capacity holds `segments`.
-fn choose_version(segments: &[Segment], level: MicroEcLevel) -> Result<MicroVersion> {
-    for v in [
-        MicroVersion::M1,
-        MicroVersion::M2,
-        MicroVersion::M3,
-        MicroVersion::M4,
-    ] {
+fn choose_version(segments: &[SegmentView<'_>], level: MicroEcLevel) -> Result<MicroVersion> {
+    for v in VERSIONS {
         let Some(cap) = data_bit_capacity(v, level) else {
             continue; // level not supported at this version
         };
@@ -291,136 +451,46 @@ fn choose_version(segments: &[Segment], level: MicroEcLevel) -> Result<MicroVers
     ))
 }
 
-/// Build the full codeword bit stream (data + EC) for a version/level.
-fn codeword_bits(
-    segments: &[Segment],
+/// Build the data and EC codewords for a version/level: data codewords at the
+/// front of the returned array, EC codewords from byte [`MAX_DATA_CW`]. Also returns
+/// how many leading data bits the symbol places (M1/M3 end on a 4-bit codeword)
+/// and the total placed bit count.
+fn codewords(
+    segments: &[SegmentView<'_>],
     version: MicroVersion,
     ec: MicroEcLevel,
-) -> Result<Vec<bool>> {
+) -> Result<([u8; MAX_DATA_CW + MAX_EC_CW], usize, usize)> {
     let params = ec_params(version, ec)
         .ok_or_else(|| Error::invalid_parameter("unsupported Micro QR version/EC combination"))?;
-    let cap_bits = data_bit_capacity(version, ec).unwrap();
-    let short = has_short_final_codeword(version);
+    let cap_bits = data_bit_capacity(version, ec).unwrap_or(0);
 
-    let mut w = BitWriter::new();
+    let mut out = [0u8; MAX_DATA_CW + MAX_EC_CW];
+    let (data, ec_bytes) = out.split_at_mut(MAX_DATA_CW);
+    let data = &mut data[..params.data_cw];
+    let mut w = BitWriter {
+        bytes: data,
+        bits: 0,
+    };
     for seg in segments {
         write_segment(&mut w, seg, version)?;
     }
-    if w.len() > cap_bits {
+    if w.bits > cap_bits {
         return Err(Error::capacity(
             "segments exceed selected Micro QR capacity",
         ));
     }
-    // Terminator, bounded by remaining capacity.
-    let term = (cap_bits - w.len()).min(terminator_bits(version));
-    w.push(0, term);
-
-    // Assemble data codewords.
-    let mut data: Vec<u8> = Vec::with_capacity(params.data_cw);
-    if short {
-        // Zero-fill to the (…8-bit + final 4-bit) capacity, then pack.
-        while w.len() < cap_bits {
-            w.bits.push(false);
-        }
-        for c in 0..params.data_cw - 1 {
-            data.push(pack_byte(&w.bits[c * 8..c * 8 + 8]));
-        }
-        // Final 4-bit codeword lives in the high nibble of the RS symbol.
-        let nib_start = (params.data_cw - 1) * 8;
-        let mut nibble = 0u8;
-        for k in 0..4 {
-            nibble = (nibble << 1) | w.bits[nib_start + k] as u8;
-        }
-        data.push(nibble << 4);
-    } else {
-        while !w.len().is_multiple_of(8) {
-            w.bits.push(false);
-        }
-        for chunk in w.bits.chunks(8) {
-            data.push(pack_byte(chunk));
-        }
-        let pad = [0xEC_u8, 0x11];
-        let mut pi = 0;
-        while data.len() < params.data_cw {
-            data.push(pad[pi % 2]);
-            pi += 1;
+    // Terminator, bounded by remaining capacity (the array is already zeroed).
+    let used = w.bits + (cap_bits - w.bits).min(terminator_bits(version));
+    if cap_bits.is_multiple_of(8) {
+        // Pad to a byte boundary, then with the alternating 0xEC / 0x11 codewords.
+        // (M1/M3, whose final codeword is 4 bits, are zero-filled instead.)
+        for (i, byte) in data[used.div_ceil(8)..].iter_mut().enumerate() {
+            *byte = if i % 2 == 0 { 0xEC } else { 0x11 };
         }
     }
 
-    let ec_bytes = gf::encode(&data, params.ec_cw);
-
-    // Emit final bit stream: data codewords, then EC codewords, MSB first.
-    let mut bits = Vec::with_capacity(super::tables::data_module_count(version));
-    if short {
-        for &b in &data[..params.data_cw - 1] {
-            push_byte(&mut bits, b);
-        }
-        // Only the high nibble of the final codeword is placed.
-        let last = data[params.data_cw - 1];
-        for k in (4..8).rev() {
-            bits.push((last >> k) & 1 != 0);
-        }
-    } else {
-        for &b in &data {
-            push_byte(&mut bits, b);
-        }
-    }
-    for &b in &ec_bytes {
-        push_byte(&mut bits, b);
-    }
-    Ok(bits)
-}
-
-fn pack_byte(chunk: &[bool]) -> u8 {
-    chunk.iter().fold(0u8, |acc, &b| (acc << 1) | b as u8)
-}
-
-fn push_byte(bits: &mut Vec<bool>, byte: u8) {
-    for k in (0..8).rev() {
-        bits.push((byte >> k) & 1 != 0);
-    }
-}
-
-/// Render a canvas for the given parameters, applying `mask`.
-fn render(
-    segments: &[Segment],
-    version: MicroVersion,
-    ec: MicroEcLevel,
-    mask: MicroMask,
-) -> Result<Canvas> {
-    let bits = codeword_bits(segments, version, ec)?;
-    let mut canvas = Canvas::new(version);
-    let path = canvas.data_path();
-    if bits.len() != path.len() {
-        return Err(Error::invalid_parameter(format!(
-            "codeword bit count {} != data module count {}",
-            bits.len(),
-            path.len()
-        )));
-    }
-    for (&(x, y), &b) in path.iter().zip(&bits) {
-        canvas.place_data_bit(x, y, b);
-    }
-    canvas.apply_mask(mask);
-    let sn = symbol_number(version, ec)
-        .ok_or_else(|| Error::invalid_parameter("unsupported Micro QR version/EC combination"))?;
-    canvas.place_format(sn, mask);
-    Ok(canvas)
-}
-
-/// Choose the highest-scoring mask (ISO/IEC 18004 §7.8.3.2), ties resolved to the
-/// lowest index.
-fn choose_mask(segments: &[Segment], version: MicroVersion, ec: MicroEcLevel) -> Result<MicroMask> {
-    let mut best: Option<(MicroMask, u32)> = None;
-    for m in 0..4 {
-        let mask = MicroMask::new(m).unwrap();
-        let canvas = render(segments, version, ec, mask)?;
-        let score = canvas.evaluate();
-        if best.as_ref().is_none_or(|&(_, s)| score > s) {
-            best = Some((mask, score));
-        }
-    }
-    Ok(best.unwrap().0)
+    gf::encode_into(data, &mut ec_bytes[..params.ec_cw]);
+    Ok((out, cap_bits, cap_bits + params.ec_cw * 8))
 }
 
 #[cfg(all(test, feature = "encode", feature = "decode"))]
@@ -433,10 +503,13 @@ mod tests {
     /// Reed–Solomon field.
     #[test]
     fn m2_example_codewords() {
-        let segments = vec![Segment::numeric(b"01234567".to_vec())];
-        let bits = codeword_bits(&segments, MicroVersion::M2, MicroEcLevel::M).unwrap();
-        let bytes: Vec<u8> = bits.chunks(8).map(pack_byte).collect();
-        let expected: [u8; 10] = [64, 24, 172, 195, 211, 226, 194, 57, 150, 107];
-        assert_eq!(bytes, expected);
+        let segments = [SegmentView::numeric(b"01234567")];
+        let (cw, data_bits, total_bits) =
+            codewords(&segments, MicroVersion::M2, MicroEcLevel::M).unwrap();
+        assert_eq!((data_bits, total_bits), (32, 80));
+        let expected_data = [64, 24, 172, 195];
+        let expected_ec = [211, 226, 194, 57, 150, 107];
+        assert_eq!(cw[..4], expected_data);
+        assert_eq!(cw[MAX_DATA_CW..MAX_DATA_CW + 6], expected_ec);
     }
 }

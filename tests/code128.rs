@@ -224,3 +224,131 @@ fn encode_into_matches_encode() {
     assert!(encoder.encode_into(&[104, 106], &mut buf).is_err());
     assert!(buf.is_empty());
 }
+
+/// The heap-free planner writes exactly the symbol values `build`/`build_gs1` pin in
+/// meta, within `max_symbols`, and reports a too-short buffer as a capacity error.
+#[test]
+fn plan_into_matches_build() {
+    let encoder = Code128Encoder::new();
+
+    let mut cases: Vec<(Vec<Code128Input>, bool)> = Vec::new();
+    for text in [
+        "PJJ123C",
+        "Hello, World!",
+        "00112233445566778899", // all digits, even: Start C
+        "123",                  // odd all-digit
+        "1234",                 // short even all-digit
+        "12345",                // odd leading run >= 4
+        "ABC1234567890XYZ",     // latch to C and back
+        "X1234567Y",            // odd run inside text
+        "X1234",                // run of 4 at end
+        "X123Y",                // short run stays in B
+        "abc\tdef",             // shift to A
+        "\t\n\r",               // Start A, stays in A
+        "\tab",                 // latch A -> B
+        "12\tab",
+        "1234\x01", // leave C into A
+        "a",
+        "0",
+    ] {
+        cases.push((data(text), false));
+        cases.push((data(text), true));
+    }
+    let controls: Vec<Code128Input> = (1u8..=10).map(Code128Input::Data).collect();
+    cases.push((controls, false));
+    let mut ais = data("0109521234543213");
+    ais.extend(data("10ABC123"));
+    ais.push(Code128Input::Fnc1);
+    ais.extend(data("21XYZ"));
+    cases.push((ais.clone(), true));
+    cases.push((ais, false));
+    let mut sep = data("123");
+    sep.push(Code128Input::Fnc1);
+    sep.extend(data("4567"));
+    sep.push(Code128Input::Fnc1);
+    cases.push((sep.clone(), true));
+    cases.push((sep, false));
+    cases.push((vec![Code128Input::Fnc1], false));
+    cases.push((Vec::new(), true)); // empty GS1
+    // A deterministic pseudo-random sweep over digits, controls, text and FNC1.
+    let mut seed = 0x1234_5678u32;
+    for _ in 0..300 {
+        let mut input = Vec::new();
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        let len = (seed >> 16) as usize % 24;
+        for _ in 0..len {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let r = (seed >> 16) as u8;
+            input.push(match r % 8 {
+                0..=3 => Code128Input::Data(b'0' + r % 10),
+                4 => Code128Input::Data(r % 32),
+                5 => Code128Input::Fnc1,
+                _ => Code128Input::Data(32 + (r >> 1) % 96),
+            });
+        }
+        cases.push((input, seed & 1 == 0));
+    }
+
+    for (input, gs1) in &cases {
+        let built = if *gs1 {
+            encoder.build_gs1(input)
+        } else {
+            encoder.build(input)
+        };
+        let Ok(built) = built else {
+            // Only an empty plain input is rejected here.
+            assert!(input.is_empty() && !gs1);
+            continue;
+        };
+        let SymbolMeta::Code128(meta) = &built.meta else {
+            panic!("expected Code128 meta");
+        };
+        let mut out = [0u8; 64];
+        let n = encoder.plan_into(input, *gs1, &mut out).unwrap();
+        assert_eq!(&out[..n], &meta.symbols[..], "input {input:?} gs1 {gs1}");
+        assert!(n <= Code128Encoder::max_symbols(input.len()));
+
+        // Exactly-sized storage succeeds; one short is a capacity error.
+        let mut exact = vec![0u8; n];
+        assert_eq!(encoder.plan_into(input, *gs1, &mut exact), Ok(n));
+        let mut short = vec![0u8; n - 1];
+        let err = encoder.plan_into(input, *gs1, &mut short);
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    }
+
+    // Invalid input is rejected.
+    let mut out = [0u8; 8];
+    assert!(encoder.plan_into(&[], false, &mut out).is_err());
+    assert!(
+        encoder
+            .plan_into(&[Code128Input::Data(200)], false, &mut out)
+            .is_err()
+    );
+}
+
+/// `encode_text_into` renders the same modules as `build_text` + `Encode`.
+#[test]
+fn encode_text_into_matches_build_text() {
+    use anyd::output::LinearBuf;
+    let encoder = Code128Encoder::new();
+    for text in ["PJJ123C", "Hello, World!", "0123456789", "X12345Y", "a\tb"] {
+        let Encoding::Linear(expected) =
+            encoder.encode(&encoder.build_text(text).unwrap()).unwrap()
+        else {
+            panic!("Code 128 encodes to a linear pattern");
+        };
+        let mut symbols = [0u8; Code128Encoder::max_symbols(16)];
+        let mut storage = [0u8; LinearBuf::bytes_for(Code128Encoder::max_modules(
+            Code128Encoder::max_symbols(16),
+        ))];
+        let mut buf = LinearBuf::new(&mut storage);
+        encoder
+            .encode_text_into(text.as_bytes(), &mut symbols, &mut buf)
+            .unwrap();
+        assert_eq!(buf, expected);
+
+        let mut tiny = [0u8; 1];
+        let err = encoder.encode_text_into(text.as_bytes(), &mut tiny, &mut buf);
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    }
+}

@@ -8,11 +8,10 @@
 
 #[cfg(feature = "alloc")]
 use super::Code128Meta;
+use super::tables::checksum;
 #[cfg(feature = "alloc")]
 use super::tables::reconstruct_segments;
-#[cfg(feature = "alloc")]
-use super::tables::{CODE_A, CODE_B, CODE_C, FNC1, SHIFT};
-use super::tables::{CodeSet, PATTERNS, STOP, STOP_VALUE, checksum};
+use super::tables::{CODE_A, CODE_B, CODE_C, CodeSet, FNC1, PATTERNS, SHIFT, STOP, STOP_VALUE};
 use crate::error::{Error, Result};
 use crate::output::LinearSink;
 #[cfg(feature = "alloc")]
@@ -87,6 +86,45 @@ impl Code128Encoder {
         push_widths(out, PATTERNS[check as usize])?;
         push_widths(out, STOP)
     }
+
+    /// Upper bound on the symbol values [`Code128Encoder::plan_into`] writes for
+    /// `input_len` input elements: the Start value, a possible leading GS1 FNC1, and at
+    /// most two values per element (a Shift or code-set latch plus the character).
+    pub const fn max_symbols(input_len: usize) -> usize {
+        2 + 2 * input_len
+    }
+
+    /// Heap-free code-set planning: write the symbol-value sequence (Start + data)
+    /// that [`Code128Encoder::build`] (`gs1 == false`) or `build_gs1` (`gs1 == true`)
+    /// would pin in its meta into `out`, returning the number of values written.
+    /// Feed `&out[..n]` to [`Code128Encoder::encode_into`].
+    ///
+    /// Size `out` with [`Code128Encoder::max_symbols`]. Every data byte must be
+    /// `0..=127`, and a plain (non-GS1) input must not be empty. The input is
+    /// validated, and the exact length checked against `out` (failing with
+    /// [`Error::Capacity`](crate::Error::Capacity)), before anything is written.
+    pub fn plan_into(&self, input: &[Code128Input], gs1: bool, out: &mut [u8]) -> Result<usize> {
+        plan_checked(input, gs1, out)
+    }
+
+    /// Heap-free convenience: plan plain Code 128 `text` (ASCII bytes `0..=127`) and
+    /// render it to `out`.
+    ///
+    /// Text length is unbounded, so no fixed internal buffer can hold the plan: the
+    /// caller provides `symbols` as scratch space for the symbol-value sequence, sized
+    /// with [`Code128Encoder::max_symbols`]`(text.len())` (a too-short buffer fails
+    /// with [`Error::Capacity`](crate::Error::Capacity) before any module is written).
+    /// Size a [`LinearBuf`](crate::output::LinearBuf) for `out` with
+    /// [`Code128Encoder::max_modules`] of that same bound.
+    pub fn encode_text_into<S: LinearSink>(
+        &self,
+        text: &[u8],
+        symbols: &mut [u8],
+        out: &mut S,
+    ) -> Result<()> {
+        let n = plan_checked(text, false, symbols)?;
+        self.encode_into(&symbols[..n], out)
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -110,19 +148,9 @@ impl Code128Encoder {
     }
 
     fn build_impl(&self, input: &[Code128Input], gs1: bool) -> Result<Symbol> {
-        for el in input {
-            if let Code128Input::Data(b) = el
-                && *b > 127
-            {
-                return Err(Error::invalid_data(
-                    "Code 128 data byte out of range (only 0..=127 supported)",
-                ));
-            }
-        }
-        if input.is_empty() && !gs1 {
-            return Err(Error::invalid_data("Code 128 input is empty"));
-        }
-        let symbols = plan_symbols(input, gs1);
+        let mut symbols = vec![0; Self::max_symbols(input.len())];
+        let n = self.plan_into(input, gs1, &mut symbols)?;
+        symbols.truncate(n);
         // Derive the GS1 flag from the planned sequence so build and decode agree.
         let (segments, detected_gs1) = reconstruct_segments(&symbols)?;
         let meta = Code128Meta {
@@ -174,14 +202,81 @@ fn push_widths(out: &mut impl LinearSink, widths: &str) -> Result<()> {
 // Fresh-input code-set planner
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "alloc")]
-fn is_digit_input(el: Code128Input) -> bool {
-    matches!(el, Code128Input::Data(b) if b.is_ascii_digit())
+/// An element the planner accepts: a [`Code128Input`], or a raw text byte (always
+/// data).
+trait PlanInput: Copy {
+    fn el(self) -> Code128Input;
+}
+
+impl PlanInput for Code128Input {
+    fn el(self) -> Code128Input {
+        self
+    }
+}
+
+impl PlanInput for u8 {
+    fn el(self) -> Code128Input {
+        Code128Input::Data(self)
+    }
+}
+
+/// Destination for planned symbol values.
+trait SymbolOut {
+    fn push(&mut self, value: u8);
+}
+
+/// Counts values without storing them (sizing pass).
+struct Count(usize);
+
+impl SymbolOut for Count {
+    fn push(&mut self, _: u8) {
+        self.0 += 1;
+    }
+}
+
+/// Writes values into a slice already known to be large enough.
+struct Fill<'a> {
+    buf: &'a mut [u8],
+    len: usize,
+}
+
+impl SymbolOut for Fill<'_> {
+    fn push(&mut self, value: u8) {
+        self.buf[self.len] = value;
+        self.len += 1;
+    }
+}
+
+/// Validate `input`, then plan it into `out`: a counting pass checks capacity before
+/// the filling pass writes anything. Returns the number of values written.
+fn plan_checked<T: PlanInput>(input: &[T], gs1: bool, out: &mut [u8]) -> Result<usize> {
+    if input
+        .iter()
+        .any(|el| matches!(el.el(), Code128Input::Data(b) if b > 127))
+    {
+        return Err(Error::invalid_data(
+            "Code 128 data byte out of range (only 0..=127 supported)",
+        ));
+    }
+    if input.is_empty() && !gs1 {
+        return Err(Error::invalid_data("Code 128 input is empty"));
+    }
+    let mut count = Count(0);
+    plan_symbols(input, gs1, &mut count);
+    if count.0 > out.len() {
+        return Err(Error::capacity("Code 128 symbol buffer too small"));
+    }
+    let mut fill = Fill { buf: out, len: 0 };
+    plan_symbols(input, gs1, &mut fill);
+    Ok(fill.len)
+}
+
+fn is_digit_input<T: PlanInput>(el: T) -> bool {
+    matches!(el.el(), Code128Input::Data(b) if b.is_ascii_digit())
 }
 
 /// Number of consecutive digit inputs starting at `i`.
-#[cfg(feature = "alloc")]
-fn count_digits(input: &[Code128Input], i: usize) -> usize {
+fn count_digits<T: PlanInput>(input: &[T], i: usize) -> usize {
     input[i..]
         .iter()
         .take_while(|el| is_digit_input(**el))
@@ -189,7 +284,6 @@ fn count_digits(input: &[Code128Input], i: usize) -> usize {
 }
 
 /// Whether byte `b` is representable directly in code set `set` (A or B).
-#[cfg(feature = "alloc")]
 fn representable(set: CodeSet, b: u8) -> bool {
     match set {
         CodeSet::A => b < 96,
@@ -199,7 +293,6 @@ fn representable(set: CodeSet, b: u8) -> bool {
 }
 
 /// The symbol value of byte `b` in code set `set` (A or B). Assumes representable.
-#[cfg(feature = "alloc")]
 fn value_in(set: CodeSet, b: u8) -> u8 {
     match set {
         CodeSet::A => {
@@ -215,8 +308,7 @@ fn value_in(set: CodeSet, b: u8) -> u8 {
 }
 
 /// Choose an efficient symbol-value sequence for the input.
-#[cfg(feature = "alloc")]
-fn plan_symbols(input: &[Code128Input], gs1: bool) -> Vec<u8> {
+fn plan_symbols<T: PlanInput>(input: &[T], gs1: bool, out: &mut impl SymbolOut) {
     let len = input.len();
 
     // Pick the starting code set.
@@ -226,20 +318,20 @@ fn plan_symbols(input: &[Code128Input], gs1: bool) -> Vec<u8> {
     {
         CodeSet::C
     } else {
-        match input.first() {
-            Some(Code128Input::Data(b)) if *b < 32 => CodeSet::A,
+        match input.first().map(|el| el.el()) {
+            Some(Code128Input::Data(b)) if b < 32 => CodeSet::A,
             _ => CodeSet::B,
         }
     };
 
-    let mut out = vec![start.start_value()];
+    out.push(start.start_value());
     if gs1 {
         out.push(FNC1);
     }
     let mut set = start;
     let mut i = 0;
     while i < len {
-        match input[i] {
+        match input[i].el() {
             Code128Input::Fnc1 => {
                 out.push(FNC1);
                 i += 1;
@@ -274,19 +366,17 @@ fn plan_symbols(input: &[Code128Input], gs1: bool) -> Vec<u8> {
                         out.push(CODE_C);
                         set = CodeSet::C;
                     } else {
-                        emit_char(&mut out, &mut set, input, i);
+                        emit_char(out, &mut set, input, i);
                         i += 1;
                     }
                 }
             }
         }
     }
-    out
 }
 
-#[cfg(feature = "alloc")]
-fn digit_val(el: Code128Input) -> u8 {
-    match el {
+fn digit_val<T: PlanInput>(el: T) -> u8 {
+    match el.el() {
         Code128Input::Data(b) => b - b'0',
         Code128Input::Fnc1 => unreachable!("digit_val on FNC1"),
     }
@@ -294,9 +384,8 @@ fn digit_val(el: Code128Input) -> u8 {
 
 /// Emit one data character at `input[i]` in code set A or B, latching or shifting to
 /// the other set when the character is not representable in the current one.
-#[cfg(feature = "alloc")]
-fn emit_char(out: &mut Vec<u8>, set: &mut CodeSet, input: &[Code128Input], i: usize) {
-    let b = match input[i] {
+fn emit_char<T: PlanInput>(out: &mut impl SymbolOut, set: &mut CodeSet, input: &[T], i: usize) {
+    let b = match input[i].el() {
         Code128Input::Data(b) => b,
         Code128Input::Fnc1 => unreachable!("emit_char on FNC1"),
     };
@@ -310,8 +399,8 @@ fn emit_char(out: &mut Vec<u8>, set: &mut CodeSet, input: &[Code128Input], i: us
         CodeSet::C => CodeSet::B,
     };
     // Shift when the following character returns to the current set; otherwise latch.
-    let next_returns = match input.get(i + 1) {
-        Some(Code128Input::Data(nb)) => representable(*set, *nb),
+    let next_returns = match input.get(i + 1).map(|el| el.el()) {
+        Some(Code128Input::Data(nb)) => representable(*set, nb),
         Some(Code128Input::Fnc1) | None => true,
     };
     if next_returns {

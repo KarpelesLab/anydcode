@@ -29,20 +29,28 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::traits::Encode;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Quiet-zone width in narrow modules on each side.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// Five-element two-of-5 bar widths per digit (wide = 3, narrow = 1).
@@ -71,7 +79,7 @@ enum Variant {
 }
 
 impl Variant {
-    #[cfg(all(feature = "alloc", feature = "encode"))]
+    #[cfg(feature = "encode")]
     fn from_symbology(s: Symbology) -> Result<Self> {
         match s {
             Symbology::Std2of5 => Ok(Variant::Standard),
@@ -102,33 +110,32 @@ impl Variant {
         }
     }
 
-    /// Element-width sequence for one digit (alternating bar, space, ...).
-    #[cfg(all(feature = "alloc", feature = "encode"))]
-    fn digit_widths(self, d: usize) -> Vec<u32> {
+    /// Write the modules for one digit `d` (0..=9).
+    #[cfg(feature = "encode")]
+    fn push_digit(self, out: &mut impl LinearSink, d: usize) -> Result<()> {
         let bars = &BAR_WIDTHS[d];
         match self {
             // Five bars, each followed by a narrow space.
-            Variant::Standard | Variant::Iata => {
-                let mut v = Vec::with_capacity(10);
-                for &b in bars {
-                    v.push(b);
-                    v.push(1);
-                }
-                v
-            }
+            Variant::Standard | Variant::Iata => bars.iter().try_for_each(|&b| {
+                push_run(out, true, b)?;
+                push_run(out, false, 1)
+            }),
             // Five elements (bar,space,bar,space,bar) + trailing narrow space.
-            Variant::Matrix => vec![bars[0], bars[1], bars[2], bars[3], bars[4], 1],
+            Variant::Matrix => {
+                render_widths(out, bars)?;
+                push_run(out, false, 1)
+            }
         }
     }
 }
 
 /// Parameters required to re-encode a 2-of-5 symbol identically. The dialect lives in
 /// [`Symbol::symbology`]; no additional state is needed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TwoOf5Meta;
 
 /// Validate that every byte is an ASCII digit.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("2-of-5 payload is empty"));
@@ -140,32 +147,75 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
     }
 }
 
-/// Append `width` copies of `bar` to `modules`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_run(modules: &mut Vec<bool>, bar: bool, width: u32) {
-    modules.extend(core::iter::repeat_n(bar, width as usize));
+/// Append `width` copies of `bar` to `out`.
+#[cfg(feature = "encode")]
+fn push_run(out: &mut impl LinearSink, bar: bool, width: u32) -> Result<()> {
+    out.push_run(bar, width as usize)
 }
 
-/// Render an alternating (bar, space, ...) width sequence into modules.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn render_widths(modules: &mut Vec<bool>, widths: &[u32]) {
-    for (i, &w) in widths.iter().enumerate() {
-        push_run(modules, i % 2 == 0, w);
-    }
+/// Render an alternating (bar, space, ...) width sequence into `out`.
+#[cfg(feature = "encode")]
+fn render_widths(out: &mut impl LinearSink, widths: &[u32]) -> Result<()> {
+    widths
+        .iter()
+        .enumerate()
+        .try_for_each(|(i, &w)| push_run(out, i % 2 == 0, w))
 }
 
 /// 2-of-5 encoder (Standard / IATA / Matrix).
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TwoOf5Encoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl TwoOf5Encoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Number of modules [`TwoOf5Encoder::encode_into`] emits for `data_len` digits
+    /// in the `symbology` dialect, excluding quiet zones (exact). For a symbology
+    /// outside the 2-of-5 family (which `encode_into` rejects) this returns the
+    /// Standard size, the largest of the three.
+    pub const fn max_modules(symbology: Symbology, data_len: usize) -> usize {
+        match symbology {
+            // start 4 + 14 per digit + stop 5
+            Symbology::Iata2of5 => 4 + 14 * data_len + 5,
+            // start 9 + 10 per digit + stop 8
+            Symbology::Matrix2of5 => 9 + 10 * data_len + 8,
+            // start 10 + 14 per digit + stop 9
+            _ => 10 + 14 * data_len + 9,
+        }
+    }
+
+    /// Heap-free encoding: write the `symbology` dialect (one of
+    /// [`Symbology::Std2of5`], [`Symbology::Iata2of5`], [`Symbology::Matrix2of5`]) of
+    /// the non-empty ASCII `digits` to `out`.
+    ///
+    /// The input is validated before the first module is written. Size a
+    /// [`LinearBuf`](crate::output::LinearBuf) with [`TwoOf5Encoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        symbology: Symbology,
+        digits: &[u8],
+        out: &mut S,
+    ) -> Result<()> {
+        let variant = Variant::from_symbology(symbology)?;
+        ensure_digits(digits)?;
+
+        let (start, stop) = variant.start_stop();
+        out.begin(QUIET_ZONE)?;
+        render_widths(out, start)?;
+        for &d in digits {
+            variant.push_digit(out, (d - b'0') as usize)?;
+        }
+        render_widths(out, stop)
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl TwoOf5Encoder {
     /// Build a symbol for `symbology` (one of the three 2-of-5 dialects) from `digits`.
     pub fn build(&self, symbology: Symbology, digits: &[u8]) -> Result<Symbol> {
         Variant::from_symbology(symbology)?;
@@ -181,25 +231,13 @@ impl TwoOf5Encoder {
 #[cfg(all(feature = "alloc", feature = "encode"))]
 impl Encode for TwoOf5Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
-        let variant = Variant::from_symbology(symbol.symbology)?;
+        Variant::from_symbology(symbol.symbology)?;
         if !matches!(symbol.meta, SymbolMeta::TwoOf5(_)) {
             return Err(Error::invalid_parameter("2-of-5 symbol missing TwoOf5Meta"));
         }
-        let digits = symbol.payload_bytes();
-        ensure_digits(&digits)?;
-
-        let (start, stop) = variant.start_stop();
-        let mut modules = Vec::new();
-        render_widths(&mut modules, start);
-        for &d in &digits {
-            render_widths(&mut modules, &variant.digit_widths((d - b'0') as usize));
-        }
-        render_widths(&mut modules, stop);
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(symbol.symbology, &symbol.payload_bytes(), &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 

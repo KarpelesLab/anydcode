@@ -72,7 +72,7 @@ pub mod msi;
 pub mod pharmacode;
 #[cfg(all(feature = "alloc", feature = "telepen"))]
 pub mod telepen;
-#[cfg(all(feature = "alloc", feature = "twoof5"))]
+#[cfg(feature = "twoof5")]
 pub mod twoof5;
 
 // GS1 DataBar (formerly RSS).

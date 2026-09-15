@@ -2,7 +2,8 @@
 //!
 //! Layout:
 //! - `tables`  — the 107 symbol patterns, the Stop pattern and code-set constants.
-//! - `encode`  — [`Symbol`] → [`LinearPattern`], plus the fresh-input `build` path.
+//! - `encode`  — symbol-value sequence → modules (heap-free `encode_into`, and
+//!   [`Symbol`] → [`LinearPattern`] with `alloc`), plus the fresh-input `build` path.
 //! - `decode`  — [`LinearPattern`] → [`Symbol`].
 //!
 //! ## Losslessness
@@ -27,18 +28,19 @@
     allow(dead_code, unused_imports)
 )]
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 #[cfg(feature = "decode")]
 mod decode;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
 #[cfg(feature = "decode")]
 pub use decode::Code128Decoder;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 pub use encode::{Code128Encoder, Code128Input};
 pub use tables::CodeSet;
 
@@ -48,6 +50,10 @@ pub use tables::CodeSet;
 /// character (index 0, one of `103`/`104`/`105`) through the last data value. The
 /// modulo-103 check character and the Stop pattern are derived on encode and are
 /// **not** stored here.
+///
+/// Holds a `Vec`, so it requires `alloc`; without it, pass the symbol-value sequence
+/// straight to `Code128Encoder::encode_into`.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Code128Meta {
     /// Whether this is a GS1-128 symbol (FNC1 in the first data position).

@@ -9,8 +9,11 @@
 //!
 //! Table and worked example verified against the Wikipedia "Code 128" article.
 
+#[cfg(feature = "alloc")]
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
 /// The 107 Code 128 symbol patterns, indexed by symbol value `0..=106`.
@@ -216,6 +219,7 @@ pub(crate) fn checksum(symbols: &[u8]) -> u8 {
 ///
 /// Shared by the decoder and the encoder's `build` path so both produce identical
 /// payload segments for a given symbol-value sequence.
+#[cfg(feature = "alloc")]
 pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)> {
     let mut set = CodeSet::from_start(values[0])
         .ok_or_else(|| Error::undecodable("Code 128 sequence has no Start"))?;
@@ -274,6 +278,7 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)
 
 /// Push the payload effect of an FNC1: the leading (GS1-mode) FNC1 emits nothing; a
 /// later FNC1 is an AI separator, rendered as the GS control byte.
+#[cfg(feature = "alloc")]
 fn push_fnc1(bytes: &mut Vec<u8>, is_leading: bool) {
     if !is_leading {
         bytes.push(GS);
@@ -281,6 +286,7 @@ fn push_fnc1(bytes: &mut Vec<u8>, is_leading: bool) {
 }
 
 /// GS1 AI separator byte used when a non-leading FNC1 is decoded into the payload.
+#[cfg(feature = "alloc")]
 const GS: u8 = 0x1D;
 
 #[cfg(all(test, feature = "encode", feature = "decode"))]

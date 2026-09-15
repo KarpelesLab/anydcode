@@ -1,18 +1,29 @@
-//! Code 128 encoding: [`Symbol`] → [`LinearPattern`].
+//! Code 128 encoding: symbol-value sequence → modules.
 //!
-//! Two paths meet here. [`Code128Encoder::encode`] renders the exact symbol-value
-//! sequence pinned in [`Code128Meta`], guaranteeing a lossless round-trip. The
-//! `build*` methods take fresh input and choose an efficient code-set sequence,
-//! pinning the result in the returned symbol's meta.
+//! Two paths meet here. [`Code128Encoder::encode_into`] (heap-free) and the
+//! [`Encode`](crate::traits::Encode) impl render the exact symbol-value sequence
+//! pinned in [`Code128Meta`](super::Code128Meta), guaranteeing a lossless round-trip.
+//! The `build*` methods (`alloc`) take fresh input and choose an efficient code-set
+//! sequence, pinning the result in the returned symbol's meta.
 
+#[cfg(feature = "alloc")]
 use super::Code128Meta;
-use super::tables::{CODE_A, CODE_B, CODE_C, CodeSet, FNC1, PATTERNS, SHIFT, STOP, STOP_VALUE};
-use super::tables::{checksum, reconstruct_segments};
+#[cfg(feature = "alloc")]
+use super::tables::reconstruct_segments;
+#[cfg(feature = "alloc")]
+use super::tables::{CODE_A, CODE_B, CODE_C, FNC1, SHIFT};
+use super::tables::{CodeSet, PATTERNS, STOP, STOP_VALUE, checksum};
 use crate::error::{Error, Result};
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::output::{Encoding, LinearPattern};
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
+#[cfg(feature = "alloc")]
 use crate::traits::Encode;
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
 /// The quiet zone Code 128 requires on each side, in narrow modules.
@@ -37,6 +48,49 @@ impl Code128Encoder {
         Code128Encoder
     }
 
+    /// Number of modules [`Code128Encoder::encode_into`] emits for a symbol-value
+    /// sequence of `symbols_len` values (Start + data), excluding quiet zones. Exact:
+    /// every symbol character, including the derived check, is 11 modules and the
+    /// Stop pattern 13.
+    pub const fn max_modules(symbols_len: usize) -> usize {
+        (symbols_len + 1) * 11 + 13
+    }
+
+    /// Heap-free encoding: render a symbol-value sequence to `out`.
+    ///
+    /// `symbols` is the Start value (`103`/`104`/`105`) followed by every data symbol
+    /// value, exactly as stored in [`Code128Meta::symbols`](super::Code128Meta); the
+    /// modulo-103 check character and the Stop pattern are appended here. The
+    /// sequence is validated before the first module is written. Size a
+    /// [`LinearBuf`](crate::output::LinearBuf) with [`Code128Encoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(&self, symbols: &[u8], out: &mut S) -> Result<()> {
+        let Some(&start) = symbols.first() else {
+            return Err(Error::invalid_parameter(
+                "Code 128 symbol sequence is empty",
+            ));
+        };
+        if CodeSet::from_start(start).is_none() {
+            return Err(Error::invalid_parameter(
+                "Code 128 sequence does not begin with a Start value",
+            ));
+        }
+        if symbols.iter().any(|&v| v >= STOP_VALUE) {
+            return Err(Error::invalid_parameter(
+                "Code 128 data contains a Stop/out-of-range symbol value",
+            ));
+        }
+        let check = checksum(symbols);
+        out.begin(QUIET_ZONE)?;
+        for &v in symbols {
+            push_widths(out, PATTERNS[v as usize])?;
+        }
+        push_widths(out, PATTERNS[check as usize])?;
+        push_widths(out, STOP)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Code128Encoder {
     /// Build a plain Code 128 [`Symbol`] from fresh input, choosing an efficient
     /// code-set sequence. The returned symbol's [`Code128Meta`] pins that sequence.
     pub fn build(&self, input: &[Code128Input]) -> Result<Symbol> {
@@ -84,6 +138,7 @@ impl Code128Encoder {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl Encode for Code128Encoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         if !matches!(symbol.symbology, Symbology::Code128 | Symbology::Gs1_128) {
@@ -99,61 +154,33 @@ impl Encode for Code128Encoder {
                 ));
             }
         };
-        let pattern = render(&meta.symbols)?;
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&meta.symbols, &mut pattern)?;
         Ok(Encoding::Linear(pattern))
     }
 }
 
-/// Append a symbol pattern (run-width string) to the module vector.
-fn append_pattern(modules: &mut Vec<bool>, widths: &str) {
+/// Append a symbol pattern (run-width string, starting with a bar) to `out`.
+fn push_widths(out: &mut impl LinearSink, widths: &str) -> Result<()> {
     let mut bar = true;
     for w in widths.bytes().map(|b| (b - b'0') as usize) {
-        modules.extend(core::iter::repeat_n(bar, w));
+        out.push_run(bar, w)?;
         bar = !bar;
     }
-}
-
-/// Render a symbol-value sequence (Start + data) into a [`LinearPattern`].
-fn render(symbols: &[u8]) -> Result<LinearPattern> {
-    if symbols.is_empty() {
-        return Err(Error::invalid_parameter(
-            "Code 128 symbol sequence is empty",
-        ));
-    }
-    if CodeSet::from_start(symbols[0]).is_none() {
-        return Err(Error::invalid_parameter(
-            "Code 128 sequence does not begin with a Start value",
-        ));
-    }
-    for &v in symbols {
-        if v >= STOP_VALUE {
-            return Err(Error::invalid_parameter(
-                "Code 128 data contains a Stop/out-of-range symbol value",
-            ));
-        }
-    }
-    let check = checksum(symbols);
-    let mut modules = Vec::new();
-    for &v in symbols {
-        append_pattern(&mut modules, PATTERNS[v as usize]);
-    }
-    append_pattern(&mut modules, PATTERNS[check as usize]);
-    append_pattern(&mut modules, STOP);
-    Ok(LinearPattern {
-        modules,
-        quiet_zone: QUIET_ZONE,
-    })
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Fresh-input code-set planner
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "alloc")]
 fn is_digit_input(el: Code128Input) -> bool {
     matches!(el, Code128Input::Data(b) if b.is_ascii_digit())
 }
 
 /// Number of consecutive digit inputs starting at `i`.
+#[cfg(feature = "alloc")]
 fn count_digits(input: &[Code128Input], i: usize) -> usize {
     input[i..]
         .iter()
@@ -162,6 +189,7 @@ fn count_digits(input: &[Code128Input], i: usize) -> usize {
 }
 
 /// Whether byte `b` is representable directly in code set `set` (A or B).
+#[cfg(feature = "alloc")]
 fn representable(set: CodeSet, b: u8) -> bool {
     match set {
         CodeSet::A => b < 96,
@@ -171,6 +199,7 @@ fn representable(set: CodeSet, b: u8) -> bool {
 }
 
 /// The symbol value of byte `b` in code set `set` (A or B). Assumes representable.
+#[cfg(feature = "alloc")]
 fn value_in(set: CodeSet, b: u8) -> u8 {
     match set {
         CodeSet::A => {
@@ -186,6 +215,7 @@ fn value_in(set: CodeSet, b: u8) -> u8 {
 }
 
 /// Choose an efficient symbol-value sequence for the input.
+#[cfg(feature = "alloc")]
 fn plan_symbols(input: &[Code128Input], gs1: bool) -> Vec<u8> {
     let len = input.len();
 
@@ -254,6 +284,7 @@ fn plan_symbols(input: &[Code128Input], gs1: bool) -> Vec<u8> {
     out
 }
 
+#[cfg(feature = "alloc")]
 fn digit_val(el: Code128Input) -> u8 {
     match el {
         Code128Input::Data(b) => b - b'0',
@@ -263,6 +294,7 @@ fn digit_val(el: Code128Input) -> u8 {
 
 /// Emit one data character at `input[i]` in code set A or B, latching or shifting to
 /// the other set when the character is not representable in the current one.
+#[cfg(feature = "alloc")]
 fn emit_char(out: &mut Vec<u8>, set: &mut CodeSet, input: &[Code128Input], i: usize) {
     let b = match input[i] {
         Code128Input::Data(b) => b,
@@ -314,10 +346,13 @@ mod tests {
     /// documented Start A / data / check(54) / Stop patterns.
     #[test]
     fn wikipedia_pjj123c_modules() {
-        let symbols = vec![START_A, 48, 42, 42, 17, 18, 19, 35];
-        let pattern = render(&symbols).unwrap();
+        let symbols = [START_A, 48, 42, 42, 17, 18, 19, 35];
+        let mut pattern = LinearPattern::new();
+        Code128Encoder::new()
+            .encode_into(&symbols, &mut pattern)
+            .unwrap();
 
-        let mut expected = Vec::new();
+        let mut expected = LinearPattern::new();
         // Start A, P, J, J, 1, 2, 3, C, check=54, Stop.
         for widths in [
             "211412",  // Start A (103)
@@ -331,9 +366,9 @@ mod tests {
             "311123",  // check (54)
             "2331112", // Stop
         ] {
-            append_pattern(&mut expected, widths);
+            push_widths(&mut expected, widths).unwrap();
         }
-        assert_eq!(pattern.modules, expected);
+        assert_eq!(pattern.modules, expected.modules);
         assert_eq!(pattern.quiet_zone, QUIET_ZONE);
     }
 }

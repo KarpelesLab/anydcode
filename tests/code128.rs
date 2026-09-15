@@ -175,3 +175,52 @@ fn encode_rejects_non_ascii_byte() {
     let input = vec![Code128Input::Data(200)];
     assert!(encoder.build(&input).is_err());
 }
+
+/// The heap-free `encode_into` path writes exactly the modules `Encode` returns.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::output::LinearBuf;
+    let encoder = Code128Encoder::new();
+    let controls: Vec<Code128Input> = (1u8..=10).map(Code128Input::Data).collect();
+    let mut shifted = data("abc");
+    shifted.push(Code128Input::Data(0x09));
+    shifted.extend(data("def"));
+    let mut ais = data("0109521234543213");
+    ais.extend(data("10ABC123"));
+    ais.push(Code128Input::Fnc1);
+    ais.extend(data("21XYZ"));
+    let symbols = [
+        encoder.build(&data("PJJ123C")).unwrap(),
+        encoder.build(&data("Hello, World!")).unwrap(),
+        encoder.build(&data("00112233445566778899")).unwrap(),
+        encoder.build(&data("X1234567Y")).unwrap(),
+        encoder.build(&controls).unwrap(),
+        encoder.build(&shifted).unwrap(),
+        encoder.build_gs1(&ais).unwrap(),
+        encoder.build_gs1(&[]).unwrap(),
+    ];
+    for symbol in &symbols {
+        let SymbolMeta::Code128(meta) = &symbol.meta else {
+            panic!("expected Code128 meta");
+        };
+        let Encoding::Linear(expected) = encoder.encode(symbol).unwrap() else {
+            panic!("Code 128 encodes to a linear pattern");
+        };
+        let mut storage = [0u8; 64];
+        let mut buf = LinearBuf::new(&mut storage);
+        encoder.encode_into(&meta.symbols, &mut buf).unwrap();
+        assert_eq!(buf, expected);
+        assert_eq!(buf.len(), Code128Encoder::max_modules(meta.symbols.len()));
+        // Too-small storage reports a capacity error instead of panicking.
+        let mut tiny = [0u8; 2];
+        let err = encoder.encode_into(&meta.symbols, &mut LinearBuf::new(&mut tiny));
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    }
+    // Invalid sequences are rejected before anything is written.
+    let mut storage = [0u8; 64];
+    let mut buf = LinearBuf::new(&mut storage);
+    assert!(encoder.encode_into(&[], &mut buf).is_err());
+    assert!(encoder.encode_into(&[48, 42], &mut buf).is_err());
+    assert!(encoder.encode_into(&[104, 106], &mut buf).is_err());
+    assert!(buf.is_empty());
+}

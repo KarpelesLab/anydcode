@@ -200,3 +200,78 @@ fn build_text_never_worse_than_single_byte_segment() {
         );
     }
 }
+
+/// The heap-free `encode_into` path reproduces `build` + `Encode` exactly, both with
+/// pinned parameters and when choosing version and mask itself.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::segment::SegmentView;
+    use anyd::symbol::SymbolMeta;
+
+    let enc = QrEncoder::new();
+    let mut scratch = [0u8; QrEncoder::MAX_BUFFER_LEN];
+    let mut storage = [0u8; QrEncoder::MAX_BUFFER_LEN];
+    let long: String = (0..600).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+    for text in [
+        "",
+        "HELLO WORLD",
+        "0123456789",
+        "https://example.com/?q=1",
+        &long,
+    ] {
+        for level in [EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H] {
+            let symbol = enc.build_text(text, level).unwrap();
+            let Encoding::Matrix(expected) = enc.encode(&symbol).unwrap() else {
+                panic!("QR encodes to a matrix");
+            };
+            let SymbolMeta::Qr(meta) = symbol.meta else {
+                panic!("QR meta")
+            };
+            let views: Vec<SegmentView<'_>> = symbol.segments.iter().map(|s| s.view()).collect();
+
+            let (grid, pinned) = enc
+                .encode_into(
+                    &views,
+                    level,
+                    Some(meta.version),
+                    Some(meta.mask),
+                    &mut scratch,
+                    &mut storage,
+                )
+                .unwrap();
+            assert_eq!(grid, expected);
+            assert_eq!(pinned, meta);
+
+            let (grid, auto) = enc
+                .encode_into(&views, level, None, None, &mut scratch, &mut storage)
+                .unwrap();
+            assert_eq!(grid, expected);
+            assert_eq!(auto, meta);
+
+            // Exactly-sized buffers work; one byte short is a capacity error.
+            let len = QrEncoder::buffer_len(meta.version);
+            let (s, t) = (&mut scratch[..len], &mut storage[..len]);
+            assert!(enc.encode_into(&views, level, None, None, s, t).is_ok());
+            let err = enc.encode_into(
+                &views,
+                level,
+                None,
+                None,
+                &mut scratch[..len],
+                &mut storage[..len - 1],
+            );
+            assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+
+    // Single-mode convenience picks the densest mode.
+    let (grid, meta) = enc
+        .encode_text_into(b"0123456789", EcLevel::M, &mut scratch, &mut storage)
+        .unwrap();
+    let decoded = QrDecoder::new()
+        .decode(&Encoding::Matrix(anyd::output::BitMatrix::from(&grid)))
+        .unwrap();
+    assert_eq!(decoded.text().as_deref(), Some("0123456789"));
+    assert_eq!(decoded.meta, SymbolMeta::Qr(meta));
+    assert_eq!(decoded.modes(), vec![anyd::Mode::Numeric]);
+}

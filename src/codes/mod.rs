@@ -24,7 +24,7 @@ pub mod hanxin;
 pub mod maxicode;
 #[cfg(all(feature = "alloc", feature = "microqr"))]
 pub mod microqr;
-#[cfg(all(feature = "alloc", feature = "qr"))]
+#[cfg(feature = "qr")]
 pub mod qr;
 /// QR's GF(256) Reed–Solomon alone, for Micro QR / rMQR builds without QR itself.
 #[cfg(all(

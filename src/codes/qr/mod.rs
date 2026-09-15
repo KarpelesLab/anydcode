@@ -19,7 +19,7 @@
 
 #[cfg(feature = "decode")]
 mod decode;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
@@ -32,7 +32,7 @@ mod tables;
 
 #[cfg(feature = "decode")]
 pub use decode::QrDecoder;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 pub use encode::QrEncoder;
 #[cfg(feature = "scan")]
 pub use sample::{QrScanner, sample_grid, scan};
@@ -78,8 +78,12 @@ pub struct Version(u8);
 
 impl Version {
     /// Construct a version, validating the `1..=40` range.
-    pub fn new(v: u8) -> Option<Self> {
-        (1..=40).contains(&v).then_some(Version(v))
+    pub const fn new(v: u8) -> Option<Self> {
+        if v >= 1 && v <= 40 {
+            Some(Version(v))
+        } else {
+            None
+        }
     }
 
     /// The version number, 1–40.
@@ -110,7 +114,7 @@ impl Mask {
 }
 
 /// QR-specific parameters needed to re-encode a symbol identically.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QrMeta {
     /// Symbol version (size).
     pub version: Version,

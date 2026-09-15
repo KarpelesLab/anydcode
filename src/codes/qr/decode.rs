@@ -28,7 +28,8 @@ impl QrDecoder {
     /// Decode a sampled QR module grid into a [`Symbol`].
     pub fn decode_matrix(&self, matrix: &BitMatrix) -> Result<Symbol> {
         let version = version_from_size(matrix.width(), matrix.height())?;
-        let canvas = Canvas::from_matrix(version, matrix);
+        let mut storage = vec![0u8; Canvas::storage_len(version)];
+        let canvas = Canvas::from_matrix(version, matrix, &mut storage)?;
 
         // The format information (EC level + mask) is the most fragile part of a real
         // capture: it lives in single-module features hugging the finder rings, exactly
@@ -71,7 +72,7 @@ impl QrDecoder {
 /// Fraction of the two timing patterns (grid row 6 and column 6 between the finders)
 /// whose modules carry the expected dark/light alternation. `1.0` on a clean symbol;
 /// ≈`0.5` on a grid sampled from something that is not a QR.
-fn timing_score(canvas: &Canvas, version: Version) -> f32 {
+fn timing_score(canvas: &Canvas<'_>, version: Version) -> f32 {
     let dim = version.size();
     let mut ok = 0u32;
     let mut total = 0u32;
@@ -89,17 +90,16 @@ fn timing_score(canvas: &Canvas, version: Version) -> f32 {
 
 /// Decode the canvas under one assumed `(level, mask)` interpretation.
 fn decode_with_format(
-    canvas: &Canvas,
+    canvas: &Canvas<'_>,
     version: Version,
     level: EcLevel,
     mask: Mask,
 ) -> Result<Symbol> {
     // Read the masked data modules along the path, unmasking as we go.
-    let path = canvas.data_path();
-    let mut bits: Vec<bool> = Vec::with_capacity(path.len());
-    for &(x, y) in &path {
-        bits.push(canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y));
-    }
+    let bits: Vec<bool> = canvas
+        .data_path()
+        .map(|(x, y)| canvas.get(x, y) ^ Canvas::mask_bit(mask, x, y))
+        .collect();
 
     let ecb = ec_blocks(version, level);
     let total_cw = ecb.total_codewords();

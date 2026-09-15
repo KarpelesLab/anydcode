@@ -3,82 +3,86 @@
 //!
 //! [`Canvas`] is the shared workspace for both encoding (place data, then mask, then
 //! stamp format info) and decoding (read format info, unmask, then read data along
-//! the same path).
+//! the same path). It works over a bit-packed [`MatrixBuf`], so the encoder can run
+//! entirely in caller-provided memory.
 
 use super::tables::alignment_positions;
 use super::{EcLevel, Mask, Version};
+#[cfg(feature = "alloc")]
 use crate::output::BitMatrix;
-use alloc::{vec, vec::Vec};
+use crate::output::MatrixBuf;
 
 /// Quiet-zone width required around a QR symbol, in modules.
 pub const QUIET_ZONE: usize = 4;
 
-/// A square module grid plus a parallel map of which cells are function patterns
-/// (reserved and never carry data).
-pub struct Canvas {
+/// A square QR module grid for one version. Which cells are function patterns is
+/// computed ([`is_function_module`]), not stored.
+pub struct Canvas<'a> {
     version: Version,
     size: usize,
-    /// `true` = dark module.
-    dark: Vec<bool>,
-    /// `true` = function-pattern / reserved cell (not part of the data stream).
-    reserved: Vec<bool>,
+    grid: MatrixBuf<'a>,
 }
 
-impl Canvas {
-    /// Build a canvas for `version` with all function patterns placed and reserved,
+impl<'a> Canvas<'a> {
+    /// Bytes of storage a canvas for `version` needs.
+    pub const fn storage_len(version: Version) -> usize {
+        let size = 17 + 4 * version.0 as usize;
+        MatrixBuf::bytes_for(size, size)
+    }
+
+    /// Build a canvas for `version` over `storage` with all function patterns placed,
     /// but no data, format or version bits yet.
-    pub fn new(version: Version) -> Self {
+    ///
+    /// # Errors
+    /// [`crate::Error::Capacity`] if `storage` is shorter than [`Canvas::storage_len`].
+    pub fn new(version: Version, storage: &'a mut [u8]) -> crate::Result<Self> {
         let size = version.size();
+        let grid = MatrixBuf::new(storage, size, size, QUIET_ZONE)?;
         let mut c = Canvas {
             version,
             size,
-            dark: vec![false; size * size],
-            reserved: vec![false; size * size],
+            grid,
         };
         c.place_finders();
         c.place_timing();
         c.place_alignment();
-        c.reserve_format_and_dark();
-        c.reserve_version();
-        c
+        // The always-dark module.
+        c.grid.set(8, size - 8, true);
+        Ok(c)
     }
 
-    /// Rebuild a canvas from an already-sampled matrix of the given version: function
-    /// patterns are reserved as usual, and every module value is taken from `matrix`.
-    pub fn from_matrix(version: Version, matrix: &BitMatrix) -> Self {
-        let mut c = Canvas::new(version);
-        for y in 0..c.size {
-            for x in 0..c.size {
-                let i = y * c.size + x;
-                c.dark[i] = matrix.get(x, y);
+    /// Rebuild a canvas from an already-sampled matrix of the given version: every
+    /// module value is taken from `matrix`.
+    #[cfg(feature = "alloc")]
+    pub fn from_matrix(
+        version: Version,
+        matrix: &BitMatrix,
+        storage: &'a mut [u8],
+    ) -> crate::Result<Self> {
+        let size = version.size();
+        let mut grid = MatrixBuf::new(storage, size, size, QUIET_ZONE)?;
+        for y in 0..size {
+            for x in 0..size {
+                if matrix.get(x, y) {
+                    grid.set(x, y, true);
+                }
             }
         }
-        c
-    }
-
-    fn idx(&self, x: usize, y: usize) -> usize {
-        y * self.size + x
+        Ok(Canvas {
+            version,
+            size,
+            grid,
+        })
     }
 
     /// Module value at `(x, y)`.
     pub fn get(&self, x: usize, y: usize) -> bool {
-        self.dark[self.idx(x, y)]
+        self.grid.get(x, y)
     }
 
-    fn set(&mut self, x: usize, y: usize, dark: bool) {
-        let i = self.idx(x, y);
-        self.dark[i] = dark;
-    }
-
-    fn set_fn(&mut self, x: usize, y: usize, dark: bool) {
-        let i = self.idx(x, y);
-        self.dark[i] = dark;
-        self.reserved[i] = true;
-    }
-
-    fn reserve(&mut self, x: usize, y: usize) {
-        let i = self.idx(x, y);
-        self.reserved[i] = true;
+    /// The finished module grid.
+    pub fn into_grid(self) -> MatrixBuf<'a> {
+        self.grid
     }
 
     fn place_finders(&mut self) {
@@ -88,26 +92,17 @@ impl Canvas {
                 for dx in 0..7 {
                     let ring = dx == 0 || dx == 6 || dy == 0 || dy == 6;
                     let core = (2..=4).contains(&dx) && (2..=4).contains(&dy);
-                    self.set_fn(ox + dx, oy + dy, ring || core);
+                    self.grid.set(ox + dx, oy + dy, ring || core);
                 }
             }
         }
-        // Separators: the one-module light border on the inner edges of each finder.
-        for i in 0..8 {
-            self.set_fn(i, 7, false);
-            self.set_fn(7, i, false);
-            self.set_fn(s - 1 - i, 7, false);
-            self.set_fn(s - 8, i, false);
-            self.set_fn(i, s - 8, false);
-            self.set_fn(7, s - 1 - i, false);
-        }
+        // Separators are light, which a fresh grid already is.
     }
 
     fn place_timing(&mut self) {
-        for i in 8..self.size - 8 {
-            let dark = i % 2 == 0;
-            self.set_fn(i, 6, dark);
-            self.set_fn(6, i, dark);
+        for i in (8..self.size - 8).step_by(2) {
+            self.grid.set(i, 6, true);
+            self.grid.set(6, i, true);
         }
     }
 
@@ -125,64 +120,25 @@ impl Canvas {
                 for dy in -2i32..=2 {
                     for dx in -2i32..=2 {
                         let dark = dx.abs().max(dy.abs()) != 1;
-                        self.set_fn((cx as i32 + dx) as usize, (cy as i32 + dy) as usize, dark);
+                        self.grid
+                            .set((cx as i32 + dx) as usize, (cy as i32 + dy) as usize, dark);
                     }
                 }
             }
         }
     }
 
-    fn reserve_format_and_dark(&mut self) {
-        let s = self.size;
-        for i in 0..9 {
-            self.reserve(8, i);
-            self.reserve(i, 8);
+    /// The ordered `(x, y)` data-module coordinates: two columns at a time from the
+    /// right, zigzagging up then down, skipping the vertical timing column.
+    pub fn data_path(&self) -> DataPath {
+        DataPath {
+            version: self.version,
+            size: self.size,
+            col: self.size - 1,
+            row: 0,
+            left: false,
+            upward: true,
         }
-        for i in 0..8 {
-            self.reserve(8, s - 1 - i);
-            self.reserve(s - 1 - i, 8);
-        }
-        // The always-dark module.
-        self.set_fn(8, s - 8, true);
-    }
-
-    fn reserve_version(&mut self) {
-        if self.version.number() < 7 {
-            return;
-        }
-        let s = self.size;
-        for i in 0..18 {
-            let a = s - 11 + i % 3;
-            let b = i / 3;
-            self.reserve(a, b);
-            self.reserve(b, a);
-        }
-    }
-
-    /// The ordered list of `(x, y)` data-module coordinates: two columns at a time
-    /// from the right, zigzagging up then down, skipping the vertical timing column.
-    pub fn data_path(&self) -> Vec<(usize, usize)> {
-        let s = self.size;
-        let mut path = Vec::new();
-        let mut upward = true;
-        let mut col = s as i32 - 1;
-        while col > 0 {
-            if col == 6 {
-                col -= 1; // skip vertical timing column
-            }
-            for i in 0..s {
-                let y = if upward { s - 1 - i } else { i };
-                for c in [col, col - 1] {
-                    let x = c as usize;
-                    if !self.reserved[self.idx(x, y)] {
-                        path.push((x, y));
-                    }
-                }
-            }
-            upward = !upward;
-            col -= 2;
-        }
-        path
     }
 
     /// Whether the mask flips the module at `(x, y)` (x = column j, y = row i).
@@ -200,13 +156,13 @@ impl Canvas {
         }
     }
 
-    /// XOR the mask pattern across all non-reserved (data) modules.
+    /// XOR the mask pattern across all data modules. Applying the same mask twice
+    /// restores the original grid.
     pub fn apply_mask(&mut self, mask: Mask) {
         for y in 0..self.size {
             for x in 0..self.size {
-                let i = self.idx(x, y);
-                if !self.reserved[i] && Canvas::mask_bit(mask, x, y) {
-                    self.dark[i] ^= true;
+                if Canvas::mask_bit(mask, x, y) && !is_function_module(self.version, x, y) {
+                    self.grid.toggle(x, y);
                 }
             }
         }
@@ -217,19 +173,19 @@ impl Canvas {
         let bits = format_bits(level, mask);
         let s = self.size;
         for i in 0..=5 {
-            self.set_fn(8, i, bit(bits, i));
+            self.grid.set(8, i, bit(bits, i));
         }
-        self.set_fn(8, 7, bit(bits, 6));
-        self.set_fn(8, 8, bit(bits, 7));
-        self.set_fn(7, 8, bit(bits, 8));
+        self.grid.set(8, 7, bit(bits, 6));
+        self.grid.set(8, 8, bit(bits, 7));
+        self.grid.set(7, 8, bit(bits, 8));
         for i in 9..15 {
-            self.set_fn(14 - i, 8, bit(bits, i));
+            self.grid.set(14 - i, 8, bit(bits, i));
         }
         for i in 0..8 {
-            self.set_fn(s - 1 - i, 8, bit(bits, i));
+            self.grid.set(s - 1 - i, 8, bit(bits, i));
         }
         for i in 8..15 {
-            self.set_fn(8, s - 15 + i, bit(bits, i));
+            self.grid.set(8, s - 15 + i, bit(bits, i));
         }
     }
 
@@ -244,35 +200,22 @@ impl Canvas {
             let b = bit32(bits, i);
             let a = s - 11 + i % 3;
             let c = i / 3;
-            self.set_fn(a, c, b);
-            self.set_fn(c, a, b);
+            self.grid.set(a, c, b);
+            self.grid.set(c, a, b);
         }
     }
 
     /// Write one data bit into the module at `(x, y)` (used by the encoder while
     /// walking [`Canvas::data_path`]).
     pub fn place_data_bit(&mut self, x: usize, y: usize, dark: bool) {
-        self.set(x, y, dark);
-    }
-
-    /// Convert to a [`BitMatrix`] with the QR quiet zone recorded.
-    pub fn to_bitmatrix(&self) -> BitMatrix {
-        let mut m = BitMatrix::new(self.size, self.size, QUIET_ZONE);
-        for y in 0..self.size {
-            for x in 0..self.size {
-                if self.dark[self.idx(x, y)] {
-                    m.set(x, y, true);
-                }
-            }
-        }
-        m
+        self.grid.set(x, y, dark);
     }
 
     /// The ISO/IEC 18004 mask penalty score for the current module values, summing
     /// the four standard rules. Lower is better; used to pick a data mask.
     pub fn penalty(&self) -> u32 {
         let s = self.size;
-        let get = |x: usize, y: usize| self.dark[y * s + x];
+        let get = |x: usize, y: usize| self.grid.get(x, y);
         let mut score = 0u32;
 
         // Rule 1: runs of ≥5 same-colour modules in rows and columns.
@@ -329,7 +272,7 @@ impl Canvas {
         }
 
         // Rule 4: deviation of the dark-module proportion from 50%.
-        let dark = self.dark.iter().filter(|&&d| d).count() as u32;
+        let dark = self.grid.count_dark() as u32;
         let total = (s * s) as u32;
         let percent = dark * 100 / total;
         let k = (percent as i32 - 50).unsigned_abs() / 5;
@@ -370,6 +313,86 @@ impl Canvas {
             (None, None) => None,
         }
     }
+}
+
+/// Iterator over the data-module coordinates of a version, in placement order.
+pub struct DataPath {
+    version: Version,
+    size: usize,
+    /// Right column of the current two-column strip.
+    col: usize,
+    /// Step within the strip's vertical sweep.
+    row: usize,
+    /// Whether the next module is the strip's left column.
+    left: bool,
+    upward: bool,
+}
+
+impl Iterator for DataPath {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<(usize, usize)> {
+        loop {
+            if self.row == self.size {
+                // Strip finished: move two columns left, skipping the timing column.
+                if self.col < 2 {
+                    return None;
+                }
+                self.col -= 2;
+                if self.col == 6 {
+                    self.col -= 1;
+                }
+                self.row = 0;
+                self.upward = !self.upward;
+            }
+            let y = if self.upward {
+                self.size - 1 - self.row
+            } else {
+                self.row
+            };
+            let x = if self.left { self.col - 1 } else { self.col };
+            if self.left {
+                self.row += 1;
+            }
+            self.left = !self.left;
+            if !is_function_module(self.version, x, y) {
+                return Some((x, y));
+            }
+        }
+    }
+}
+
+/// Whether `(x, y)` is a function-pattern / reserved module for `version`: finders
+/// and separators, timing patterns, alignment patterns, format and version areas,
+/// and the always-dark module. Such modules never carry data.
+pub fn is_function_module(version: Version, x: usize, y: usize) -> bool {
+    let s = version.size();
+    // Finders + separators + format areas (and the dark module).
+    if (x <= 8 && y <= 8) || (x >= s - 8 && y <= 8) || (x <= 8 && y >= s - 8) {
+        return true;
+    }
+    // Timing patterns.
+    if x == 6 || y == 6 {
+        return true;
+    }
+    // Version information blocks.
+    if version.number() >= 7
+        && ((x >= s - 11 && x < s - 8 && y < 6) || (y >= s - 11 && y < s - 8 && x < 6))
+    {
+        return true;
+    }
+    // Alignment patterns, except the three centers that would overlap a finder.
+    let positions = alignment_positions(version);
+    let last = s - 7;
+    positions.iter().any(|&cy| {
+        let cy = cy as usize;
+        cy.abs_diff(y) <= 2
+            && positions.iter().any(|&cx| {
+                let cx = cx as usize;
+                let on_finder = (cy == 6 && (cx == 6 || cx == last)) || (cy == last && cx == 6);
+                !on_finder && cx.abs_diff(x) <= 2
+            })
+    })
 }
 
 fn bit(bits: u16, i: usize) -> bool {
@@ -428,6 +451,7 @@ fn version_bits(version: Version) -> u32 {
 
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
+    use super::super::tables::{ec_blocks, remainder_bits};
     use super::*;
 
     #[test]
@@ -446,15 +470,19 @@ mod tests {
 
     #[test]
     fn data_path_covers_all_data_modules() {
-        let v = Version::new(1).unwrap();
-        let c = Canvas::new(v);
-        let path = c.data_path();
-        // Version 1: 26 codewords * 8 = 208 data bits.
-        assert_eq!(path.len(), 208);
-        // No duplicates.
-        let mut seen = std::collections::HashSet::new();
-        for p in &path {
-            assert!(seen.insert(*p), "duplicate module {p:?}");
+        for v in 1..=40 {
+            let version = Version::new(v).unwrap();
+            let mut storage = [0u8; Canvas::storage_len(Version(40))];
+            let c = Canvas::new(version, &mut storage).unwrap();
+            let mut seen = std::collections::HashSet::new();
+            for p in c.data_path() {
+                assert!(!is_function_module(version, p.0, p.1));
+                assert!(seen.insert(p), "v{v}: duplicate module {p:?}");
+            }
+            // Every data module is visited: codewords plus remainder bits.
+            let expected =
+                ec_blocks(version, EcLevel::L).total_codewords() * 8 + remainder_bits(version);
+            assert_eq!(seen.len(), expected, "v{v}");
         }
     }
 }

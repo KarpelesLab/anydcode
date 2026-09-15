@@ -38,20 +38,26 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::traits::Encode;
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
 /// Quiet-zone width in narrow modules on each side.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// MSI Plessey check-digit scheme.
@@ -71,7 +77,7 @@ pub enum MsiCheck {
 }
 
 /// Parameters required to re-encode an MSI Plessey / Plessey symbol identically.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MsiMeta {
     /// Check scheme (MSI only; ignored for Plessey, which always carries its CRC).
     pub check: MsiCheck,
@@ -80,10 +86,16 @@ pub struct MsiMeta {
 // ---------- MSI check arithmetic ----------
 
 /// Luhn mod-10 check digit for ASCII `digits` (rightmost digit doubled).
+#[cfg(test)]
 fn msi_mod10(digits: &[u8]) -> u8 {
+    mod10_split(digits, &[])
+}
+
+/// Luhn mod-10 check digit for the ASCII digit string `head` followed by `tail`.
+fn mod10_split(head: &[u8], tail: &[u8]) -> u8 {
     let mut sum = 0u32;
     let mut double = true;
-    for &c in digits.iter().rev() {
+    for &c in head.iter().chain(tail).rev() {
         let mut v = (c - b'0') as u32;
         if double {
             v *= 2;
@@ -110,37 +122,39 @@ fn msi_mod11(digits: &[u8]) -> Option<u8> {
     (c < 10).then_some(c as u8)
 }
 
-/// The full digit string (data + check digits) for a scheme.
-fn apply_check(data: &[u8], scheme: MsiCheck) -> Result<Vec<u8>> {
-    let mut out = data.to_vec();
+/// The ASCII check digits a scheme appends to `data`; only the first
+/// [`check_len`] bytes of the returned array are meaningful.
+fn check_digits(data: &[u8], scheme: MsiCheck) -> Result<[u8; 2]> {
+    let mod11 =
+        |d: &[u8]| msi_mod11(d).ok_or_else(|| Error::invalid_data("MSI mod-11 check digit is 10"));
+    let mut out = [0u8; 2];
     match scheme {
         MsiCheck::None => {}
-        MsiCheck::Mod10 => out.push(b'0' + msi_mod10(data)),
-        MsiCheck::Mod11 => {
-            let c = msi_mod11(data)
-                .ok_or_else(|| Error::invalid_data("MSI mod-11 check digit is 10"))?;
-            out.push(b'0' + c);
-        }
+        MsiCheck::Mod10 => out[0] = b'0' + mod10_split(data, &[]),
+        MsiCheck::Mod11 => out[0] = b'0' + mod11(data)?,
         MsiCheck::Mod1010 => {
-            let c1 = msi_mod10(&out);
-            out.push(b'0' + c1);
-            let c2 = msi_mod10(&out);
-            out.push(b'0' + c2);
+            out[0] = b'0' + mod10_split(data, &[]);
+            out[1] = b'0' + mod10_split(data, &out[..1]);
         }
         MsiCheck::Mod1110 => {
-            let c1 = msi_mod11(&out)
-                .ok_or_else(|| Error::invalid_data("MSI mod-11 check digit is 10"))?;
-            out.push(b'0' + c1);
-            let c2 = msi_mod10(&out);
-            out.push(b'0' + c2);
+            out[0] = b'0' + mod11(data)?;
+            out[1] = b'0' + mod10_split(data, &out[..1]);
         }
     }
     Ok(out)
 }
 
+/// The full digit string (data + check digits) for a scheme.
+#[cfg(feature = "alloc")]
+fn apply_check(data: &[u8], scheme: MsiCheck) -> Result<Vec<u8>> {
+    let check = check_digits(data, scheme)?;
+    let mut out = data.to_vec();
+    out.extend_from_slice(&check[..check_len(scheme)]);
+    Ok(out)
+}
+
 /// Number of check digits a scheme appends.
-#[cfg(feature = "decode")]
-fn check_len(scheme: MsiCheck) -> usize {
+const fn check_len(scheme: MsiCheck) -> usize {
     match scheme {
         MsiCheck::None => 0,
         MsiCheck::Mod10 | MsiCheck::Mod11 => 1,
@@ -148,7 +162,7 @@ fn check_len(scheme: MsiCheck) -> usize {
     }
 }
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn ensure_digits(digits: &[u8]) -> Result<()> {
     if digits.is_empty() {
         return Err(Error::invalid_data("MSI payload is empty"));
@@ -163,9 +177,9 @@ fn ensure_digits(digits: &[u8]) -> Result<()> {
 // ---------- shared helpers ----------
 
 /// Push module booleans from a `"10"` string (`'1'` = bar).
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_bits(modules: &mut Vec<bool>, bits: &str) {
-    modules.extend(bits.bytes().map(|b| b == b'1'));
+#[cfg(feature = "encode")]
+fn push_bits(out: &mut impl LinearSink, bits: &str) -> Result<()> {
+    bits.bytes().try_for_each(|b| out.push(b == b'1'))
 }
 
 /// Run-length encode `modules` into element widths, starting with a bar.
@@ -192,22 +206,17 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
 
 // ---------- MSI encoding ----------
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn msi_encode(digits: &[u8]) -> Vec<bool> {
-    let mut modules = Vec::new();
-    push_bits(&mut modules, "110"); // start
-    for &d in digits {
+/// Emit an MSI symbol for validated ASCII `digits` followed by the `check` digits.
+#[cfg(feature = "encode")]
+fn msi_encode(out: &mut impl LinearSink, digits: &[u8], check: &[u8]) -> Result<()> {
+    push_bits(out, "110")?; // start
+    for &d in digits.iter().chain(check) {
         let v = d - b'0';
         for bit in (0..4).rev() {
-            if (v >> bit) & 1 == 1 {
-                push_bits(&mut modules, "110");
-            } else {
-                push_bits(&mut modules, "100");
-            }
+            push_bits(out, if (v >> bit) & 1 == 1 { "110" } else { "100" })?;
         }
     }
-    push_bits(&mut modules, "1001"); // stop
-    modules
+    push_bits(out, "1001") // stop
 }
 
 #[cfg(feature = "decode")]
@@ -264,9 +273,15 @@ const PLESSEY_GRID: [u8; 9] = [1, 1, 1, 1, 0, 1, 0, 0, 1];
 const PLESSEY_START: [u32; 8] = [3, 1, 3, 1, 1, 3, 3, 1];
 /// Plessey stop / termination element widths, from zint.
 const PLESSEY_STOP: [u32; 9] = [3, 3, 1, 3, 1, 1, 3, 1, 3];
+/// Modules in the Plessey start (sum of [`PLESSEY_START`]).
+#[cfg(feature = "encode")]
+const PLESSEY_START_MODULES: usize = 16;
+/// Modules in the Plessey stop (sum of [`PLESSEY_STOP`]).
+#[cfg(feature = "encode")]
+const PLESSEY_STOP_MODULES: usize = 19;
 
 /// Value of a Plessey hex digit.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn hex_value(c: u8) -> Result<u8> {
     match c {
         b'0'..=b'9' => Ok(c - b'0'),
@@ -280,58 +295,61 @@ fn hex_char(v: u8) -> u8 {
     if v < 10 { b'0' + v } else { b'A' + (v - 10) }
 }
 
-/// Compute the 8 CRC bits for the data bit vector (LSB-first per digit).
-fn plessey_crc(data_bits: &[u8]) -> [u8; 8] {
-    let mut work = data_bits.to_vec();
-    work.extend([0u8; 8]);
-    for i in 0..data_bits.len() {
-        if work[i] == 1 {
-            for (j, &g) in PLESSEY_GRID.iter().enumerate() {
-                work[i + j] ^= g;
-            }
+/// Compute the 8 CRC bits for a data bit stream (LSB-first per digit).
+///
+/// Polynomial long division by [`PLESSEY_GRID`], run as a shift register over the
+/// data followed by eight zero bits, so no working copy of the stream is needed.
+fn plessey_crc(data_bits: impl Iterator<Item = u8>) -> [u8; 8] {
+    // Register bit k holds the working bit k + 1 positions past the current one;
+    // `taps` is PLESSEY_GRID[1..] (GRID[0] only clears the leading bit).
+    let taps = PLESSEY_GRID[1..]
+        .iter()
+        .enumerate()
+        .fold(0u8, |acc, (k, &g)| acc | (g << k));
+    let mut reg = 0u8;
+    for bit in data_bits.chain([0u8; 8]) {
+        let top = reg & 1;
+        reg = (reg >> 1) | (bit << 7);
+        if top == 1 {
+            reg ^= taps;
         }
     }
-    let mut crc = [0u8; 8];
-    crc.copy_from_slice(&work[data_bits.len()..data_bits.len() + 8]);
-    crc
+    core::array::from_fn(|k| (reg >> k) & 1)
+}
+
+/// The 4 data bits of each (validated) hex digit in `digits`, LSB first.
+#[cfg(feature = "encode")]
+fn plessey_bits(digits: &[u8]) -> impl Iterator<Item = u8> + '_ {
+    digits.iter().flat_map(|&c| {
+        let v = hex_value(c).expect("validated Plessey digit");
+        (0..4).map(move |bit| (v >> bit) & 1)
+    })
 }
 
 /// Render an alternating (bar, space, ...) width sequence.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn render_widths(modules: &mut Vec<bool>, widths: &[u32]) {
+#[cfg(feature = "encode")]
+fn render_widths(out: &mut impl LinearSink, widths: &[u32]) -> Result<()> {
     for (i, &w) in widths.iter().enumerate() {
-        modules.extend(core::iter::repeat_n(i % 2 == 0, w as usize));
+        out.push_run(i % 2 == 0, w as usize)?;
     }
+    Ok(())
 }
 
 /// One data/CRC bit → its bar/space widths (`0` → 1,3; `1` → 3,1).
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn bit_widths(bit: u8) -> [u32; 2] {
     if bit == 1 { [3, 1] } else { [1, 3] }
 }
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn plessey_encode(digits: &[u8]) -> Result<Vec<bool>> {
-    // Data bits, 4 per digit, LSB first.
-    let mut data_bits = Vec::with_capacity(digits.len() * 4);
-    for &c in digits {
-        let v = hex_value(c)?;
-        for bit in 0..4 {
-            data_bits.push((v >> bit) & 1);
-        }
+/// Emit a Plessey symbol for validated hex `digits`.
+#[cfg(feature = "encode")]
+fn plessey_encode(out: &mut impl LinearSink, digits: &[u8]) -> Result<()> {
+    let crc = plessey_crc(plessey_bits(digits));
+    render_widths(out, &PLESSEY_START)?;
+    for b in plessey_bits(digits).chain(crc) {
+        render_widths(out, &bit_widths(b))?;
     }
-    let crc = plessey_crc(&data_bits);
-
-    let mut modules = Vec::new();
-    render_widths(&mut modules, &PLESSEY_START);
-    for &b in &data_bits {
-        render_widths(&mut modules, &bit_widths(b));
-    }
-    for &b in &crc {
-        render_widths(&mut modules, &bit_widths(b));
-    }
-    render_widths(&mut modules, &PLESSEY_STOP);
-    Ok(modules)
+    render_widths(out, &PLESSEY_STOP)
 }
 
 /// Match a run slice against a width pattern by wide/narrow class.
@@ -372,7 +390,7 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
     }
     let data_bits = &bits[..bits.len() - 8];
     let crc = &bits[bits.len() - 8..];
-    if plessey_crc(data_bits) != crc {
+    if plessey_crc(data_bits.iter().copied()) != crc {
         return Err(Error::undecodable("Plessey CRC mismatch"));
     }
     let mut digits = Vec::with_capacity(data_bits.len() / 4);
@@ -389,17 +407,67 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
 // ---------- public API ----------
 
 /// MSI Plessey / Plessey encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MsiEncoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl MsiEncoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Number of modules [`MsiEncoder::encode_into`] emits for `data_len` payload
+    /// digits, excluding quiet zones (exact). `meta.check` only matters for
+    /// [`Symbology::MsiPlessey`]; any other symbology is sized as Plessey.
+    pub const fn max_modules(symbology: Symbology, data_len: usize, meta: &MsiMeta) -> usize {
+        match symbology {
+            Symbology::MsiPlessey => 3 + 12 * (data_len + check_len(meta.check)) + 4,
+            _ => PLESSEY_START_MODULES + 16 * data_len + 4 * 8 + PLESSEY_STOP_MODULES,
+        }
+    }
+
+    /// Heap-free encoding: write `data` as `symbology` ([`Symbology::MsiPlessey`] or
+    /// [`Symbology::Plessey`]) to `out`.
+    ///
+    /// MSI Plessey takes ASCII digits and appends the check digits of `meta.check`;
+    /// Plessey takes hex digits `0-9 A-F` and ignores `meta`. The payload must not be
+    /// empty. The input is validated before the first module is written. Size a
+    /// [`LinearBuf`](crate::output::LinearBuf) with [`MsiEncoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        symbology: Symbology,
+        data: &[u8],
+        meta: &MsiMeta,
+        out: &mut S,
+    ) -> Result<()> {
+        match symbology {
+            Symbology::MsiPlessey => {
+                ensure_digits(data)?;
+                let check = check_digits(data, meta.check)?;
+                out.begin(QUIET_ZONE)?;
+                msi_encode(out, data, &check[..check_len(meta.check)])
+            }
+            Symbology::Plessey => {
+                for &c in data {
+                    hex_value(c)?;
+                }
+                if data.is_empty() {
+                    return Err(Error::invalid_data("Plessey payload is empty"));
+                }
+                out.begin(QUIET_ZONE)?;
+                plessey_encode(out, data)
+            }
+            _ => Err(Error::invalid_parameter(
+                "MsiEncoder given an unsupported symbology",
+            )),
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl MsiEncoder {
     /// Build an MSI Plessey symbol from `digits` with the given check `scheme`.
     pub fn build_msi(&self, digits: &[u8], scheme: MsiCheck) -> Result<Symbol> {
         ensure_digits(digits)?;
@@ -434,23 +502,14 @@ impl Encode for MsiEncoder {
             SymbolMeta::Msi(m) => m,
             _ => return Err(Error::invalid_parameter("symbol missing MsiMeta")),
         };
-        let modules = match symbol.symbology {
-            Symbology::MsiPlessey => {
-                let digits = symbol.payload_bytes();
-                ensure_digits(&digits)?;
-                msi_encode(&apply_check(&digits, meta.check)?)
-            }
-            Symbology::Plessey => plessey_encode(&symbol.payload_bytes())?,
-            _ => {
-                return Err(Error::invalid_parameter(
-                    "MsiEncoder given an unsupported symbology",
-                ));
-            }
-        };
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(
+            symbol.symbology,
+            &symbol.payload_bytes(),
+            meta,
+            &mut pattern,
+        )?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 
@@ -525,6 +584,27 @@ mod tests {
         // Wikipedia MSI example: 1234567 has mod-10 and mod-11 check digit 4.
         assert_eq!(msi_mod10(b"1234567"), 4);
         assert_eq!(msi_mod11(b"1234567"), Some(4));
+    }
+
+    #[test]
+    fn plessey_crc_matches_long_division() {
+        // Reference: explicit polynomial long division over a working copy.
+        fn reference(data_bits: &[u8]) -> [u8; 8] {
+            let mut work = data_bits.to_vec();
+            work.extend([0u8; 8]);
+            for i in 0..data_bits.len() {
+                if work[i] == 1 {
+                    for (j, &g) in PLESSEY_GRID.iter().enumerate() {
+                        work[i + j] ^= g;
+                    }
+                }
+            }
+            work[data_bits.len()..].try_into().unwrap()
+        }
+        for digits in [&b"0"[..], b"1234", b"ABCDEF", b"DEADBEEF", b"F0F0F0F0F1"] {
+            let bits: Vec<u8> = plessey_bits(digits).collect();
+            assert_eq!(plessey_crc(bits.iter().copied()), reference(&bits));
+        }
     }
 
     #[test]

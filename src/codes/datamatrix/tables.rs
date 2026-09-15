@@ -24,18 +24,18 @@ pub struct SquareSpec {
 
 impl SquareSpec {
     /// Total codewords (data + EC).
-    pub fn total_cw(&self) -> usize {
+    pub const fn total_cw(&self) -> usize {
         self.data_cw + self.ec_cw
     }
 
     /// EC codewords per interleaved block (uniform across blocks).
-    pub fn ec_per_block(&self) -> usize {
+    pub const fn ec_per_block(&self) -> usize {
         self.ec_cw / self.blocks
     }
 
     /// Side length of the full (multi-region) mapping matrix, i.e. the data area
     /// excluding every region's finder/timing border.
-    pub fn mapping_size(&self) -> usize {
+    pub const fn mapping_size(&self) -> usize {
         self.region_size * self.regions_per_axis
     }
 }
@@ -74,17 +74,24 @@ pub fn all_squares() -> &'static [SquareSpec] {
     SQUARE
 }
 
+/// The largest modelled square symbol (144×144).
+pub const LARGEST_SQUARE: SquareSpec = SQUARE[SQUARE.len() - 1];
+
 /// The smallest square symbol whose data capacity holds `data_cw` codewords.
 pub fn smallest_square_for(data_cw: usize) -> Option<SquareSpec> {
     all_squares().iter().copied().find(|s| s.data_cw >= data_cw)
 }
 
 /// The square symbol of a given full side length, if it exists.
-pub fn square_by_size(symbol_size: usize) -> Option<SquareSpec> {
-    all_squares()
-        .iter()
-        .copied()
-        .find(|s| s.symbol_size == symbol_size)
+pub const fn square_by_size(symbol_size: usize) -> Option<SquareSpec> {
+    let mut i = 0;
+    while i < SQUARE.len() {
+        if SQUARE[i].symbol_size == symbol_size {
+            return Some(SQUARE[i]);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(all(test, feature = "encode", feature = "decode"))]

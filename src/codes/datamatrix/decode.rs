@@ -5,7 +5,7 @@
 //! with Reed–Solomon, and recovers the exact segments and [`DataMatrixMeta`] so the
 //! result re-encodes identically.
 
-use super::placement::{placement_map, strip_borders};
+use super::placement::{mapping_to_symbol, occupancy_bytes, place};
 use super::tables::{SquareSpec, square_by_size};
 use super::{DataMatrixMeta, Encodation};
 use crate::error::{Error, Result};
@@ -14,7 +14,7 @@ use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 const PAD: u8 = 129;
 const BASE256_LATCH: u8 = 231;
@@ -38,21 +38,16 @@ impl DataMatrixDecoder {
         let spec = square_by_size(matrix.width())
             .ok_or_else(|| Error::undecodable("grid size is not a valid Data Matrix square"))?;
 
-        let mapping = strip_borders(&spec, matrix);
-        let ms = spec.mapping_size();
-        let pm = placement_map(ms, ms);
-
         // Read codewords back out of the mapping matrix.
-        let mut full = Vec::with_capacity(pm.codewords.len());
-        for positions in &pm.codewords {
-            let mut byte = 0u8;
-            for (bit, &(r, col)) in positions.iter().enumerate() {
-                if mapping[r * ms + col] {
-                    byte |= 1 << (7 - bit);
-                }
+        let ms = spec.mapping_size();
+        let mut full = vec![0u8; spec.total_cw()];
+        let mut occupied = vec![0u8; occupancy_bytes(ms, ms)];
+        place(ms, ms, &mut occupied, |c, bit, r, col| {
+            let (x, y) = mapping_to_symbol(&spec, r, col);
+            if matrix.get(x, y) {
+                full[c] |= 1 << (7 - bit);
             }
-            full.push(byte);
-        }
+        });
 
         let data = deinterleave_and_correct(&full, &spec)?;
         let (segments, encodations) = parse_codewords(&data)?;

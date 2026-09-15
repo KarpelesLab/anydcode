@@ -8,9 +8,10 @@
 //! (generator base 1), unlike QR which starts at `α^0`. Polynomials are coefficient
 //! vectors, most-significant coefficient first.
 
-/// Primitive polynomial for the Data Matrix field, without the implicit `x^8` bit.
+#[cfg(feature = "alloc")]
 use alloc::{vec, vec::Vec};
 
+/// Primitive polynomial for the Data Matrix field, without the implicit `x^8` bit.
 const PRIMITIVE: u16 = 0x12D;
 
 /// Index of the first consecutive root of the RS generator polynomial (`α^1`).
@@ -70,43 +71,74 @@ pub fn inv(a: u8) -> u8 {
     div(1, a)
 }
 
-/// Multiply two polynomials (coefficients most-significant first).
-fn poly_mul(a: &[u8], b: &[u8]) -> Vec<u8> {
-    let mut out = vec![0u8; a.len() + b.len() - 1];
-    for (i, &av) in a.iter().enumerate() {
-        for (j, &bv) in b.iter().enumerate() {
-            out[i + j] ^= mul(av, bv);
+/// Largest number of Reed–Solomon EC codewords in one Data Matrix block (the 48×48,
+/// 96×96 and 120×120 symbols use 68).
+pub const MAX_EC_PER_BLOCK: usize = 68;
+
+/// Write the Reed–Solomon generator polynomial of degree `ec_len`,
+/// `∏(x - α^i)` for `i` in `GENERATOR_BASE..GENERATOR_BASE + ec_len`, into
+/// `out[..=ec_len]` (most-significant coefficient first).
+///
+/// # Panics
+/// Panics if `out` is shorter than `ec_len + 1`.
+pub fn generator_into(ec_len: usize, out: &mut [u8]) {
+    let g = &mut out[..=ec_len];
+    g.fill(0);
+    g[0] = 1;
+    for i in 0..ec_len {
+        // Multiply by (x + α^(base + i)); the degree grows from i to i + 1.
+        let a = exp(GENERATOR_BASE + i);
+        for k in (1..=i + 1).rev() {
+            g[k] ^= mul(g[k - 1], a);
         }
     }
-    out
 }
 
-/// The Reed–Solomon generator polynomial of degree `ec_len`,
-/// `∏(x - α^i)` for `i` in `GENERATOR_BASE..GENERATOR_BASE + ec_len`.
+/// The Reed–Solomon generator polynomial of degree `ec_len` (see [`generator_into`]).
+#[cfg(feature = "alloc")]
 pub fn generator(ec_len: usize) -> Vec<u8> {
-    let mut g = vec![1u8];
-    for i in 0..ec_len {
-        g = poly_mul(&g, &[1, exp(GENERATOR_BASE + i)]);
-    }
+    let mut g = vec![0u8; ec_len + 1];
+    generator_into(ec_len, &mut g);
     g
 }
 
-/// Compute the `ec_len` Reed–Solomon error-correction codewords for `data`.
+/// Heap-free Reed–Solomon: fill `ec` (of length `ec_len`) with the error-correction
+/// codewords for the `data` codewords.
 ///
 /// This is the remainder of `data · x^ec_len` divided by the generator polynomial.
-pub fn encode(data: &[u8], ec_len: usize) -> Vec<u8> {
-    let gen_poly = generator(ec_len);
-    let mut rem = vec![0u8; ec_len];
-    for &d in data {
-        let factor = d ^ rem[0];
-        rem.remove(0);
-        rem.push(0);
+///
+/// # Panics
+/// Panics if `ec.len()` exceeds [`MAX_EC_PER_BLOCK`].
+pub fn encode_into(data: impl IntoIterator<Item = u8>, ec: &mut [u8]) {
+    let ec_len = ec.len();
+    assert!(
+        ec_len <= MAX_EC_PER_BLOCK,
+        "Reed–Solomon EC length too large"
+    );
+    let mut gen_poly = [0u8; MAX_EC_PER_BLOCK + 1];
+    generator_into(ec_len, &mut gen_poly);
+    ec.fill(0);
+    if ec_len == 0 {
+        return;
+    }
+    for d in data {
+        let factor = d ^ ec[0];
+        ec.copy_within(1.., 0);
+        ec[ec_len - 1] = 0;
         if factor != 0 {
-            for (i, &g) in gen_poly.iter().enumerate().skip(1) {
-                rem[i - 1] ^= mul(g, factor);
+            for (r, &g) in ec.iter_mut().zip(&gen_poly[1..=ec_len]) {
+                *r ^= mul(g, factor);
             }
         }
     }
+}
+
+/// Compute the `ec_len` Reed–Solomon error-correction codewords for `data`
+/// (see [`encode_into`]).
+#[cfg(feature = "alloc")]
+pub fn encode(data: &[u8], ec_len: usize) -> Vec<u8> {
+    let mut rem = vec![0u8; ec_len];
+    encode_into(data.iter().copied(), &mut rem);
     rem
 }
 
@@ -116,6 +148,7 @@ pub fn encode(data: &[u8], ec_len: usize) -> Vec<u8> {
 ///
 /// Implements syndrome computation, Berlekamp–Massey, Chien search and Forney, with
 /// the generator's first root at `α^GENERATOR_BASE`.
+#[cfg(feature = "alloc")]
 pub fn decode(received: &[u8], ec_len: usize) -> Option<Vec<u8>> {
     let n = received.len();
     // Syndromes S_i = R(α^(base + i)) for i in 0..ec_len.
@@ -246,6 +279,7 @@ pub fn decode(received: &[u8], ec_len: usize) -> Option<Vec<u8>> {
 }
 
 /// `dst ← dst − scale · x^shift · src`, all polynomials least-significant first.
+#[cfg(feature = "alloc")]
 fn sub_shift(dst: &mut Vec<u8>, src: &[u8], scale: u8, shift: usize) {
     let needed = src.len() + shift;
     if dst.len() < needed {

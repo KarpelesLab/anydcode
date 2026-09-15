@@ -4,7 +4,7 @@
 //! - [`gf`]        — GF(256) arithmetic (primitive `0x12D`) and Reed–Solomon.
 //! - `tables`      — the spec's per-size data/EC codeword and region geometry.
 //! - `placement`   — Annex F module placement and finder/timing borders.
-//! - `encode`      — [`Symbol`] → [`BitMatrix`].
+//! - `encode`      — [`Symbol`] → [`BitMatrix`], or heap-free into a `MatrixBuf`.
 //! - `decode`      — [`BitMatrix`] → [`Symbol`].
 //!
 //! # Scope
@@ -34,11 +34,12 @@
     allow(dead_code, unused_imports)
 )]
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 #[cfg(feature = "decode")]
 mod decode;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
@@ -51,7 +52,7 @@ mod tables;
 
 #[cfg(feature = "decode")]
 pub use decode::DataMatrixDecoder;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 pub use encode::DataMatrixEncoder;
 #[cfg(feature = "scan")]
 pub use sample::{DataMatrixScanner, sample_grid, scan};
@@ -66,6 +67,10 @@ pub enum Encodation {
 }
 
 /// Data Matrix parameters needed to re-encode a symbol identically.
+///
+/// Heap-free encoding takes the same information as borrowed arguments of
+/// `DataMatrixEncoder::encode_into` (the symbol size and an `&[Encodation]`).
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataMatrixMeta {
     /// Full square symbol side length in modules (e.g. `10` for a 10×10 symbol).

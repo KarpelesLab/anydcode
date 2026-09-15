@@ -140,3 +140,149 @@ fn text_convenience_roundtrip() {
     );
     assert_eq!(enc.encode(&decoded).unwrap(), encoding);
 }
+
+/// The heap-free `encode_into` / `encode_data_into` paths write exactly the modules
+/// `Encode` returns, across sizes and encodations.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::SegmentView;
+    use anyd::codes::datamatrix::Encodation;
+    use anyd::output::MatrixBuf;
+    use anyd::symbol::SymbolMeta;
+
+    let enc = DataMatrixEncoder::new();
+    let mut payloads: Vec<Vec<u8>> = vec![
+        b"".to_vec(),
+        b"7".to_vec(),
+        b"123456".to_vec(),
+        b"HELLO WORLD".to_vec(),
+        vec![b'A', 0x80, b'B'],
+        (0u16..=255).map(|b| b as u8).collect(),
+        (0..300).map(|i| (i * 7 % 256) as u8).collect(),
+    ];
+    for n in [20usize, 60, 120, 260, 600, 1000, 3116] {
+        payloads.push((0..n).map(|i| b'0' + (i % 10) as u8).collect());
+    }
+    // Largest symbol filled with text (one codeword per byte).
+    payloads.push((0..1558).map(|i| b'A' + (i % 26) as u8).collect());
+
+    let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+    let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+    let check = |symbol: &anyd::Symbol, data: &[u8], forced: Option<usize>| {
+        let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+        let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+        let Encoding::Matrix(expected) = enc.encode(symbol).unwrap() else {
+            panic!("Data Matrix encodes to a matrix");
+        };
+        let SymbolMeta::DataMatrix(meta) = &symbol.meta else {
+            panic!("expected Data Matrix meta");
+        };
+        let size = meta.symbol_size;
+        let views: Vec<SegmentView> = symbol.segments.iter().map(|s| s.view()).collect();
+
+        // Exactly-sized buffers suffice.
+        let mut sc = vec![0u8; DataMatrixEncoder::scratch_len(size).unwrap()];
+        let mut st = vec![0u8; DataMatrixEncoder::storage_len(size).unwrap()];
+        assert!(sc.len() <= DataMatrixEncoder::MAX_SCRATCH_LEN);
+        assert_eq!(st.len(), MatrixBuf::bytes_for(size, size));
+        let buf = enc
+            .encode_into(&views, &meta.encodations, size, &mut sc, &mut st)
+            .unwrap();
+        assert_eq!(buf, expected, "encode_into, size {size}");
+
+        let buf = enc
+            .encode_data_into(data, forced, &mut scratch, &mut storage)
+            .unwrap();
+        assert_eq!(buf, expected, "encode_data_into, size {size}");
+
+        // One byte short of either buffer is a capacity error, not a panic.
+        let short = sc.len() - 1;
+        let err = enc.encode_into(
+            &views,
+            &meta.encodations,
+            size,
+            &mut sc[..short],
+            &mut storage,
+        );
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        let err = enc.encode_data_into(data, forced, &mut sc[..short], &mut storage);
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        let short = st.len() - 1;
+        let err = enc.encode_into(
+            &views,
+            &meta.encodations,
+            size,
+            &mut scratch,
+            &mut st[..short],
+        );
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    };
+
+    for data in &payloads {
+        let symbol = enc.build(data).unwrap();
+        check(&symbol, data, None);
+        // Forced larger sizes exercise padding and multi-block interleaving.
+        for size in [26usize, 52, 72, 104, 144] {
+            if let Ok(symbol) = enc.build_sized(data, size) {
+                check(&symbol, data, Some(size));
+            }
+        }
+    }
+
+    // Every square size, with a mixed ASCII/Base256 payload.
+    let mut data = b"12AB".to_vec();
+    data.extend_from_slice(&[0xC3, 0xA9]);
+    for size in [
+        10usize, 12, 14, 16, 18, 20, 22, 24, 26, 32, 36, 40, 44, 48, 52, 64, 72, 80, 88, 96, 104,
+        120, 132, 144,
+    ] {
+        match enc.build_sized(&data, size) {
+            Ok(symbol) => check(&symbol, &data, Some(size)),
+            Err(e) => assert!(matches!(e, anyd::Error::Capacity { .. }), "size {size}"),
+        }
+        // A single ASCII segment with upper shifts (not the canonical split).
+        let segs = [SegmentView::byte(&data)];
+        let r = enc.encode_into(
+            &segs,
+            &[Encodation::Ascii],
+            size,
+            &mut scratch,
+            &mut storage,
+        );
+        if size >= 14 {
+            assert_eq!(r.unwrap().width(), size);
+        } else {
+            assert!(matches!(r, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+
+    // Oversized data, bad sizes, mismatched encodations and non-byte segments.
+    let too_big = vec![b'A'; 1559];
+    let err = enc.encode_data_into(&too_big, None, &mut scratch, &mut storage);
+    assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    let err = enc.encode_data_into(b"HELLO", Some(11), &mut scratch, &mut storage);
+    assert!(matches!(err, Err(anyd::Error::InvalidParameter { .. })));
+    assert_eq!(DataMatrixEncoder::scratch_len(11), None);
+    let err = enc.encode_into(
+        &[SegmentView::byte(b"A")],
+        &[],
+        10,
+        &mut scratch,
+        &mut storage,
+    );
+    assert!(matches!(err, Err(anyd::Error::InvalidParameter { .. })));
+    let err = enc.encode_into(
+        &[SegmentView::numeric(b"1")],
+        &[Encodation::Ascii],
+        10,
+        &mut scratch,
+        &mut storage,
+    );
+    assert!(matches!(err, Err(anyd::Error::Unsupported { .. })));
+    // Auto-size with tiny buffers.
+    let err = enc.encode_data_into(b"HELLO WORLD", None, &mut [0u8; 4], &mut storage);
+    assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    let mut tiny = [0u8; 4];
+    let err = enc.encode_data_into(b"HELLO WORLD", None, &mut scratch, &mut tiny);
+    assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+}

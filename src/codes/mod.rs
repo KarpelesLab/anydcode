@@ -12,7 +12,7 @@
 pub mod appclip;
 #[cfg(all(feature = "alloc", feature = "aztec"))]
 pub mod aztec;
-#[cfg(all(feature = "alloc", feature = "datamatrix"))]
+#[cfg(feature = "datamatrix")]
 pub mod datamatrix;
 #[cfg(all(feature = "alloc", feature = "dotcode"))]
 pub mod dotcode;

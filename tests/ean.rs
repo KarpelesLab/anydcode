@@ -250,3 +250,86 @@ fn manual_symbol_roundtrips() {
     );
     assert_lossless(&sym);
 }
+
+/// The heap-free `encode_into` path writes exactly the modules `Encode` returns.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::codes::ean::AddOnView;
+    use anyd::output::LinearBuf;
+    let enc = EanEncoder::new();
+    let mains = [
+        enc.build_ean13("590123412345").unwrap(),
+        enc.build_ean13("4006381333931").unwrap(),
+        enc.build_ean8("9638507").unwrap(),
+        enc.build_upca("03600029145").unwrap(),
+        enc.build_upce("0425261").unwrap(),
+        enc.build_upce("1123456").unwrap(),
+    ];
+    let standalone = [
+        enc.build_ean2("05").unwrap(),
+        enc.build_ean5("52495").unwrap(),
+    ];
+    let mut symbols = Vec::new();
+    for main in &mains {
+        symbols.push(main.clone());
+        for addon in ["12", "05", "52495", "90000"] {
+            symbols.push(enc.with_addon(main.clone(), addon).unwrap());
+        }
+    }
+    symbols.extend(standalone);
+
+    for symbol in &symbols {
+        let Encoding::Linear(expected) = enc.encode(symbol).unwrap() else {
+            panic!("EAN/UPC encodes to a linear pattern");
+        };
+        let SymbolMeta::Ean(meta) = &symbol.meta else {
+            panic!("EAN meta");
+        };
+        let digits = digits_of(symbol);
+        let addon = meta.addon.as_ref().map(|a| AddOnView {
+            kind: a.kind,
+            digits: &a.digits,
+        });
+        assert_eq!(addon, meta.addon.as_ref().map(|a| a.view()));
+        let mut storage = [0u8; 32];
+        let mut buf = LinearBuf::new(&mut storage);
+        enc.encode_into(meta.variant, digits.as_bytes(), addon, &mut buf)
+            .unwrap();
+        assert_eq!(buf, expected);
+        assert_eq!(buf.quiet_zone, expected.quiet_zone);
+        let bound = EanEncoder::max_modules(meta.variant, addon.map(|a| a.kind));
+        assert_eq!(buf.len(), bound);
+        // Too-small storage reports a capacity error instead of panicking.
+        let mut tiny = [0u8; 2];
+        let err = enc.encode_into(
+            meta.variant,
+            digits.as_bytes(),
+            addon,
+            &mut LinearBuf::new(&mut tiny),
+        );
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    }
+
+    // Invalid input is rejected before anything is written.
+    let two = AddOnView {
+        kind: AddOnKind::Two,
+        digits: b"12",
+    };
+    let mismatched = AddOnView {
+        kind: AddOnKind::Five,
+        digits: b"12",
+    };
+    for (variant, digits, addon) in [
+        (EanVariant::Ean13, &b"5901234123458"[..], None), // bad check digit
+        (EanVariant::Ean13, b"590123412345", None),       // missing check digit
+        (EanVariant::UpcE, b"24252614", None),            // bad number system
+        (EanVariant::Ean8, b"9638507A", None),
+        (EanVariant::Ean2, b"05", Some(two)), // add-on on an add-on
+        (EanVariant::Ean13, b"5901234123457", Some(mismatched)),
+    ] {
+        let mut storage = [0u8; 32];
+        let mut buf = LinearBuf::new(&mut storage);
+        assert!(enc.encode_into(variant, digits, addon, &mut buf).is_err());
+        assert_eq!(buf.len(), 0);
+    }
+}

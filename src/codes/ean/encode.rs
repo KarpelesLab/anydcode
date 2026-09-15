@@ -1,21 +1,35 @@
 //! EAN/UPC encoding: [`Symbol`] → [`LinearPattern`].
 //!
 //! The [`EanEncoder`] renders an exact module pattern from a [`Symbol`] carrying an
-//! [`EanMeta`], and offers `build_*` helpers that validate/compute check digits and
-//! assemble a reproducible [`Symbol`] from digit strings.
+//! [`EanMeta`] (or, heap-free, from borrowed digits via
+//! [`EanEncoder::encode_into`]), and offers `build_*` helpers that validate/compute
+//! check digits and assemble a reproducible [`Symbol`] from digit strings.
+//!
+//! [`Symbol`]: crate::Symbol
+//! [`LinearPattern`]: crate::output::LinearPattern
+//! [`EanMeta`]: super::EanMeta
 
 use super::tables::{
     ADDON_LEAD, ADDON_SEP, CENTER_GUARD, EAN2_PARITY, EAN5_PARITY, EAN13_FIRST_PARITY,
     NORMAL_GUARD, UPCE_END_GUARD, check_digit, ean5_checksum, l_code, left_code, r_code,
     upce_expand, upce_parity,
 };
-use super::{AddOn, AddOnKind, EanMeta, EanVariant};
+#[cfg(feature = "alloc")]
+use super::{AddOn, EanMeta};
+use super::{AddOnKind, AddOnView, EanVariant};
 use crate::error::{Error, Result};
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::output::{Encoding, LinearPattern};
+#[cfg(feature = "alloc")]
 use crate::segment::{Mode, Segment};
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
+#[cfg(feature = "alloc")]
 use crate::traits::Encode;
+#[cfg(feature = "alloc")]
 use alloc::{format, vec, vec::Vec};
 
 /// Light-module quiet zone recorded for a symbol containing a main pattern.
@@ -35,6 +49,68 @@ impl EanEncoder {
         EanEncoder
     }
 
+    /// Number of modules [`EanEncoder::encode_into`] emits for `variant` followed by
+    /// an optional add-on of kind `addon`, excluding quiet zones (exact).
+    pub const fn max_modules(variant: EanVariant, addon: Option<AddOnKind>) -> usize {
+        let main = match variant {
+            EanVariant::Ean13 | EanVariant::UpcA => 95,
+            EanVariant::Ean8 => 67,
+            EanVariant::UpcE => 51,
+            EanVariant::Ean2 => 20,
+            EanVariant::Ean5 => 47,
+        };
+        match addon {
+            None => main,
+            Some(AddOnKind::Two) => main + ADDON_GAP + 20,
+            Some(AddOnKind::Five) => main + ADDON_GAP + 47,
+        }
+    }
+
+    /// Heap-free encoding: write the `variant` symbol for ASCII `digits`, followed by
+    /// the optional `addon`, to `out`.
+    ///
+    /// `digits` is the symbol's full digit string including the check digit, exactly
+    /// as stored in the numeric segment of a built [`Symbol`] (UPC-E takes its 8-digit
+    /// form: number system, six payload digits, check). The check digit is verified,
+    /// not computed. A standalone EAN-2/EAN-5 cannot carry an add-on. The input is
+    /// validated before the first module is written. Size a
+    /// [`LinearBuf`](crate::output::LinearBuf) with [`EanEncoder::max_modules`].
+    ///
+    /// [`Symbol`]: crate::Symbol
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        variant: EanVariant,
+        digits: &[u8],
+        addon: Option<AddOnView<'_>>,
+        out: &mut S,
+    ) -> Result<()> {
+        let main = Parsed::main(variant, digits)?;
+        let addon = match addon {
+            Some(_) if matches!(variant, EanVariant::Ean2 | EanVariant::Ean5) => {
+                return Err(Error::invalid_parameter(
+                    "an add-on symbol cannot itself carry an add-on",
+                ));
+            }
+            Some(a) => Some(Parsed::addon(a)?),
+            None => None,
+        };
+
+        let quiet = match main {
+            Parsed::Ean2(_) | Parsed::Ean5(_) => QUIET_ADDON,
+            _ => QUIET_MAIN,
+        };
+        out.begin(quiet)?;
+        main.render(out)?;
+        if let Some(addon) = addon {
+            out.push_run(false, ADDON_GAP)?;
+            addon.render(out)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl EanEncoder {
     /// Build an EAN-13 symbol from 12 digits (check computed) or 13 digits (check
     /// verified).
     pub fn build_ean13(&self, digits: &str) -> Result<Symbol> {
@@ -108,6 +184,7 @@ impl EanEncoder {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl Encode for EanEncoder {
     fn encode(&self, symbol: &Symbol) -> Result<Encoding> {
         let meta = match &symbol.meta {
@@ -115,156 +192,159 @@ impl Encode for EanEncoder {
             _ => return Err(Error::invalid_parameter("EAN symbol missing EanMeta")),
         };
         let digits = segment_digits(symbol)?;
+        let mut pattern = LinearPattern::new();
+        self.encode_into(
+            meta.variant,
+            digits,
+            meta.addon.as_ref().map(AddOn::view),
+            &mut pattern,
+        )?;
+        Ok(Encoding::Linear(pattern))
+    }
+}
 
-        let (mut modules, quiet) = render_variant(meta.variant, &digits)?;
-        if let Some(addon) = &meta.addon {
-            if matches!(meta.variant, EanVariant::Ean2 | EanVariant::Ean5) {
-                return Err(Error::invalid_parameter(
-                    "an add-on symbol cannot itself carry an add-on",
-                ));
+/// A validated main symbol or add-on, as digit values ready to render.
+enum Parsed {
+    /// EAN-13 digit values (UPC-A gets its implicit leading zero).
+    Ean13([u8; 13]),
+    /// EAN-8 digit values.
+    Ean8([u8; 8]),
+    /// UPC-E payload digit values and their parity pattern.
+    UpcE([u8; 6], [bool; 6]),
+    /// EAN-2 digit values.
+    Ean2([u8; 2]),
+    /// EAN-5 digit values.
+    Ean5([u8; 5]),
+}
+
+impl Parsed {
+    /// Validate a main (or standalone add-on) symbol's ASCII digits for `variant`.
+    fn main(variant: EanVariant, digits: &[u8]) -> Result<Self> {
+        validate_ascii(digits)?;
+        Ok(match variant {
+            EanVariant::Ean13 => {
+                let vals: [u8; 13] = values(digits, "EAN-13 expects 13 digits")?;
+                verify_check(&vals, 12)?;
+                Parsed::Ean13(vals)
             }
-            modules.extend(core::iter::repeat_n(false, ADDON_GAP));
-            modules.extend(render_addon(addon)?);
+            EanVariant::UpcA => {
+                let upc: [u8; 12] = values(digits, "UPC-A expects 12 digits")?;
+                verify_check(&upc, 11)?;
+                // UPC-A is EAN-13 with an implicit leading zero.
+                let mut vals = [0u8; 13];
+                vals[1..].copy_from_slice(&upc);
+                Parsed::Ean13(vals)
+            }
+            EanVariant::Ean8 => {
+                let vals: [u8; 8] = values(digits, "EAN-8 expects 8 digits")?;
+                verify_check(&vals, 7)?;
+                Parsed::Ean8(vals)
+            }
+            EanVariant::UpcE => {
+                let vals: [u8; 8] = values(digits, "UPC-E expects 8 digits")?;
+                let ns = vals[0];
+                if ns > 1 {
+                    return Err(Error::invalid_data("UPC-E number system must be 0 or 1"));
+                }
+                let payload = val6(&vals[1..7]);
+                let check = check_digit(&upce_expand(ns, &payload));
+                if vals[7] != check {
+                    return Err(Error::invalid_data("UPC-E check digit mismatch"));
+                }
+                Parsed::UpcE(payload, upce_parity(ns, check))
+            }
+            EanVariant::Ean2 => Parsed::Ean2(values(digits, "EAN-2 expects 2 digits")?),
+            EanVariant::Ean5 => Parsed::Ean5(values(digits, "EAN-5 expects 5 digits")?),
+        })
+    }
+
+    /// Validate a trailing add-on.
+    fn addon(addon: AddOnView<'_>) -> Result<Self> {
+        validate_ascii(addon.digits)?;
+        Ok(match addon.kind {
+            AddOnKind::Two => Parsed::Ean2(values(addon.digits, "EAN-2 add-on expects 2 digits")?),
+            AddOnKind::Five => Parsed::Ean5(values(addon.digits, "EAN-5 add-on expects 5 digits")?),
+        })
+    }
+
+    /// Write the modules (without quiet zones) to `out`.
+    fn render(&self, out: &mut impl LinearSink) -> Result<()> {
+        match self {
+            Parsed::Ean13(vals) => {
+                let parity = EAN13_FIRST_PARITY[vals[0] as usize];
+                push_bits(out, &NORMAL_GUARD)?;
+                for i in 0..6 {
+                    push_bits(out, &left_code(vals[1 + i], parity[i]))?;
+                }
+                push_bits(out, &CENTER_GUARD)?;
+                for &v in &vals[7..13] {
+                    push_bits(out, &r_code(v))?;
+                }
+                push_bits(out, &NORMAL_GUARD)
+            }
+            Parsed::Ean8(vals) => {
+                push_bits(out, &NORMAL_GUARD)?;
+                for &v in &vals[0..4] {
+                    push_bits(out, &l_code(v))?;
+                }
+                push_bits(out, &CENTER_GUARD)?;
+                for &v in &vals[4..8] {
+                    push_bits(out, &r_code(v))?;
+                }
+                push_bits(out, &NORMAL_GUARD)
+            }
+            Parsed::UpcE(payload, parity) => {
+                push_bits(out, &NORMAL_GUARD)?;
+                for i in 0..6 {
+                    push_bits(out, &left_code(payload[i], parity[i]))?;
+                }
+                push_bits(out, &UPCE_END_GUARD)
+            }
+            Parsed::Ean2(vals) => {
+                let value = vals[0] * 10 + vals[1];
+                let parity = EAN2_PARITY[(value % 4) as usize];
+                push_bits(out, &ADDON_LEAD)?;
+                push_bits(out, &left_code(vals[0], parity[0]))?;
+                push_bits(out, &ADDON_SEP)?;
+                push_bits(out, &left_code(vals[1], parity[1]))
+            }
+            Parsed::Ean5(vals) => {
+                let parity = EAN5_PARITY[ean5_checksum(vals) as usize];
+                push_bits(out, &ADDON_LEAD)?;
+                for i in 0..5 {
+                    if i > 0 {
+                        push_bits(out, &ADDON_SEP)?;
+                    }
+                    push_bits(out, &left_code(vals[i], parity[i]))?;
+                }
+                Ok(())
+            }
         }
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: quiet,
-        }))
     }
 }
 
-/// Render the modules for a variant's digits, returning `(modules, quiet_zone)`.
-fn render_variant(variant: EanVariant, digits: &[u8]) -> Result<(Vec<bool>, usize)> {
-    let vals = digit_values(digits)?;
-    let modules = match variant {
-        EanVariant::Ean13 => {
-            expect_len(&vals, 13, "EAN-13")?;
-            verify_check(&vals, 12)?;
-            render_ean13(&vals)
-        }
-        EanVariant::UpcA => {
-            expect_len(&vals, 12, "UPC-A")?;
-            verify_check(&vals, 11)?;
-            // UPC-A is EAN-13 with an implicit leading zero.
-            let mut ean = Vec::with_capacity(13);
-            ean.push(0);
-            ean.extend_from_slice(&vals);
-            render_ean13(&ean)
-        }
-        EanVariant::Ean8 => {
-            expect_len(&vals, 8, "EAN-8")?;
-            verify_check(&vals, 7)?;
-            render_ean8(&vals)
-        }
-        EanVariant::UpcE => {
-            expect_len(&vals, 8, "UPC-E")?;
-            render_upce(&vals)?
-        }
-        EanVariant::Ean2 => {
-            expect_len(&vals, 2, "EAN-2")?;
-            return Ok((render_addon2(&vals), QUIET_ADDON));
-        }
-        EanVariant::Ean5 => {
-            expect_len(&vals, 5, "EAN-5")?;
-            return Ok((render_addon5(&vals), QUIET_ADDON));
-        }
-    };
-    Ok((modules, QUIET_MAIN))
+/// Append a module sequence to `out`.
+fn push_bits(out: &mut impl LinearSink, bits: &[bool]) -> Result<()> {
+    bits.iter().try_for_each(|&b| out.push(b))
 }
 
-fn render_ean13(vals: &[u8]) -> Vec<bool> {
-    let first = vals[0] as usize;
-    let parity = EAN13_FIRST_PARITY[first];
-    let mut m = Vec::with_capacity(95);
-    m.extend_from_slice(&NORMAL_GUARD);
-    for i in 0..6 {
-        m.extend_from_slice(&left_code(vals[1 + i], parity[i]));
+/// Convert exactly `N` (already validated) ASCII digits to 0..=9 values, or fail
+/// with `msg` on a length mismatch.
+fn values<const N: usize>(digits: &[u8], msg: &'static str) -> Result<[u8; N]> {
+    if digits.len() != N {
+        return Err(Error::invalid_data(msg));
     }
-    m.extend_from_slice(&CENTER_GUARD);
-    for i in 0..6 {
-        m.extend_from_slice(&r_code(vals[7 + i]));
+    let mut vals = [0u8; N];
+    for (v, &d) in vals.iter_mut().zip(digits) {
+        *v = d - b'0';
     }
-    m.extend_from_slice(&NORMAL_GUARD);
-    m
-}
-
-fn render_ean8(vals: &[u8]) -> Vec<bool> {
-    let mut m = Vec::with_capacity(67);
-    m.extend_from_slice(&NORMAL_GUARD);
-    for &v in &vals[0..4] {
-        m.extend_from_slice(&l_code(v));
-    }
-    m.extend_from_slice(&CENTER_GUARD);
-    for &v in &vals[4..8] {
-        m.extend_from_slice(&r_code(v));
-    }
-    m.extend_from_slice(&NORMAL_GUARD);
-    m
-}
-
-fn render_upce(vals: &[u8]) -> Result<Vec<bool>> {
-    let ns = vals[0];
-    if ns > 1 {
-        return Err(Error::invalid_data("UPC-E number system must be 0 or 1"));
-    }
-    let payload: [u8; 6] = val6(&vals[1..7]);
-    let expanded = upce_expand(ns, &payload);
-    let check = check_digit(&expanded);
-    if vals[7] != check {
-        return Err(Error::invalid_data("UPC-E check digit mismatch"));
-    }
-    let parity = upce_parity(ns, check);
-    let mut m = Vec::with_capacity(51);
-    m.extend_from_slice(&NORMAL_GUARD);
-    for i in 0..6 {
-        m.extend_from_slice(&left_code(payload[i], parity[i]));
-    }
-    m.extend_from_slice(&UPCE_END_GUARD);
-    Ok(m)
-}
-
-fn render_addon(addon: &AddOn) -> Result<Vec<bool>> {
-    let vals = digit_values(&addon.digits)?;
-    Ok(match addon.kind {
-        AddOnKind::Two => {
-            expect_len(&vals, 2, "EAN-2 add-on")?;
-            render_addon2(&vals)
-        }
-        AddOnKind::Five => {
-            expect_len(&vals, 5, "EAN-5 add-on")?;
-            render_addon5(&vals)
-        }
-    })
-}
-
-fn render_addon2(vals: &[u8]) -> Vec<bool> {
-    let value = vals[0] * 10 + vals[1];
-    let parity = EAN2_PARITY[(value % 4) as usize];
-    let mut m = Vec::with_capacity(20);
-    m.extend_from_slice(&ADDON_LEAD);
-    m.extend_from_slice(&left_code(vals[0], parity[0]));
-    m.extend_from_slice(&ADDON_SEP);
-    m.extend_from_slice(&left_code(vals[1], parity[1]));
-    m
-}
-
-fn render_addon5(vals: &[u8]) -> Vec<bool> {
-    let checksum = ean5_checksum(vals);
-    let parity = EAN5_PARITY[checksum as usize];
-    let mut m = Vec::with_capacity(47);
-    m.extend_from_slice(&ADDON_LEAD);
-    for i in 0..5 {
-        if i > 0 {
-            m.extend_from_slice(&ADDON_SEP);
-        }
-        m.extend_from_slice(&left_code(vals[i], parity[i]));
-    }
-    m
+    Ok(vals)
 }
 
 // ---- Symbol / digit helpers ------------------------------------------------
 
 /// Assemble a main symbol carrying `digits` (ASCII, incl. check) for `variant`.
+#[cfg(feature = "alloc")]
 fn main_symbol(symbology: Symbology, variant: EanVariant, digits: Vec<u8>) -> Symbol {
     Symbol::new(
         symbology,
@@ -274,17 +354,19 @@ fn main_symbol(symbology: Symbology, variant: EanVariant, digits: Vec<u8>) -> Sy
 }
 
 /// The single numeric segment's digits, validated as ASCII digits.
-fn segment_digits(symbol: &Symbol) -> Result<Vec<u8>> {
+#[cfg(feature = "alloc")]
+fn segment_digits(symbol: &Symbol) -> Result<&[u8]> {
     let seg = symbol
         .segments
         .iter()
         .find(|s| matches!(s.mode, Mode::Numeric))
         .ok_or_else(|| Error::invalid_data("EAN symbol has no numeric segment"))?;
     validate_ascii(&seg.data)?;
-    Ok(seg.data.clone())
+    Ok(&seg.data)
 }
 
 /// Parse a digit string into ASCII digit bytes, rejecting anything else.
+#[cfg(feature = "alloc")]
 fn ascii_digits(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes().to_vec();
     validate_ascii(&bytes)?;
@@ -300,6 +382,7 @@ fn validate_ascii(bytes: &[u8]) -> Result<()> {
 }
 
 /// Parse an exact-length digit string.
+#[cfg(feature = "alloc")]
 fn exact_digits(s: &str, len: usize) -> Result<Vec<u8>> {
     let d = ascii_digits(s)?;
     if d.len() != len {
@@ -309,6 +392,7 @@ fn exact_digits(s: &str, len: usize) -> Result<Vec<u8>> {
 }
 
 /// Accept `data_len` digits (append computed check) or `data_len + 1` (verify).
+#[cfg(feature = "alloc")]
 fn with_check(s: &str, data_len: usize) -> Result<Vec<u8>> {
     let mut d = ascii_digits(s)?;
     if d.len() == data_len {
@@ -327,6 +411,7 @@ fn with_check(s: &str, data_len: usize) -> Result<Vec<u8>> {
 }
 
 /// Convert ASCII digit bytes to 0..=9 values.
+#[cfg(feature = "alloc")]
 fn digit_values(digits: &[u8]) -> Result<Vec<u8>> {
     validate_ascii(digits)?;
     Ok(digits.iter().map(|&b| b - b'0').collect())
@@ -336,17 +421,6 @@ fn val6(vals: &[u8]) -> [u8; 6] {
     let mut out = [0u8; 6];
     out.copy_from_slice(&vals[0..6]);
     out
-}
-
-fn expect_len(vals: &[u8], len: usize, what: &str) -> Result<()> {
-    if vals.len() == len {
-        Ok(())
-    } else {
-        Err(Error::invalid_data(format!(
-            "{what} expects {len} digits, got {}",
-            vals.len()
-        )))
-    }
 }
 
 /// Verify the check digit at `vals[data_len]` against `vals[..data_len]`.

@@ -48,13 +48,14 @@
     allow(dead_code, unused_imports)
 )]
 
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 #[cfg(feature = "decode")]
 mod decode;
 #[cfg(feature = "scan")]
 mod edge;
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
@@ -63,7 +64,7 @@ mod tables;
 pub use decode::EanDecoder;
 #[cfg(feature = "scan")]
 pub use edge::{decode_edges, scan};
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 pub use encode::EanEncoder;
 
 /// Which member of the EAN/UPC family a [`crate::Symbol`] represents.
@@ -93,6 +94,7 @@ pub enum AddOnKind {
 }
 
 /// A 2- or 5-digit supplemental add-on attached to a main EAN/UPC symbol.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddOn {
     /// Whether this is a 2- or 5-digit supplement.
@@ -101,7 +103,29 @@ pub struct AddOn {
     pub digits: Vec<u8>,
 }
 
+#[cfg(feature = "alloc")]
+impl AddOn {
+    /// Borrow this add-on as an [`AddOnView`].
+    pub fn view(&self) -> AddOnView<'_> {
+        AddOnView {
+            kind: self.kind,
+            digits: &self.digits,
+        }
+    }
+}
+
+/// A borrowed 2- or 5-digit add-on: the heap-free counterpart of `AddOn`, taken by
+/// `EanEncoder::encode_into`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AddOnView<'a> {
+    /// Whether this is a 2- or 5-digit supplement.
+    pub kind: AddOnKind,
+    /// The add-on digits as ASCII bytes (`b'0'..=b'9'`).
+    pub digits: &'a [u8],
+}
+
 /// EAN/UPC parameters needed to re-encode a symbol identically.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EanMeta {
     /// Which family member the [`crate::Symbol`]'s digits belong to.
@@ -110,6 +134,7 @@ pub struct EanMeta {
     pub addon: Option<AddOn>,
 }
 
+#[cfg(feature = "alloc")]
 impl EanMeta {
     /// Metadata for a plain main symbol with no add-on.
     pub fn new(variant: EanVariant) -> Self {

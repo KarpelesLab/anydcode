@@ -88,6 +88,10 @@ jobs:
       - name: Test a single-symbology build
         run: cargo test --no-default-features --features qr,encode,decode
 
+      # Runs the heap-free encoders with the library built without `alloc`.
+      - name: Test heap-free encoders (no alloc)
+        run: cargo test --no-default-features --features encode,all-codes
+
   no-std:
     name: no_std builds (bare metal)
     runs-on: ubuntu-latest

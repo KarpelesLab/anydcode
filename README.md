@@ -162,7 +162,7 @@ anyd = { version = "0.1", default-features = false, features = ["alloc", "encode
 |---|---|
 | `std` *(default)* | `alloc` + float math: image scanning, image transforms, `std` interop |
 | `alloc` | the owned data model (`Symbol`, `Segment`, `BitMatrix`, `LinearPattern`, ...) |
-| `encode` *(default)* | encoders (`Encode` trait, needs `alloc`) |
+| `encode` *(default)* | encoders: heap-free `encode_into` (see below), plus the `Encode` trait with `alloc` |
 | `decode` *(default)* | structural decoders (`Decode` trait); implies `alloc` |
 | `scan` *(default)* | camera / still-image samplers, `detect`, `pipeline`, `scan1d`; implies `std` + `decode` |
 | `all-codes` *(default)* | every symbology below |
@@ -173,6 +173,33 @@ anyd = { version = "0.1", default-features = false, features = ["alloc", "encode
 | `cli` / `wasm` | the `anyd` binary / the browser-demo FFI shim (both enable everything) |
 
 `Symbology::is_implemented()` reports which symbologies a given build carries.
+
+### Heap-free encoding
+
+Without `alloc`, the `encode` feature still provides `encode_into` encoders that write
+into memory you own, with sizing constants and no allocation:
+
+- **1D codes** — Code 128 / GS1-128 (including the code-set planner), Code 39, Code 93,
+  Code 11, EAN/UPC with add-ons, ITF, 2 of 5, Codabar, MSI / Plessey, Telepen and
+  Pharmacode — write to any `LinearSink`: a bit-packed `LinearBuf` over a byte array,
+  or your own sink that streams bars straight to a printer or display.
+- **QR, Micro QR and Data Matrix** write a bit-packed `MatrixBuf` into caller buffers,
+  choosing the version/size and mask themselves unless you pin them.
+
+```rust
+use anyd::codes::qr::{EcLevel, QrEncoder};
+
+let mut scratch = [0u8; QrEncoder::MAX_BUFFER_LEN]; // 3917 bytes covers version 40
+let mut storage = [0u8; QrEncoder::MAX_BUFFER_LEN];
+let (grid, meta) = QrEncoder::new()
+    .encode_text_into(b"HELLO WORLD", EcLevel::Q, &mut scratch, &mut storage)
+    .unwrap();
+// grid.get(x, y) == true is a dark module; meta pins version, EC level and mask.
+```
+
+With `alloc`, the `Encode` implementations are thin wrappers over these cores, so both
+paths produce byte-identical symbols. Decoding and image scanning require `alloc`
+(and `std` for scanning).
 
 ## Example: QR round-trip
 

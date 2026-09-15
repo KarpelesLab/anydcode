@@ -86,7 +86,7 @@ pub struct MsiMeta {
 // ---------- MSI check arithmetic ----------
 
 /// Luhn mod-10 check digit for ASCII `digits` (rightmost digit doubled).
-#[cfg(test)]
+#[cfg(all(test, feature = "encode", feature = "decode"))]
 fn msi_mod10(digits: &[u8]) -> u8 {
     mod10_split(digits, &[])
 }

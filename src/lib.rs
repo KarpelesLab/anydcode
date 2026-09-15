@@ -25,7 +25,7 @@
 //! |---|---|
 //! | `std` *(default)* | `alloc` plus float math: image scanning, transforms, `std` interop |
 //! | `alloc` | the owned data model ([`Symbol`], [`Segment`], `BitMatrix`, ...) |
-//! | `encode` *(default)* | encoders ([`traits::Encode`], with `alloc`) |
+//! | `encode` *(default)* | encoders: heap-free `encode_into` (see below) and, with `alloc`, [`traits::Encode`] |
 //! | `decode` *(default)* | structural decoders ([`traits::Decode`]); implies `alloc` |
 //! | `scan` *(default)* | camera/still-image samplers, [`detect`], [`pipeline`]; implies `std` + `decode` |
 //! | `all-codes` *(default)* | every symbology below |
@@ -42,6 +42,35 @@
 //! ```
 //!
 //! [`Symbology::is_implemented`] reports which symbologies the current build carries.
+//!
+//! ## Heap-free encoding
+//!
+//! Without `alloc`, the `encode` feature still provides `encode_into` encoders that
+//! write into memory the caller owns:
+//!
+//! - **1D codes** (Code 128 / GS1-128, Code 39, Code 93, Code 11, EAN/UPC, ITF,
+//!   2 of 5, Codabar, MSI / Plessey, Telepen, Pharmacode) write to any
+//!   [`output::LinearSink`] — a [`output::LinearBuf`] over a byte array, or a sink
+//!   that streams bars straight to a printer. Each has a `max_modules` sizing helper.
+//! - **QR, Micro QR and Data Matrix** write a bit-packed [`output::MatrixBuf`] into
+//!   caller buffers sized by `MAX_BUFFER_LEN`-style constants, choosing version /
+//!   size and mask themselves unless pinned.
+//!
+//! With `alloc`, the [`traits::Encode`] impls are thin wrappers over the same code,
+//! so both paths produce identical symbols.
+//!
+//! ```
+//! # #[cfg(feature = "qr")] {
+//! use anyd::codes::qr::{EcLevel, QrEncoder};
+//!
+//! let mut scratch = [0u8; QrEncoder::MAX_BUFFER_LEN];
+//! let mut storage = [0u8; QrEncoder::MAX_BUFFER_LEN];
+//! let (grid, meta) = QrEncoder::new()
+//!     .encode_text_into(b"HELLO WORLD", EcLevel::Q, &mut scratch, &mut storage)
+//!     .unwrap();
+//! assert_eq!(grid.width(), meta.version.size());
+//! # }
+//! ```
 //!
 //! ## Example: QR round-trip
 //!

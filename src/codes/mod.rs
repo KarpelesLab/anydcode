@@ -58,7 +58,7 @@ pub mod code11;
 pub mod code128;
 #[cfg(feature = "code39")]
 pub mod code39;
-#[cfg(all(feature = "alloc", feature = "code93"))]
+#[cfg(feature = "code93")]
 pub mod code93;
 #[cfg(all(feature = "alloc", feature = "dxfilm"))]
 pub mod dxfilm;

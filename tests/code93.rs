@@ -107,3 +107,48 @@ fn decoded_text_recovers() {
     assert_eq!(decoded.text().as_deref(), Some("Hello!"));
     assert_eq!(decoded.segments, vec![Segment::byte(b"Hello!".to_vec())]);
 }
+
+/// The heap-free `encode_into` path writes exactly the modules `Encode` returns.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::codes::code93::Code93Meta;
+    use anyd::output::LinearBuf;
+    let all: Vec<u8> = (0u8..128).collect();
+    let enc = Code93Encoder::new();
+    for (data, full_ascii) in [
+        (&b"TEST93"[..], false),
+        (b"", false),
+        (b"ABC-123 $/+%.", false),
+        (b"", true),
+        (b"TEST93", true),
+        (b"Hello, World!", true),
+        (b"a\tb\nc", true),
+        (&all[..], true),
+    ] {
+        let symbol = enc.build(data, full_ascii).unwrap();
+        let Encoding::Linear(expected) = enc.encode(&symbol).unwrap() else {
+            panic!("Code 93 encodes to a linear pattern");
+        };
+        let meta = Code93Meta { full_ascii };
+        let mut storage = [0u8; 256];
+        let mut buf = LinearBuf::new(&mut storage);
+        enc.encode_into(data, &meta, &mut buf).unwrap();
+        assert_eq!(buf, expected);
+        assert!(buf.len() <= Code93Encoder::max_modules(data.len(), &meta));
+        if !full_ascii {
+            assert_eq!(buf.len(), Code93Encoder::max_modules(data.len(), &meta));
+        }
+        // Too-small storage reports a capacity error instead of panicking.
+        let mut tiny = [0u8; 2];
+        let err = enc.encode_into(data, &meta, &mut LinearBuf::new(&mut tiny));
+        assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+    }
+    // Invalid input is rejected before anything is written.
+    let mut storage = [0u8; 256];
+    let mut buf = LinearBuf::new(&mut storage);
+    let base = Code93Meta { full_ascii: false };
+    assert!(enc.encode_into(b"ABc", &base, &mut buf).is_err());
+    let fa = Code93Meta { full_ascii: true };
+    assert!(enc.encode_into(b"AB\x80", &fa, &mut buf).is_err());
+    assert!(buf.is_empty());
+}

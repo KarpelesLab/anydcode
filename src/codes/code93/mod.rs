@@ -30,11 +30,17 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
@@ -44,10 +50,13 @@ use crate::traits::Encode;
 use alloc::format;
 #[cfg(feature = "decode")]
 use alloc::string::String;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Quiet-zone margin, in modules, emitted on each side of the pattern.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// The nine-module patterns for values 0..=46 (`1` = bar, `0` = space).
@@ -122,7 +131,7 @@ fn base_char(value: u8) -> Option<u8> {
 }
 
 /// The value 0..=42 of a base ASCII character, or `None` if outside the base set.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn base_value(b: u8) -> Option<u8> {
     Some(match b {
         b'0'..=b'9' => b - b'0',
@@ -152,7 +161,7 @@ fn shift_prefix(value: u8) -> Option<u8> {
 }
 
 /// The shift value 43..=46 for a Code 39-style prefix character.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn shift_value(prefix: u8) -> u8 {
     match prefix {
         b'$' => 43,
@@ -165,7 +174,7 @@ fn shift_value(prefix: u8) -> u8 {
 /// Full-ASCII pairing of a byte, in the Code 39 canonical form (prefix in `$ % / +`).
 /// Returns `Single(base)` for the 5 self-mapping punctuation/letter/digit classes and
 /// `Pair(prefix, letter)` otherwise; `None` for bytes `>= 128`.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn fa_encode(b: u8) -> Option<Fa> {
     let pair = match b {
         0 => (b'%', b'U'),
@@ -243,7 +252,7 @@ fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
 }
 
 /// A shift pair or self-mapping character in the full-ASCII scheme.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fa {
     /// A byte that maps to a single base character (the byte itself).
@@ -254,6 +263,7 @@ enum Fa {
 
 /// Weighted checksum: rightmost character weight 1, increasing leftward, wrapping at
 /// `max_weight`; result taken modulo 47.
+#[cfg(feature = "decode")]
 fn checksum(values: &[u8], max_weight: usize) -> u8 {
     let mut sum: u32 = 0;
     for (i, &v) in values.iter().rev().enumerate() {
@@ -264,24 +274,84 @@ fn checksum(values: &[u8], max_weight: usize) -> u8 {
 }
 
 /// Parameters required to re-encode a Code 93 symbol identically (lossless round-trip).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Code93Meta {
     /// Whether the payload uses the full-ASCII extension (a shift character appears).
     pub full_ascii: bool,
 }
 
 /// Code 93 encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code93Encoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl Code93Encoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Number of modules [`Code93Encoder::encode_into`] emits for `data_len` payload
+    /// bytes, excluding quiet zones: an upper bound when `full_ascii` is on (bytes
+    /// outside the base set take a shift character plus a letter).
+    pub const fn max_modules(data_len: usize, meta: &Code93Meta) -> usize {
+        let chars = if meta.full_ascii {
+            2 * data_len
+        } else {
+            data_len
+        };
+        // start + data + C + K + stop, nine modules each, then the terminating bar.
+        (chars + 4) * 9 + 1
+    }
+
+    /// Heap-free encoding: write the symbol for `data` under `meta` to `out`.
+    ///
+    /// Without full-ASCII every byte must be one of the 43 base characters; with it,
+    /// every byte must be ASCII. The input is validated before the first module is
+    /// written. Size a [`LinearBuf`](crate::output::LinearBuf) with
+    /// [`Code93Encoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        data: &[u8],
+        meta: &Code93Meta,
+        out: &mut S,
+    ) -> Result<()> {
+        // Validate and count the symbol values.
+        let mut n = 0usize;
+        for_each_value(data, meta.full_ascii, |_| {
+            n += 1;
+            Ok(())
+        })?;
+
+        // Weighted modulo-47 checks in one pass. With `r` the position from the
+        // right of the data values, C uses weight `r % 20 + 1`; K runs over the data
+        // plus C, so data values take weight `(r + 1) % 15 + 1` and C weight 1.
+        let (mut c_sum, mut k_sum, mut i) = (0u32, 0u32, 0usize);
+        for_each_value(data, meta.full_ascii, |v| {
+            let r = n - 1 - i;
+            c_sum += (r % 20 + 1) as u32 * u32::from(v);
+            k_sum += ((r + 1) % 15 + 1) as u32 * u32::from(v);
+            i += 1;
+            Ok(())
+        })?;
+        let c = (c_sum % 47) as u8;
+        let k = ((k_sum + u32::from(c)) % 47) as u8;
+
+        out.begin(QUIET_ZONE)?;
+        push_pattern(out, START_STOP)?;
+        for_each_value(data, meta.full_ascii, |v| {
+            push_pattern(out, PATTERNS[v as usize])
+        })?;
+        push_pattern(out, PATTERNS[c as usize])?;
+        push_pattern(out, PATTERNS[k as usize])?;
+        push_pattern(out, START_STOP)?;
+        out.push(true) // terminating bar
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl Code93Encoder {
     /// Build a reproducible [`Symbol`] from raw `data`.
     ///
     /// When `full_ascii` is `false`, every byte must be one of the 43 base characters
@@ -311,39 +381,34 @@ impl Code93Encoder {
     }
 }
 
-/// Expand a payload to Code 93 symbol values (0..=46), per the full-ASCII flag.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn expand(data: &[u8], full_ascii: bool) -> Result<Vec<u8>> {
-    let mut values = Vec::new();
+/// Call `f` with each Code 93 symbol value (0..=46) of a payload, per the
+/// full-ASCII flag, stopping at the first error. Invalid bytes are reported before
+/// `f` is called for any later value, but values preceding them have already been
+/// passed to `f`; callers that must not emit partial output validate in a first pass.
+#[cfg(feature = "encode")]
+fn for_each_value(
+    data: &[u8],
+    full_ascii: bool,
+    mut f: impl FnMut(u8) -> Result<()>,
+) -> Result<()> {
     for &b in data {
-        if !full_ascii {
-            match base_value(b) {
-                Some(v) => values.push(v),
-                None => {
-                    return Err(Error::invalid_data(format!(
-                        "byte {b:#04x} is not a Code 93 character"
-                    )));
-                }
-            }
-            continue;
-        }
         if let Some(v) = base_value(b) {
-            values.push(v);
+            f(v)?;
+        } else if !full_ascii {
+            return Err(Error::invalid_data("byte is not a Code 93 character"));
         } else {
             match fa_encode(b) {
                 Some(Fa::Pair(p, l)) => {
-                    values.push(shift_value(p));
-                    values.push(base_value(l).unwrap());
+                    f(shift_value(p))?;
+                    f(base_value(l).expect("shift letter is a base character"))?;
                 }
                 _ => {
-                    return Err(Error::invalid_data(format!(
-                        "byte {b:#04x} is not representable in Code 93"
-                    )));
+                    return Err(Error::invalid_data("byte is not representable in Code 93"));
                 }
             }
         }
     }
-    Ok(values)
+    Ok(())
 }
 
 #[cfg(all(feature = "alloc", feature = "encode"))]
@@ -362,26 +427,9 @@ impl Encode for Code93Encoder {
                 ));
             }
         };
-        let data = symbol.payload_bytes();
-        let mut values = expand(&data, meta.full_ascii)?;
-
-        let c = checksum(&values, 20);
-        values.push(c);
-        let k = checksum(&values, 15);
-        values.push(k);
-
-        let mut modules: Vec<bool> = Vec::new();
-        push_pattern(&mut modules, START_STOP);
-        for &v in &values {
-            push_pattern(&mut modules, PATTERNS[v as usize]);
-        }
-        push_pattern(&mut modules, START_STOP);
-        modules.push(true); // terminating bar
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&symbol.payload_bytes(), meta, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 
@@ -502,9 +550,9 @@ fn collapse(values: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
-    out.extend(pattern.bytes().map(|b| b == b'1'));
+#[cfg(feature = "encode")]
+fn push_pattern(out: &mut impl LinearSink, pattern: &str) -> Result<()> {
+    pattern.bytes().try_for_each(|b| out.push(b == b'1'))
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.
@@ -563,7 +611,12 @@ mod tests {
     #[test]
     fn test93_checksum_matches_reference() {
         // Bar Code Island worked example: TEST93 => C = '+' (41), K = '6' (6).
-        let values = expand(b"TEST93", false).unwrap();
+        let mut values = Vec::new();
+        for_each_value(b"TEST93", false, |v| {
+            values.push(v);
+            Ok(())
+        })
+        .unwrap();
         let c = checksum(&values, 20);
         assert_eq!(c, 41, "C check for TEST93");
         let mut with_c = values.clone();

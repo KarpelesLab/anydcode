@@ -70,7 +70,7 @@ pub mod itf;
 pub mod msi;
 #[cfg(all(feature = "alloc", feature = "pharmacode"))]
 pub mod pharmacode;
-#[cfg(all(feature = "alloc", feature = "telepen"))]
+#[cfg(feature = "telepen")]
 pub mod telepen;
 #[cfg(feature = "twoof5")]
 pub mod twoof5;

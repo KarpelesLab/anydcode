@@ -92,3 +92,49 @@ fn corrupt_check_is_rejected() {
     let result = Code11Decoder::new().with_check_count(1).decode(&encoding);
     assert!(result.is_err());
 }
+
+/// The heap-free `encode_into` path writes exactly the modules `Encode` returns.
+#[test]
+fn encode_into_matches_encode() {
+    use anyd::codes::code11::Code11Meta;
+    use anyd::output::LinearBuf;
+    let enc = Code11Encoder::new();
+    for data in [
+        &b"012345"[..],
+        b"",
+        b"123-45",
+        b"9-9-9-9",
+        b"0000000000001",
+        b"5",
+        b"-----------------",
+    ] {
+        for check_count in [0u8, 1, 2] {
+            let symbol = enc.build(data, check_count).unwrap();
+            let Encoding::Linear(expected) = enc.encode(&symbol).unwrap() else {
+                panic!("Code 11 encodes to a linear pattern");
+            };
+            let meta = Code11Meta { check_count };
+            let mut storage = [0u8; 64];
+            let mut buf = LinearBuf::new(&mut storage);
+            enc.encode_into(data, &meta, &mut buf).unwrap();
+            assert_eq!(buf, expected);
+            assert!(buf.len() <= Code11Encoder::max_modules(data.len(), &meta));
+            // Too-small storage reports a capacity error instead of panicking.
+            let mut tiny = [0u8; 1];
+            let err = enc.encode_into(data, &meta, &mut LinearBuf::new(&mut tiny));
+            assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+    // Invalid input is rejected before anything is written.
+    let mut storage = [0u8; 64];
+    let mut buf = LinearBuf::new(&mut storage);
+    assert!(
+        enc.encode_into(b"12A45", &Code11Meta { check_count: 1 }, &mut buf)
+            .is_err()
+    );
+    assert!(
+        enc.encode_into(b"12345", &Code11Meta { check_count: 3 }, &mut buf)
+            .is_err()
+    );
+    assert!(buf.is_empty());
+}

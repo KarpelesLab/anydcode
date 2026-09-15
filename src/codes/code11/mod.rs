@@ -25,11 +25,17 @@
 )]
 
 use crate::error::{Error, Result};
+#[cfg(feature = "alloc")]
 use crate::output::Encoding;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 use crate::output::LinearPattern;
+#[cfg(feature = "encode")]
+use crate::output::LinearSink;
+#[cfg(feature = "alloc")]
 use crate::segment::Segment;
+#[cfg(feature = "alloc")]
 use crate::symbol::{Symbol, SymbolMeta};
+#[cfg(feature = "alloc")]
 use crate::symbology::Symbology;
 #[cfg(feature = "decode")]
 use crate::traits::Decode;
@@ -39,10 +45,13 @@ use crate::traits::Encode;
 use alloc::format;
 #[cfg(feature = "decode")]
 use alloc::string::String;
-use alloc::{vec, vec::Vec};
+#[cfg(feature = "alloc")]
+use alloc::vec;
+#[cfg(feature = "decode")]
+use alloc::vec::Vec;
 
 /// Quiet-zone margin, in narrow modules, emitted on each side of the pattern.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
 
 /// Element patterns for values 0..=10 (`0`-`9` then `-`); `1` = bar, `0` = space,
@@ -65,7 +74,7 @@ const PATTERNS: [&str; 11] = [
 const START_STOP: &str = "1011001";
 
 /// The value 0..=10 of a Code 11 data character, or `None` if outside the set.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 fn char_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -82,6 +91,7 @@ fn value_char(v: u8) -> u8 {
 
 /// Weighted modulo-11 checksum: rightmost character weight 1, increasing leftward,
 /// wrapping at `max_weight`.
+#[cfg(feature = "decode")]
 fn checksum(values: &[u8], max_weight: usize) -> u8 {
     let mut sum: u32 = 0;
     for (i, &v) in values.iter().rev().enumerate() {
@@ -92,24 +102,95 @@ fn checksum(values: &[u8], max_weight: usize) -> u8 {
 }
 
 /// Parameters required to re-encode a Code 11 symbol identically (lossless round-trip).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Code11Meta {
     /// Number of modulo-11 check characters appended (0, 1 = `C`, or 2 = `C` and `K`).
     pub check_count: u8,
 }
 
 /// Code 11 encoder.
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Code11Encoder;
 
-#[cfg(all(feature = "alloc", feature = "encode"))]
+#[cfg(feature = "encode")]
 impl Code11Encoder {
     /// A new encoder.
     pub fn new() -> Self {
         Self
     }
 
+    /// Upper bound on the modules [`Code11Encoder::encode_into`] emits for `data_len`
+    /// payload bytes, excluding quiet zones (characters are 6 or 7 modules wide, so
+    /// the exact count depends on the data). Values of `check_count` above 2 are
+    /// treated as 2.
+    pub const fn max_modules(data_len: usize, meta: &Code11Meta) -> usize {
+        let checks = if meta.check_count > 2 {
+            2
+        } else {
+            meta.check_count as usize
+        };
+        // start/stop + (gap + widest character) per data/check character + gap + stop.
+        (data_len + checks) * 8 + 15
+    }
+
+    /// Heap-free encoding: write the symbol for `data` (digits and `-`) under `meta`
+    /// to `out`.
+    ///
+    /// `meta.check_count` must be 0, 1, or 2. The input is validated before the first
+    /// module is written. Size a [`LinearBuf`](crate::output::LinearBuf) with
+    /// [`Code11Encoder::max_modules`].
+    pub fn encode_into<S: LinearSink>(
+        &self,
+        data: &[u8],
+        meta: &Code11Meta,
+        out: &mut S,
+    ) -> Result<()> {
+        if meta.check_count > 2 {
+            return Err(Error::invalid_parameter(
+                "Code 11 check_count must be 0, 1 or 2",
+            ));
+        }
+        if data.iter().any(|&b| char_value(b).is_none()) {
+            return Err(Error::invalid_data("byte is not a Code 11 character"));
+        }
+
+        // Weighted modulo-11 checks computed in one pass: the rightmost data
+        // character has weight 1 for C (wrapping at 10) and weight 2 for K (wrapping
+        // at 9, C itself taking weight 1).
+        let n = data.len();
+        let (mut c_sum, mut k_sum) = (0u32, 0u32);
+        for (i, &b) in data.iter().enumerate() {
+            let v = u32::from(char_value(b).expect("validated Code 11 character"));
+            let from_right = n - 1 - i;
+            c_sum += ((from_right % 10) as u32 + 1) * v;
+            k_sum += (((from_right + 1) % 9) as u32 + 1) * v;
+        }
+        let c = (c_sum % 11) as u8;
+        let k = ((k_sum + u32::from(c)) % 11) as u8;
+
+        out.begin(QUIET_ZONE)?;
+        push_pattern(out, START_STOP)?;
+        let emit = |out: &mut S, v: u8| -> Result<()> {
+            out.push(false)?;
+            push_pattern(out, PATTERNS[v as usize])
+        };
+        for &b in data {
+            emit(out, char_value(b).expect("validated Code 11 character"))?;
+        }
+        if meta.check_count >= 1 {
+            emit(out, c)?;
+        }
+        if meta.check_count == 2 {
+            emit(out, k)?;
+        }
+        out.push(false)?;
+        push_pattern(out, START_STOP)
+    }
+}
+
+#[cfg(all(feature = "alloc", feature = "encode"))]
+impl Code11Encoder {
     /// Build a reproducible [`Symbol`] from raw `data` (digits and `-`).
     ///
     /// `check_count` must be 0, 1, or 2. The payload is stored as a single
@@ -155,47 +236,9 @@ impl Encode for Code11Encoder {
                 ));
             }
         };
-        if meta.check_count > 2 {
-            return Err(Error::invalid_parameter(
-                "Code 11 check_count must be 0, 1 or 2",
-            ));
-        }
-        let data = symbol.payload_bytes();
-
-        let mut values: Vec<u8> = Vec::with_capacity(data.len());
-        for &b in &data {
-            match char_value(b) {
-                Some(v) => values.push(v),
-                None => {
-                    return Err(Error::invalid_data(format!(
-                        "byte {b:#04x} is not a Code 11 character"
-                    )));
-                }
-            }
-        }
-
-        // Data characters plus any check characters, all as Code 11 values.
-        let mut seq = values.clone();
-        if meta.check_count >= 1 {
-            seq.push(checksum(&values, 10));
-        }
-        if meta.check_count == 2 {
-            seq.push(checksum(&seq, 9));
-        }
-
-        let mut modules: Vec<bool> = Vec::new();
-        push_pattern(&mut modules, START_STOP);
-        for &v in &seq {
-            modules.push(false);
-            push_pattern(&mut modules, PATTERNS[v as usize]);
-        }
-        modules.push(false);
-        push_pattern(&mut modules, START_STOP);
-
-        Ok(Encoding::Linear(LinearPattern {
-            modules,
-            quiet_zone: QUIET_ZONE,
-        }))
+        let mut pattern = LinearPattern::new();
+        self.encode_into(&symbol.payload_bytes(), meta, &mut pattern)?;
+        Ok(Encoding::Linear(pattern))
     }
 }
 
@@ -316,9 +359,9 @@ impl Decode for Code11Decoder {
 }
 
 /// Append a `1`/`0` pattern string to `out` as bars/spaces.
-#[cfg(all(feature = "alloc", feature = "encode"))]
-fn push_pattern(out: &mut Vec<bool>, pattern: &str) {
-    out.extend(pattern.bytes().map(|b| b == b'1'));
+#[cfg(feature = "encode")]
+fn push_pattern(out: &mut impl LinearSink, pattern: &str) -> Result<()> {
+    pattern.bytes().try_for_each(|b| out.push(b == b'1'))
 }
 
 /// Run-length encode a module row into `(is_bar, length)` runs.

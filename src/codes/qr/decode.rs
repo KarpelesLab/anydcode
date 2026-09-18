@@ -372,7 +372,11 @@ fn read_eci_assignment(r: &mut BitReader<'_>) -> Result<u32> {
         Ok(((first & 0x3F) << 8) | rest)
     } else if first & 0xE0 == 0xC0 {
         let rest = r.read(16).ok_or_else(trunc)?;
-        Ok(((first & 0x1F) << 16) | rest)
+        // 21 bits reach 2_097_151, but assignment numbers stop at 999_999 (and the
+        // encoder rejects anything above).
+        Some(((first & 0x1F) << 16) | rest)
+            .filter(|&n| n < 1_000_000)
+            .ok_or_else(|| Error::undecodable("ECI assignment out of range"))
     } else {
         Err(Error::undecodable("invalid ECI assignment"))
     }
@@ -416,6 +420,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The 3-byte ECI form holds 21 bits, but assignment numbers end at 999_999:
+    /// anything above cannot be re-encoded and must not decode.
+    #[test]
+    fn eci_assignment_above_999999_is_rejected() {
+        let v1 = Version::new(1).unwrap();
+        // 0111 | 110 11111 11111111 11111111 (2_097_151)
+        assert!(parse_segments(&[0x7D, 0xFF, 0xFF, 0xF0], v1).is_err());
+        // 0111 | 110 01111 01000010 00111111 (999_999)
+        let segs = parse_segments(&[0x7C, 0xF4, 0x23, 0xF0], v1).unwrap();
+        assert_eq!(segs, [Segment::eci(999_999)]);
     }
 
     /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127

@@ -169,3 +169,129 @@ fn rejects_non_dotcode_symbol() {
     }
     assert!(DotCodeDecoder::new().decode(&encoding).is_err());
 }
+
+/// Encode hand-built (unmasked, already padded) data codewords straight from meta.
+fn symbol_from_codewords(width: usize, height: usize, codewords: &[u8]) -> anyd::Symbol {
+    anyd::Symbol::new(
+        Symbology::DotCode,
+        vec![],
+        SymbolMeta::DotCode(anyd::codes::dotcode::DotCodeMeta {
+            width,
+            height,
+            mask: 0,
+            codewords: codewords.to_vec(),
+        }),
+    )
+}
+
+#[test]
+fn hostile_codeword_streams_never_panic() {
+    // A symbol with valid Reed-Solomon check words can carry any codeword sequence,
+    // including shifts whose operand is out of range for the shifted set (an Upper
+    // Shift B operand above 95 would overflow a byte) or that run off the end.
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    let mut seed = 0xD07C_0DE5_EED0_0001u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut streams: Vec<Vec<u8>> = vec![
+        vec![111, 112, 106, 106, 106, 106, 106, 106, 106],
+        vec![110, 112, 106, 106, 106, 106, 106, 106, 106],
+        vec![106, 111, 96, 111, 112, 110, 100, 110, 112],
+        vec![112, 102, 102, 102, 102, 102, 102, 102, 111],
+        vec![108, 112, 112, 112, 106, 106, 106, 106, 111],
+    ];
+    for _ in 0..600 {
+        // Bias towards the control codewords 96..=112.
+        streams.push(
+            (0..9)
+                .map(|_| match next() % 3 {
+                    0 => 96 + (next() % 17) as u8,
+                    _ => (next() % 113) as u8,
+                })
+                .collect(),
+        );
+    }
+    for stream in &streams {
+        // 9 data + 7 check codewords: 2 + 16 * 9 = 146 dots fit 21 x 14 exactly.
+        let encoding = enc.encode(&symbol_from_codewords(21, 14, stream)).unwrap();
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(enc.encode(&decoded).unwrap(), encoding, "stream {stream:?}");
+    }
+}
+
+#[test]
+fn codewords_that_do_not_fit_are_an_error() {
+    // 21 x 14 holds 147 dots: 2 mask bits and 16 codewords (9 data + 7 check). One
+    // data codeword more needs 17 and must be refused, not silently truncated.
+    let enc = DotCodeEncoder::new();
+    assert!(enc.encode(&symbol_from_codewords(21, 14, &[1; 9])).is_ok());
+    assert!(
+        enc.encode(&symbol_from_codewords(21, 14, &[1; 10]))
+            .is_err()
+    );
+    assert!(enc.encode(&symbol_from_codewords(5, 6, &[1; 40])).is_err());
+}
+
+#[test]
+fn decoder_never_panics_on_garbage() {
+    let mut seed = 0xD07C_0DE0_F022_0001u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let dec = DotCodeDecoder::new();
+    for (w, h) in [
+        (0usize, 0usize),
+        (4, 5),
+        (5, 5),
+        (5, 6),
+        (6, 5),
+        (7, 10),
+        (10, 7),
+        (13, 56),
+        (56, 13),
+        (21, 14),
+        (200, 199),
+        (199, 200),
+        (201, 200),
+        (200, 200),
+    ] {
+        for density in [0u64, 1, 2, 4] {
+            let mut m = anyd::output::BitMatrix::new(w, h, 3);
+            for y in 0..h {
+                for x in 0..w {
+                    m.set(x, y, (x + y) % 2 == 0 && next() % 4 < density);
+                }
+            }
+            let _ = dec.decode(&Encoding::Matrix(m));
+        }
+    }
+    // Valid symbols with flipped dots: never a panic.
+    let enc = DotCodeEncoder::new();
+    for len in [1usize, 5, 20, 80, 300] {
+        let payload: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+        let symbol = enc.build_bytes(&payload).unwrap();
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("expected matrix");
+        };
+        let (w, h) = (clean.width(), clean.height());
+        for flips in [1usize, 3, 10, 100] {
+            for _ in 0..10 {
+                let mut m = clean.clone();
+                for _ in 0..flips {
+                    let (x, y) = ((next() % w as u64) as usize, (next() % h as u64) as usize);
+                    let v = m.get(x, y);
+                    m.set(x, y, !v);
+                }
+                let _ = dec.decode(&Encoding::Matrix(m));
+            }
+        }
+    }
+}

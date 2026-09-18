@@ -1057,6 +1057,13 @@ pub(crate) fn render_meta(meta: &DotCodeMeta) -> Result<Encoding> {
             return Err(Error::invalid_parameter("DotCode codeword out of range"));
         }
     }
+    // Mask bits plus data and check codewords must fit the symbol's dots; folding
+    // would otherwise silently drop the tail.
+    if min_dots_for(meta.codewords.len()) > (meta.width * meta.height) / 2 {
+        return Err(Error::capacity(
+            "DotCode codewords do not fit the symbol size",
+        ));
+    }
     let grid = render_grid(&meta.codewords, meta.width, meta.height, meta.mask);
     let mut matrix = BitMatrix::new(meta.width, meta.height, 3);
     for (i, &dark) in grid.iter().enumerate() {

@@ -279,8 +279,10 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
                     }
                     i += 2;
                 } else if v == UPPER_SHIFT_B {
+                    // A well-formed operand is 0..=95; a hostile one (up to 112) must
+                    // not overflow the byte.
                     if let Some(&b) = cw.get(i + 1) {
-                        bytes.push(b + 160);
+                        bytes.push(b.wrapping_add(160));
                     }
                     i += 2;
                 } else if v == BIN_LATCH {
@@ -342,7 +344,7 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
                     i += 2;
                 } else if v == UPPER_SHIFT_B {
                     if let Some(&b) = cw.get(i + 1) {
-                        bytes.push(b + 160);
+                        bytes.push(b.wrapping_add(160));
                     }
                     i += 2;
                 } else if v == BIN_LATCH {
@@ -394,7 +396,7 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
                     i += 2;
                 } else if v == UPPER_SHIFT_B {
                     if let Some(&b) = cw.get(i + 1) {
-                        bytes.push(b + 160);
+                        bytes.push(b.wrapping_add(160));
                     }
                     i += 2;
                 } else if v == BIN_LATCH {

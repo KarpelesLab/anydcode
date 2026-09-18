@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Live detection.** On camera-like scenes the locate → crop → decode loop read about
   half the codes it was shown and reported dozens of values that were not there, at
-  ~1 s per decode pass. It now reads all of the 1D and 83% of the 2D codes on the same scenes
+  ~1 s per decode pass. It now reads all of the 1D and 95% of the 2D codes on the same scenes
   with no wrong values, in tens of milliseconds (`examples/liveeval.rs`,
   `tests/live_pipeline.rs`):
   - `scan1d` treated a whole scan line as one barcode and required both crop edges to
@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (its payload RS is far too weak for thousands of hypotheses per frame); it now
     requires real ring structure and the template byte. Aztec no longer "decodes" a
     blank patch (all-zero codewords are a valid RS codeword).
+  - The Data Matrix sampler assumed the largest dark blob in the image was the symbol
+    and let any ink near it pull the corner and edge fits; it read a third of the
+    symbols it was shown in a scene, now all of them.
   - QR and App Clip scanning no longer spend hundreds of milliseconds on code-free
     frames.
   - `FrameDetector` matched `Hints` by exact fingerprint equality, which sensor noise

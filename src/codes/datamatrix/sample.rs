@@ -55,7 +55,7 @@ use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
-use crate::imgproc::components::{Connectivity, connected_components};
+use crate::imgproc::components::{Connectivity, connected_components, flood_region};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::line::{Line, fit_line_least_squares};
 use crate::imgproc::sample::sample_bilinear;
@@ -280,6 +280,13 @@ fn corner_targets(geom: &Geometry, swap: bool) -> [Point; 4] {
 
 /// Extract corners, the L orientation, a size estimate and the binarization threshold
 /// from a supplied binarization `bin` (and its global sampling `threshold`).
+/// How far beyond its parallelogram-completed position the symbol's far corner (where
+/// the timing borders meet) may lie and still be kept in the working mask, as growth
+/// factors about the centroid, tried in order. Tight first: it keeps print that crowds
+/// that corner out of the fit. Then generous: under perspective the true corner is well
+/// off the parallelogram, and clipping it costs the timing borders their meeting point.
+const FAR_CORNER_SLACK: [f32; 2] = [1.08, 1.35];
+
 /// Dark components tried as the symbol, largest first.
 const MAX_COMPONENTS: usize = 6;
 
@@ -309,7 +316,12 @@ fn extract_geometries(
             c.area >= 16 && w >= MIN_FRAME && h >= MIN_FRAME && w <= 4 * h && h <= 4 * w
         })
         .take(MAX_COMPONENTS)
-        .filter_map(|c| extract_geometry(frame, bin, threshold, &c.bounds).ok())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flat_map(|c| FAR_CORNER_SLACK.map(|slack| (c, slack)))
+        .filter_map(|(c, slack)| {
+            extract_geometry(frame, bin, threshold, &c.bounds, c.area, slack).ok()
+        })
         .collect();
     if geoms.is_empty() {
         return Err(Error::undecodable("no dark region shaped like a symbol"));
@@ -323,12 +335,101 @@ fn extract_geometry(
     bin: &BinaryImage,
     threshold: u8,
     b: &crate::imgproc::components::BoundingBox,
+    area: usize,
+    far_slack: f32,
 ) -> Result<Geometry> {
     let pad = 2usize;
     let x0 = b.min_x.saturating_sub(pad);
     let y0 = b.min_y.saturating_sub(pad);
     let x1 = (b.max_x + pad).min(bin.width() - 1);
     let y1 = (b.max_y + pad).min(bin.height() - 1);
+
+    // Everything below reasons about "the symbol's dark boundary", so ink that is not
+    // the symbol's — print beside the code, the dark surface behind a label — must not
+    // be allowed to attract the corner search or the edge-line fits, which otherwise
+    // lock onto it and skew the grid. Two stages: a first quad from the L component's
+    // *own* pixels (the box of a rotated symbol has other ink in its corners), then the
+    // working mask is the binarization clipped to that quad, slightly grown — which
+    // brings back the symbol's modules that are not connected to the L (timing dots,
+    // interior islands) and nothing else.
+    // The component's pixels: flood from a dark pixel on its top row. Another component
+    // can share that row, so floods are tried until one has this component's area.
+    let mut component = Vec::new();
+    let mut x = b.min_x;
+    while x <= b.max_x {
+        if bin.get(x, b.min_y) {
+            let pixels = flood_region(bin, (x, b.min_y), true);
+            if pixels.len() == area {
+                component = pixels;
+                break;
+            }
+            // Skip the rest of this dark run: it floods to the same region.
+            while x <= b.max_x && bin.get(x, b.min_y) {
+                x += 1;
+            }
+        } else {
+            x += 1;
+        }
+    }
+    let mut own = BinaryImage::new(bin.width(), bin.height());
+    for &(x, y) in &component {
+        own.set(x, y, true);
+    }
+    let rough = find_corners(&own, x0, y0, x1, y1)?;
+    let centre = centroid_of(&rough);
+    // The L reaches three of the symbol's corners; the fourth — where the two timing
+    // borders meet — may not be connected to it at all, leaving that corner of the
+    // rough quad recessed (or somewhere inside the symbol). The L's vertex is the
+    // corner whose two edges are solid; the corner opposite it is replaced by the
+    // parallelogram completion of the other three when that lies farther out.
+    let solid: [f32; 4] =
+        core::array::from_fn(|i| edge_darkness(&own, rough[i], rough[(i + 1) % 4], centre));
+    let vertex = (0..4)
+        .max_by(|&i, &j| {
+            (solid[(i + 3) % 4] + solid[i]).total_cmp(&(solid[(j + 3) % 4] + solid[j]))
+        })
+        .unwrap_or(0);
+    let far = (vertex + 2) % 4;
+    let mut hull = rough;
+    let completed = Point::new(
+        rough[(far + 3) % 4].x + rough[(far + 1) % 4].x - rough[vertex].x,
+        rough[(far + 3) % 4].y + rough[(far + 1) % 4].y - rough[vertex].y,
+    );
+    if completed.distance(centre) > rough[far].distance(centre) {
+        hull[far] = completed;
+    }
+    for (i, p) in hull.iter_mut().enumerate() {
+        // Then grown a little about the centroid, for blur and the rough fit; the far
+        // corner by `far_slack` (see [`FAR_CORNER_SLACK`]).
+        let (dx, dy) = (p.x - centre.x, p.y - centre.y);
+        let len = dx.hypot(dy).max(1.0);
+        let k = if i == far { far_slack } else { 1.08 } + 2.0 / len;
+        *p = Point::new(centre.x + dx * k, centre.y + dy * k);
+    }
+    let inside = |x: f32, y: f32| {
+        // Same side of all four edges of the (convex, consistently wound) quad.
+        let mut sign = 0.0f32;
+        (0..4).all(|i| {
+            let (a, c) = (hull[i], hull[(i + 1) % 4]);
+            let cross = (c.x - a.x) * (y - a.y) - (c.y - a.y) * (x - a.x);
+            if cross == 0.0 {
+                return true;
+            }
+            if sign == 0.0 {
+                sign = cross.signum();
+            }
+            cross.signum() == sign
+        })
+    };
+    let mut window = BinaryImage::new(bin.width(), bin.height());
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            if bin.get(x, y) && inside(x as f32, y as f32) {
+                window.set(x, y, true);
+            }
+        }
+    }
+    let bin = &window;
 
     let corners = find_corners(bin, x0, y0, x1, y1)?;
     let centroid = centroid_of(&corners);

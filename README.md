@@ -111,8 +111,9 @@ are driven by handing `scan1d::scan_spans` candidates to `scan1d::try_decode`. D
 `tests/live_pipeline.rs`, `tests/scan1d_pipeline.rs`, `tests/rotated1d.rs`.
 
 ³ Data Matrix ships an image sampler: Otsu binarization → the largest few dark
-components tried in turn (so a dark surface or print beside the code does not displace
-it) → solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid
+components tried in turn, each analysed under a mask clipped to its own quad (so a dark
+surface behind the label or print beside the code neither displaces the symbol nor
+attracts the corner and edge fits) → solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid
 sampling, with symbol size and grid chirality confirmed by Reed–Solomon. Robust to
 any-angle rotation, scale, blur/noise and (size-graded) tilt; envelope in
 `tests/datamatrix_image.rs`.
@@ -286,10 +287,10 @@ runs (`cargo run --release --example liveeval`):
 | | read rate | wrong values | decode time / frame |
 |---|---:|---:|---:|
 | 1D (EAN-13, Code 128, Code 39, ITF) | 100% (240/240) | 0 | ~50 ms crop batch |
-| 2D (QR, Aztec, PDF417, Data Matrix) | 83% | 0 | ~120 ms whole-frame pass |
+| 2D (QR, Data Matrix, Aztec, PDF417) | 95% (228/240) | 0 | ~120 ms whole-frame pass |
 
-Data Matrix is the weak one (its sampler needs a clean surround); QR and Aztec are at
-97–100%. `tests/live_pipeline.rs` pins this behaviour in CI, including the things that
+QR and Data Matrix read 60/60, Aztec 58/60; PDF417 (50/60) is the weak one — its sampler
+is affine-only and wants ≥3 px modules. `tests/live_pipeline.rs` pins this behaviour in CI, including the things that
 must *not* read: text, half an EAN-13 (structurally a UPC-E), ITF fragments.
 
 The demo page shows the intended live wiring: the main thread runs `locate` on a

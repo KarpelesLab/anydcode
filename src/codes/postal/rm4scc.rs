@@ -129,7 +129,8 @@ pub(super) fn encode(kix: bool, data: &[u8]) -> Result<Vec<BarState>> {
 /// stripped and verified).
 pub(super) fn decode_rm4scc(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
     let n = bars.len();
-    if n < 6 || !(n - 2).is_multiple_of(4) {
+    // Start and stop bars, at least one data character and the checksum.
+    if n < 10 || !(n - 2).is_multiple_of(4) {
         return Err(Error::undecodable("RM4SCC bar count invalid"));
     }
     if bars[0] != BarState::Ascender {

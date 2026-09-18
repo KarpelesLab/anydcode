@@ -295,6 +295,44 @@ fn rm4scc_rejects_lowercase_and_symbols() {
     assert!(PostalEncoder::new().build_kix("12-34").is_err());
 }
 
+// ---- Payload-less layouts ---------------------------------------------------
+
+/// A 3-row postal matrix from `F/A/D/T` bar letters.
+fn matrix_from_letters(letters: &str) -> Encoding {
+    let mut m = BitMatrix::new(2 * letters.len() - 1, 3, 2);
+    for (i, c) in letters.chars().enumerate() {
+        m.set(2 * i, 1, true);
+        if matches!(c, 'F' | 'A') {
+            m.set(2 * i, 0, true);
+        }
+        if matches!(c, 'F' | 'D') {
+            m.set(2 * i, 2, true);
+        }
+    }
+    Encoding::Matrix(m)
+}
+
+/// Frame bars around nothing but a (self-consistent) check character carry no data,
+/// and the encoder refuses an empty payload: such bars must not decode.
+#[test]
+fn check_only_layouts_are_rejected() {
+    let dec = PostalDecoder::new();
+    // POSTNET / PLANET: frame + check digit 0 + frame.
+    assert!(dec.decode(&matrix_from_letters("AAATTTA")).is_err());
+    assert!(dec.decode(&matrix_from_letters("ATTAAAA")).is_err());
+    // RM4SCC: start + checksum of nothing (`Z`, top 6 / bottom 6) + stop.
+    assert!(dec.decode(&matrix_from_letters("AFFTTF")).is_err());
+    // The same frames around one real character still decode.
+    let enc = PostalEncoder::new();
+    for sym in [
+        enc.build_postnet("7").unwrap(),
+        enc.build_planet("7").unwrap(),
+        enc.build_rm4scc("7").unwrap(),
+    ] {
+        assert_lossless(&sym);
+    }
+}
+
 // ---- Unsupported variants --------------------------------------------------
 
 #[test]

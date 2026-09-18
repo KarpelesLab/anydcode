@@ -91,7 +91,8 @@ pub(super) fn encode(planet: bool, digits: &[u8]) -> Result<Vec<BarState>> {
 /// digit stripped). Framing bars must be tall and every bar 2-state.
 pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
     let n = bars.len();
-    if n < 7 || !(n - 2).is_multiple_of(5) {
+    // Two frame bars, at least one data digit and the check digit.
+    if n < 12 || !(n - 2).is_multiple_of(5) {
         return Err(Error::undecodable("POSTNET/PLANET bar count invalid"));
     }
     if bars.iter().any(|b| b.has_descender()) {

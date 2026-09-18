@@ -370,10 +370,11 @@ impl<'a> MatrixBuf<'a> {
         height: usize,
         quiet_zone: usize,
     ) -> Result<Self> {
-        let needed = Self::bytes_for(width, height);
-        if storage.len() < needed {
-            return Err(Error::capacity("MatrixBuf storage too small"));
-        }
+        // A module count that overflows `usize` fits no storage at all.
+        let needed = match width.checked_mul(height) {
+            Some(modules) if modules.div_ceil(8) <= storage.len() => modules.div_ceil(8),
+            _ => return Err(Error::capacity("MatrixBuf storage too small")),
+        };
         let bits = &mut storage[..needed];
         bits.fill(0);
         Ok(MatrixBuf {

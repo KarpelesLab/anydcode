@@ -225,3 +225,20 @@ fn matrix_encoders() {
         "datamatrix base256"
     );
 }
+
+/// Dimensions whose bit count overflows `usize` cannot fit any storage: that is a
+/// capacity error, not an arithmetic panic (or, wrapped, a grid that indexes out of
+/// its buffer).
+#[test]
+fn matrix_buf_rejects_overflowing_dimensions() {
+    let mut storage = [0u8; 8];
+    for (w, h) in [
+        (usize::MAX, 2),
+        (usize::MAX, usize::MAX),
+        (1 << 40, 1 << 40),
+    ] {
+        assert!(MatrixBuf::new(&mut storage, w, h, 0).is_err(), "{w}x{h}");
+    }
+    assert!(MatrixBuf::new(&mut storage, 8, 8, 0).is_ok());
+    assert!(MatrixBuf::new(&mut storage, 8, 9, 0).is_err());
+}

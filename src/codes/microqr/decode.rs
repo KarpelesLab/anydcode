@@ -216,9 +216,8 @@ fn parse_segments(content: &[bool], version: MicroVersion) -> Result<Vec<Segment
         } else {
             r.read(mib).unwrap() as u8
         };
-        let Some(mode) = mode_from_micro_value(mode_val) else {
-            break;
-        };
+        let mode = mode_from_micro_value(mode_val)
+            .ok_or_else(|| Error::undecodable("undefined Micro QR mode indicator"))?;
         let Some(ccb) = char_count_bits(version, &mode) else {
             break;
         };
@@ -343,6 +342,18 @@ mod tests {
             .filter(|b| !b.is_ascii_whitespace())
             .map(|b| b == b'1')
             .collect()
+    }
+
+    /// M4's 3-bit mode indicator only defines 0..=3. Anything else is a malformed
+    /// stream (the all-zero terminator reads as numeric), not an end marker that
+    /// silently drops the rest of the payload.
+    #[test]
+    fn undefined_mode_indicator_is_rejected() {
+        let m4 = MicroVersion::M4;
+        assert!(parse_segments(&bits("101 00001 01000001 000000000"), m4).is_err());
+        assert!(parse_segments(&bits("000 000001 0111 111 00001 000000000"), m4).is_err());
+        let segs = parse_segments(&bits("000 000001 0111 000000000"), m4).unwrap();
+        assert_eq!(segs, [Segment::numeric(b"7".to_vec())]);
     }
 
     /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127

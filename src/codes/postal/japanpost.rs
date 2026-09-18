@@ -157,16 +157,20 @@ fn check_char(inter: &[u8]) -> u8 {
 
 /// Encode a validated source string into the 67-bar sequence.
 pub(super) fn encode(source: &[u8]) -> Result<Vec<BarState>> {
-    let inter = validate(source)?;
+    Ok(intermediate_to_bars(&validate(source)?))
+}
+
+/// Render a 20-character intermediate field, plus its check character, as bars.
+fn intermediate_to_bars(inter: &[u8]) -> Vec<BarState> {
     let mut dest: Vec<u8> = Vec::with_capacity(67);
     dest.extend_from_slice(&START);
-    for &c in &inter {
+    for &c in inter {
         dest.extend_from_slice(&JAPAN_TABLE[kasut_index(c).unwrap()]);
     }
-    let check = check_char(&inter);
+    let check = check_char(inter);
     dest.extend_from_slice(&JAPAN_TABLE[kasut_index(check).unwrap()]);
     dest.extend_from_slice(&STOP);
-    Ok(dest.iter().map(|&v| value_to_bar(v)).collect())
+    dest.iter().map(|&v| value_to_bar(v)).collect()
 }
 
 /// Decode a 67-bar Japan Post sequence back to the source string.
@@ -219,5 +223,63 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
             i += 1;
         }
     }
+    // The mod-19 check passes for fields the encoder never produces (a letter past
+    // `Z`, the unused control characters `e`-`h`, data after the padding, an empty
+    // field); accept only a field this very string encodes back to.
+    if validate(&out).ok().as_deref() != Some(inter) {
+        return Err(Error::undecodable("Japan Post field is not canonical"));
+    }
     Ok((PostalVariant::JapanPost, out))
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Intermediate fields the encoder never produces carry a valid check character
+    /// just as easily as real ones; they must not decode to a string the encoder
+    /// rejects or renders differently.
+    #[test]
+    fn non_canonical_fields_are_rejected() {
+        for inter in [
+            &b"c9dddddddddddddddddd"[..], // CC3 + 9: past 'Z'
+            b"1d2ddddddddddddddddd",      // data after the padding
+            b"12eddddddddddddddddd",      // CC5 is not used
+            b"hhhhhhhhhhhhhhhhhhhh",
+            b"dddddddddddddddddddd", // nothing but padding
+        ] {
+            let bars = intermediate_to_bars(inter);
+            assert!(
+                decode(&bars).is_err(),
+                "{:?} accepted",
+                core::str::from_utf8(inter)
+            );
+        }
+    }
+
+    /// Whatever decodes re-encodes to the same bars.
+    #[test]
+    fn arbitrary_fields_decode_losslessly() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut accepted = 0;
+        for _ in 0..20000 {
+            let mut inter = [b'd'; 20];
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let used = (state % 21) as usize;
+            for slot in inter.iter_mut().take(used) {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *slot = KASUTSET[(state % 19) as usize];
+            }
+            let bars = intermediate_to_bars(&inter);
+            if let Ok((_, text)) = decode(&bars) {
+                accepted += 1;
+                assert_eq!(encode(&text).unwrap(), bars, "{:?}", inter);
+            }
+        }
+        assert!(accepted > 0);
+    }
 }

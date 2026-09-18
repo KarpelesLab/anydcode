@@ -391,8 +391,15 @@ fn int_bits(value: usize, n: usize) -> String {
 // --------------------------- decimal-string ULEB128 ---------------------------
 
 /// Encode a decimal digit string as unsigned LEB128 bits (arbitrary precision).
+///
+/// The encoding carries the number's *value*, which decodes to its canonical
+/// spelling — so a string with leading zeros (`007`) is refused here and left to the
+/// text encodings, which reproduce it exactly.
 fn encode_uleb128(value: &str) -> Option<String> {
     if value.is_empty() || !value.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if value.len() > 1 && value.starts_with('0') {
         return None;
     }
     let mut digits: Vec<u8> = value.bytes().map(|c| c - b'0').collect();

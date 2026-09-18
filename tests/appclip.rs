@@ -152,6 +152,26 @@ fn full_roundtrip_through_ring_bits() {
     }
 }
 
+/// The LEB128 numeric component stores a *value*, so it cannot carry leading zeros:
+/// `/007` must fall back to a text encoding instead of silently decoding as `/7`.
+#[test]
+fn numeric_components_keep_leading_zeros() {
+    for url in [
+        "https://example.com/007",
+        "https://example.com/0",
+        "https://example.com/00",
+        "https://example.com/shop/0042",
+        "https://example.com/?x=007",
+        "https://example.com/shop?p=007",
+        "https://a.io/shop?p=1&p1=02",
+    ] {
+        let payload =
+            appclip::compress_url(url).unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
+        let back = appclip::decompress_url(&payload).unwrap();
+        assert_eq!(back, url, "numeric component altered");
+    }
+}
+
 /// Characters outside a component's raw-allowed set canonicalize to the same payload
 /// as their pre-escaped form (Apple normalizes both spellings identically).
 #[test]

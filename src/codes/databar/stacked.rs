@@ -289,7 +289,13 @@ pub(super) fn expanded_stacked_matrix(reduced: &[u8], cols_per_row: usize) -> Re
     let stack_rows = codeblocks.div_ceil(cols_per_row);
     let height = stack_rows * 4 - 3;
     let num_columns_row1 = cols_per_row.min(codeblocks);
-    let width = num_columns_row1 * CODEBLOCK_MODULES + 4;
+    // A single row is the linear symbol, whose last codeblock is half-width when the
+    // symbol-character count is odd; stacked rows are whole codeblocks wide.
+    let width = if stack_rows == 1 {
+        elements.iter().sum::<i32>() as usize + 4
+    } else {
+        num_columns_row1 * CODEBLOCK_MODULES + 4
+    };
     let mut m = BitMatrix::new(width, height, QUIET_ZONE);
 
     let mut current_block = 0usize;
@@ -467,6 +473,23 @@ fn exp_separator_step(
 fn decode_expanded_stacked(m: &BitMatrix) -> Result<Symbol> {
     let width = m.width();
     let height = m.height();
+    if height == 1 {
+        // A single row is laid out exactly like the linear symbol.
+        let el: Vec<i32> = row_runs(m, 0, width).iter().map(|r| r.1).collect();
+        if m.get(0, 0) {
+            return Err(Error::undecodable(
+                "DataBar Expanded Stacked: row must start with a light guard",
+            ));
+        }
+        let sym = super::expanded::decode(&el)?;
+        // 21 elements per codeblock (13 for a final half one), plus four guards.
+        let codeblocks = (el.len() - 4).div_ceil(21);
+        return Ok(Symbol::new(
+            Symbology::DataBarExpandedStacked,
+            sym.segments,
+            SymbolMeta::DataBar(DataBarMeta::expanded_stacked(codeblocks)),
+        ));
+    }
     let stack_rows = height.div_ceil(4);
     let cols_per_row = (width - 4) / CODEBLOCK_MODULES;
     if cols_per_row == 0 {
@@ -602,7 +625,9 @@ pub(super) fn decode(m: &BitMatrix) -> Result<Symbol> {
             Symbology::DataBarStackedOmni,
             DataBarVariant::StackedOmni,
         )
-    } else if w >= CODEBLOCK_MODULES + 4 && (w - 4) % CODEBLOCK_MODULES == 0 && (h + 3) % 4 == 0 {
+    } else if w >= CODEBLOCK_MODULES + 4
+        && (h == 1 || ((w - 4) % CODEBLOCK_MODULES == 0 && (h + 3) % 4 == 0))
+    {
         decode_expanded_stacked(m)
     } else {
         Err(Error::undecodable(format!(

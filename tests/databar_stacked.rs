@@ -255,3 +255,46 @@ fn stacked_meta_has_no_columns() {
     assert_eq!(meta.variant, DataBarVariant::Stacked);
     assert_eq!(meta.columns_per_row, None);
 }
+
+// ---- Single-row Expanded Stacked ----
+
+/// When every codeblock fits on the first row, an Expanded Stacked symbol *is* the
+/// linear Expanded symbol. With an odd number of symbol characters its last codeblock
+/// is half-width, so the row is narrower than a whole number of 49-module codeblocks:
+/// zint 2.16.0 emits the same 134 modules for `zint -b DBAR_EXPSTK --cols=3 -d
+/// "[01]00012345678905" --dump` as for `-b DBAR_EXP`. That matrix must decode, and
+/// our encoder must produce exactly it (no trailing blank modules).
+#[test]
+fn single_row_expanded_stacked_is_the_linear_symbol() {
+    let zint_row = "42 21 AF F0 B3 0B D7 9B EB C0 E2 C3 71 ED 78 FC 28";
+    let bytes: Vec<u8> = zint_row
+        .split_whitespace()
+        .map(|b| u8::from_str_radix(b, 16).unwrap())
+        .collect();
+    let mut m = anyd::output::BitMatrix::new(134, 1, 1);
+    for x in 0..134 {
+        m.set(x, 0, (bytes[x / 8] >> (7 - x % 8)) & 1 == 1);
+    }
+    let zint = Encoding::Matrix(m);
+
+    let enc = DataBarEncoder::new();
+    let dec = DataBarDecoder::new();
+    let decoded = dec.decode(&zint).unwrap();
+    assert_eq!(decoded.symbology, Symbology::DataBarExpandedStacked);
+    assert_eq!(decoded.payload_bytes(), b"0100012345678905");
+    assert_eq!(enc.encode(&decoded).unwrap(), zint);
+
+    // Asking for more columns than the symbol has codeblocks gives the same symbol.
+    let built = enc.build_expanded_stacked(b"0100012345678905", 3).unwrap();
+    assert_eq!(built, decoded);
+    assert_eq!(enc.encode(&built).unwrap(), zint);
+
+    // ... and it is module-for-module the linear Expanded symbol.
+    let linear = enc
+        .encode(&enc.build_expanded(b"0100012345678905").unwrap())
+        .unwrap();
+    let Encoding::Linear(p) = linear else {
+        panic!("expected a linear pattern");
+    };
+    assert_eq!(matrix_rows(&zint)[0].len(), p.modules.len());
+}

@@ -264,3 +264,34 @@ impl Fnc4 {
         if extended { byte | 0x80 } else { byte }
     }
 }
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Rows that passed the structural checks can still hold any symbol values; the
+    /// payload reconstruction must decode or fail cleanly, never panic.
+    #[test]
+    fn arbitrary_row_symbols_never_panic() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..3000 {
+            let rows = 2 + next(6) as usize;
+            let columns = 9 + next(12) as usize;
+            let row_syms: Vec<Vec<u8>> = (0..rows)
+                .map(|_| {
+                    let mut vals: Vec<u8> = (0..columns - 1).map(|_| next(107) as u8).collect();
+                    vals[0] = START_A;
+                    vals[1] = [98, 99, 100][next(3) as usize];
+                    vals
+                })
+                .collect();
+            let _ = reconstruct_payload(&row_syms, rows, columns);
+        }
+    }
+}

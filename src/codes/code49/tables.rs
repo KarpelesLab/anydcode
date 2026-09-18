@@ -829,3 +829,31 @@ const SHIFT2: u8 = b'&';
 
 /// Pad / numeric-shift codeword value.
 const PAD: u8 = 48;
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Grids with valid check characters but arbitrary codewords and starting modes
+    /// reach the payload reconstruction; it must decode or fail cleanly, never panic.
+    #[test]
+    fn arbitrary_codewords_never_panic() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..5000 {
+            let len = next(50) as usize;
+            let codewords: Vec<u8> = (0..len)
+                .map(|_| if next(5) == 0 { PAD } else { next(49) as u8 })
+                .collect();
+            let m = next(7) as u8;
+            if let Ok((rows, grid)) = compute_grid(&codewords, m, None) {
+                let _ = reconstruct_segments(&Code49Meta { rows, grid });
+            }
+        }
+    }
+}

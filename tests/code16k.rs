@@ -105,3 +105,35 @@ fn rejects_non_code16k_symbol() {
     let bogus = Symbol::new(Symbology::Code128, Vec::new(), SymbolMeta::Generic);
     assert!(enc.encode(&bogus).is_err());
 }
+
+/// Decode a zint `--dump` (one hex row per symbol row) as a Code 16K matrix.
+fn decode_zint_dump(rows: &[&str]) -> Symbol {
+    let mut m = anyd::output::BitMatrix::new(70, rows.len(), 10);
+    for (y, hex) in rows.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, 70).iter().enumerate() {
+            m.set(x, y, b);
+        }
+    }
+    Code16kDecoder::new().decode(&Encoding::Matrix(m)).unwrap()
+}
+
+/// Modes 5 and 6 start in Code Set C with an implied Shift B on the first one / two
+/// data characters (EN 12323 Table 2). Reference symbols from zint 2.16.0
+/// (`zint -b CODE16K -d A1234 --dump` and `-d AB1234`), which selects these modes for
+/// one or two leading non-digits followed by digit pairs.
+#[test]
+fn zint_implied_shift_b_modes() {
+    let decoded = decode_zint_dump(&["E5 76 6B 9D 31 BA 72 F6 34", "CD 2F 65 EC BD A1 13 5E 64"]);
+    let SymbolMeta::Code16k(meta) = &decoded.meta else {
+        panic!();
+    };
+    assert_eq!(meta.values[..4], [5, 33, 12, 34]);
+    assert_eq!(decoded.text().as_deref(), Some("A1234"));
+
+    let decoded = decode_zint_dump(&["E5 66 EB 9D D3 A6 37 4E 34", "CD 2F 65 EC BD BA 16 16 64"]);
+    let SymbolMeta::Code16k(meta) = &decoded.meta else {
+        panic!();
+    };
+    assert_eq!(meta.values[..5], [6, 33, 34, 12, 34]);
+    assert_eq!(decoded.text().as_deref(), Some("AB1234"));
+}

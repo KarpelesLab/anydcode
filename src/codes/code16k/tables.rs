@@ -103,10 +103,10 @@ pub(crate) const ROW_WIDTH: usize = 70;
 /// character, data and padding, without the check characters). Shared by the decoder and
 /// the encoder's `build` path so both produce identical payload segments.
 ///
-/// Mode values `0..=4` (start A/B/C, optionally GS1) are handled; the size-optimizing
-/// shift modes `5`/`6` are decoded best-effort as a Set B start. Because re-encoding
-/// renders from the stored symbol values rather than these segments, segment fidelity
-/// never affects the round-trip identity.
+/// Mode values `0..=4` start in set A/B/C (optionally GS1); modes `5`/`6` start in
+/// set C with an implied Shift B on the first one / two data characters. Because
+/// re-encoding renders from the stored symbol values rather than these segments,
+/// segment fidelity never affects the round-trip identity.
 pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     if values.is_empty() {
         return Ok(Vec::new());
@@ -114,8 +114,14 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     let m = values[0] % 7;
     let mut set = match m {
         0 => Set::A,
-        2 | 4 => Set::C,
+        2 | 4..=6 => Set::C,
         _ => Set::B,
+    };
+    // Leading data characters read in set B before the implied set C takes effect.
+    let mut implied_b = match m {
+        5 => 1,
+        6 => 2,
+        _ => 0,
     };
     let mut bytes = Vec::new();
     let mut shift: Option<Set> = None;
@@ -124,7 +130,12 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
         if v == PAD {
             continue;
         }
-        let active = shift.take().unwrap_or(set);
+        let active = if implied_b > 0 {
+            implied_b -= 1;
+            Set::B
+        } else {
+            shift.take().unwrap_or(set)
+        };
         match active {
             Set::C => match v {
                 0..=99 => {

@@ -146,7 +146,7 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
             eprintln!("wrote {} bytes to {}", bytes.len(), out.unwrap());
         }
         "svg" => {
-            let svg = render_svg(&encoding, scale.max(1));
+            let svg = render_svg(&encoding, scale.max(1))?;
             write_text(out, &svg)?;
         }
         "unicode" | "text" => {
@@ -294,8 +294,37 @@ fn pdf417_ec(ec: Option<&str>) -> Result<anyd::codes::pdf417::EcLevel, String> {
 // renderers
 // ---------------------------------------------------------------------------
 
+/// Bar height, in modules, of a rendered linear symbol (as `anyd::render` draws it).
+const LINEAR_HEIGHT_MODULES: usize = 24;
+
+/// Upper bound on the pixels of a rendered PNG (a 16384 x 16384 canvas): far beyond
+/// any printable symbol, yet small enough that a mistyped `--scale` reports an error
+/// instead of exhausting memory.
+const MAX_PNG_PIXELS: usize = 1 << 28;
+
+/// Output size in pixels (quiet zone included) at `scale` pixels per module, or an
+/// error when the product overflows.
+fn scaled_size(encoding: &Encoding, scale: usize) -> Result<(usize, usize), String> {
+    let (w_mod, h_mod, qz) = match encoding {
+        Encoding::Matrix(m) => (m.width(), m.height(), m.quiet_zone),
+        Encoding::Linear(p) => (p.modules.len(), LINEAR_HEIGHT_MODULES, p.quiet_zone),
+    };
+    let side = |modules: usize| (modules + 2 * qz).checked_mul(scale);
+    match (side(w_mod), side(h_mod)) {
+        (Some(w), Some(h)) => Ok((w, h)),
+        _ => Err(format!("--scale {scale} is too large")),
+    }
+}
+
 fn render_png(encoding: &Encoding, scale: usize) -> Result<Vec<u8>, String> {
-    let img = render(encoding, scale.max(1));
+    let scale = scale.max(1);
+    let (w, h) = scaled_size(encoding, scale)?;
+    if w.checked_mul(h).is_none_or(|n| n > MAX_PNG_PIXELS) || w.max(h) > u32::MAX as usize {
+        return Err(format!(
+            "--scale {scale} gives a {w}x{h} image (limit: {MAX_PNG_PIXELS} pixels)"
+        ));
+    }
+    let img = render(encoding, scale);
     let png = oxideav_png::PngImage {
         width: img.width() as u32,
         height: img.height() as u32,
@@ -357,14 +386,14 @@ fn render_unicode(encoding: &Encoding, invert: bool) -> String {
     out
 }
 
-fn render_svg(encoding: &Encoding, scale: usize) -> String {
+fn render_svg(encoding: &Encoding, scale: usize) -> Result<String, String> {
     let mut rects = String::new();
-    let (w_mod, h_mod, qz) = match encoding {
-        Encoding::Matrix(m) => (m.width(), m.height(), m.quiet_zone),
-        Encoding::Linear(p) => (p.modules.len(), 24, p.quiet_zone),
+    let (h_mod, qz) = match encoding {
+        Encoding::Matrix(m) => (m.height(), m.quiet_zone),
+        Encoding::Linear(p) => (LINEAR_HEIGHT_MODULES, p.quiet_zone),
     };
-    let width = (w_mod + 2 * qz) * scale;
-    let height = (h_mod + 2 * qz) * scale;
+    // Every rect coordinate below is bounded by these, so they cannot overflow either.
+    let (width, height) = scaled_size(encoding, scale)?;
     let mut push_rect = |x: usize, y: usize, w: usize, h: usize| {
         rects.push_str(&format!(
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/>",
@@ -407,13 +436,13 @@ fn render_svg(encoding: &Encoding, scale: usize) -> String {
             }
         }
     }
-    format!(
+    Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
          viewBox=\"0 0 {width} {height}\" shape-rendering=\"crispEdges\">\
          <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\
          <g fill=\"#000000\">{rects}</g></svg>\n"
-    )
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +570,23 @@ mod tests {
         .unwrap();
         assert_eq!(opts.positional, ["code128", "--5"]);
         assert_eq!(opts.options.get("scale").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn absurd_scale_is_an_error_not_a_panic() {
+        let enc = build_encoding("qr", "HELLO", None).unwrap();
+        for scale in [usize::MAX, usize::MAX / 28, 1 << 40, 200_000] {
+            assert!(render_png(&enc, scale).is_err(), "png scale {scale}");
+        }
+        assert!(render_svg(&enc, usize::MAX).is_err());
+        assert!(render_svg(&enc, usize::MAX / 28).is_err());
+        let bars = build_encoding("code128", "HELLO", None).unwrap();
+        assert!(render_png(&bars, usize::MAX / 2).is_err());
+        assert!(render_svg(&bars, usize::MAX / 2).is_err());
+        // Sane scales still render (0 is clamped to 1).
+        assert!(render_png(&enc, 0).is_ok());
+        assert!(render_png(&bars, 3).is_ok());
+        assert!(render_svg(&enc, 8).unwrap().contains("<svg"));
     }
 
     #[test]

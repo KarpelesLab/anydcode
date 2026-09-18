@@ -698,21 +698,21 @@ pub(crate) fn compute_grid(
 /// Reconstruct the payload [`Segment`]s from a decoded [`Code49Meta`]. Shared by the
 /// decoder and the encoder's `build` path so both produce identical segments.
 ///
-/// The Numeric Encodation mode (leading codeword `48`) is not reconstructed; symbols
-/// produced by this crate's encoder never use it. Because re-encoding renders from the
-/// stored grid, segment fidelity never affects the round-trip identity.
+/// Numeric Encodation (toggled by codeword `48`, or selected by starting mode 2) is
+/// decoded although this crate's encoder never produces it. Because re-encoding renders
+/// from the stored grid, segment fidelity never affects the round-trip identity.
 pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
     let mut codewords = extract_codewords(&meta.grid, meta.rows);
     let mode_char = meta.grid[(meta.rows - 1) * 8 + 6];
     let m = mode_char % 7;
+    let mut numeric = false;
     match m {
         0 => {}
+        2 => numeric = true,          // starts in Numeric Encodation
         4 => codewords.insert(0, 43), // leading Shift 1
         5 => codewords.insert(0, 44), // leading Shift 2
         _ => {
-            return Err(Error::undecodable(
-                "Code 49 numeric-mode payload reconstruction is not implemented",
-            ));
+            return Err(Error::undecodable("Code 49 starting mode is not supported"));
         }
     }
 
@@ -722,23 +722,39 @@ pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
         rev.insert((entry[0], entry[1]), b as u8);
     }
 
-    // Codewords -> INSET characters.
-    let mut chars = Vec::with_capacity(codewords.len());
-    for &c in &codewords {
-        let ch = *INSET
+    // Codeword -> INSET character.
+    let inset = |c: u8| {
+        INSET
             .get(c as usize)
-            .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))?;
-        chars.push(ch);
-    }
+            .copied()
+            .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))
+    };
 
     let mut bytes = Vec::new();
     let mut i = 0;
-    while i < chars.len() {
-        let c1 = chars[i];
+    while i < codewords.len() {
+        if codewords[i] == PAD {
+            // Numeric shift: toggles Numeric Encodation.
+            numeric = !numeric;
+            i += 1;
+            continue;
+        }
+        if numeric {
+            let end = codewords[i..]
+                .iter()
+                .position(|&c| c == PAD)
+                .map_or(codewords.len(), |p| i + p);
+            numeric_decode(&codewords[i..end], &mut bytes)?;
+            i = end;
+            continue;
+        }
+        let c1 = inset(codewords[i])?;
         if c1 == SHIFT1 || c1 == SHIFT2 {
-            let c2 = *chars
-                .get(i + 1)
-                .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?;
+            let c2 = inset(
+                *codewords
+                    .get(i + 1)
+                    .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?,
+            )?;
             let b = *rev
                 .get(&(c1, c2))
                 .ok_or_else(|| Error::undecodable("Code 49 unknown shifted character"))?;
@@ -758,6 +774,32 @@ pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
     } else {
         vec![Segment::byte(bytes)]
     })
+}
+
+/// Decode one Numeric Encodation run of base-48 codewords: each group of three is a
+/// five-digit number, or a four-digit one offset by 100000; a final pair is a
+/// three-digit number and a final single codeword one digit.
+fn numeric_decode(run: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    let bad = || Error::undecodable("Code 49 invalid numeric encodation");
+    let mut push = |value: u32, digits: u32| {
+        for k in (0..digits).rev() {
+            out.push(b'0' + (value / 10u32.pow(k) % 10) as u8);
+        }
+    };
+    for group in run.chunks(3) {
+        if group.iter().any(|&c| c > 47) {
+            return Err(bad());
+        }
+        let value = group.iter().fold(0u32, |acc, &c| acc * 48 + c as u32);
+        match group.len() {
+            3 if value < 100_000 => push(value, 5),
+            3 if value < 110_000 => push(value - 100_000, 4),
+            2 if value < 1_000 => push(value, 3),
+            1 if value < 10 => push(value, 1),
+            _ => return Err(bad()),
+        }
+    }
+    Ok(())
 }
 
 /// Recover the base-49 data codewords from the grid (dropping check/mode cells and the

@@ -30,8 +30,8 @@
 //! The fresh-input planner ([`Code49Encoder::build`]) encodes each byte as one or two
 //! base-49 codewords and does **not** use the Numeric Encodation optimization (5-digit
 //! blocks); digits therefore encode one codeword each. Symbols remain valid and fully
-//! lossless. Reconstruction of the payload for numeric-mode symbols is correspondingly
-//! not implemented.
+//! lossless. The decoder does read Numeric Encodation, so symbols from encoders that
+//! use it (e.g. zint, for every run of five or more digits) decode.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

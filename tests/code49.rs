@@ -121,3 +121,49 @@ fn rejects_non_code49_symbol() {
     let bogus = Symbol::new(Symbology::Code128, Vec::new(), SymbolMeta::Generic);
     assert!(enc.encode(&bogus).is_err());
 }
+
+/// Decode a zint `--dump` as a Code 49 matrix and check payload + re-encode identity.
+fn assert_zint_decodes(dump: &[&str], payload: &[u8]) {
+    let mut m = anyd::output::BitMatrix::new(70, dump.len(), 10);
+    for (y, hex) in dump.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, 70).iter().enumerate() {
+            m.set(x, y, b);
+        }
+    }
+    let encoding = Encoding::Matrix(m);
+    let decoded = Code49Decoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.payload_bytes(), payload);
+    assert_eq!(Code49Encoder::new().encode(&decoded).unwrap(), encoding);
+}
+
+/// Numeric Encodation (toggled by codeword 48, or selected by starting mode 2): three
+/// base-48 codewords carry five digits (or four, offset by 100000), two carry three
+/// digits and one carries a single digit. Reference symbols from zint 2.16.0
+/// (`zint -b CODE49 -d ... --dump`), which uses it for every run of five or more digits.
+#[test]
+fn zint_numeric_encodation_decodes() {
+    // Starting mode 2; 5 + 5 + 1 digits.
+    assert_zint_decodes(
+        &["B0 DE A1 D3 A8 2F A3 B4 3C", "B3 CB B6 44 21 B3 A1 33 3C"],
+        b"12345678901",
+    );
+    // 5 + 4 + 3 digits.
+    assert_zint_decodes(
+        &["B0 DE BD 67 2B F7 A1 68 3C", "B2 67 2B 3C 31 6E 30 98 BC"],
+        b"123456789012",
+    );
+    // Numeric shift in and out between letters; 4 + 3 digits.
+    assert_zint_decodes(
+        &["B8 C9 28 36 38 88 AB CE 3C", "A6 C4 36 5F 27 CB BA EE 3C"],
+        b"A1234567B",
+    );
+    // A numeric run, back to alphanumeric, then a short digit run left unshifted.
+    assert_zint_decodes(
+        &[
+            "AF D0 A3 1B BD 23 22 5E 3C",
+            "BA 38 BB D2 33 CB B6 47 BC",
+            "B3 CB B2 D0 3B 16 28 33 3C",
+        ],
+        b"X12345Y678",
+    );
+}

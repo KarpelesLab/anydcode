@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/KarpelesLab/anydcode/compare/v0.1.4...v0.2.0) - 2026-09-18
+
+### Other
+
+- read the fixed patterns before paying for a whole grid
+- imgproc, image: primitives survive absurd sizes, radii and non-finite geometry
+- sampler believes a rune only if the whole 11x11 grid is that rune
+- sampler checks the solid edge columns before sampling a grid
+- bounded fiducial flood; aztec, microqr, rmqr: stop flooding the page
+- imgproc, aztec: bound finder/bullseye hit clustering on textures
+- analyse the symbol under a mask of its own quad
+- bars at 45 degrees are not finder patterns
+- noise- and shift-tolerant hint matching; docs
+- live path: regression tests; UPC-E vote floor; Aztec blank-region reads
+- pipeline, detect: read stacked codes from linear regions; grow matrix boxes
+- demo, wasm, scan1d: reliable live decode loop; axis refinement
+- qr, appclip: stop paying for false hypotheses on code-free frames
+- try the largest few dark components as the symbol
+- rotation-normalised box fill; liveeval diagnostics
+- orientation-aware locator with local binarization
+- expand macro codewords on decode; canonical mask for no-op forcing
+- corner-forced masks and Reed-Solomon error correction
+- fix decoder overflow panic and encoder silent truncation
+- reject out-of-range metadata instead of panicking
+- make numeral and byte modes conform to AIMD014
+- fix 144x144 Reed-Solomon block interleave
+- reject unsupported layer counts; add fuzz, capacity and RS tests
+- decode latched Punct mode and FLG(n) escapes
+- fix orientation marks to the ISO/IEC 24778 pattern
+- exhaustive Text sub-mode transition round-trip test
+- no-panic fuzz for Code 49 and Codablock F payload reconstruction
+- decode Numeric Encodation
+- a single-row Expanded Stacked symbol is the linear symbol
+- code16k, codablockf: honour FNC4 extended ASCII when decoding
+- use the Code 16K pattern 211133 for symbol value 106
+- implement Expanded encodation methods 3-14
+- reject Omnidirectional/Limited values beyond the GTIN range
+- enforce the 928-codeword symbol limit when choosing a geometry
+- deterministic no-panic fuzz for the stacked and DataBar decoders
+- decode the 913 byte shift inside Text compaction
+- reject a truncated Expanded method-1 header instead of panicking
+- decode modes 5/6 as set C with implied Shift B
+- scan1d, pipeline: scan along any axis; band-averaged profiles
+- treat M1's EC codewords as detection-only
+- reject undefined mode indicators instead of truncating
+- qr, rmqr: reject ECI assignment numbers above 999999
+- cross-check EC-block, alignment and remainder tables in a test
+- make mask penalty rule 4 symmetric about 50% dark
+- report content errors instead of retrying every format
+- support ECI; report FNC1 symbols as unsupported, not empty
+- deterministic no-panic fuzzing for QR, Micro QR, rMQR and Han Xin
+- qr, microqr, rmqr: reject Kanji trail bytes that alias another character
+- microqr, rmqr: keep empty segments; reject invalid numeric groups
+- reject numeric groups that are not valid decimal numbers
+- reject out-of-range numeric groups instead of panicking
+- pad M1/M3 with 0xEC/0x11 codewords per ISO/IEC 18004
+- scan1d, pipeline: segment scanlines into spans; accept 1D reads by consensus
+- deterministic no-panic / re-encodable sweep over linear and postal decoders
+- validate the termination bar
+- apply FNC4 (extended ASCII) when reconstructing the payload
+- decode rows cropped to their last bar
+- itf, codabar, twoof5: bound wide elements and require narrow 2-of-5 spaces
+- code39, code11: decode symbols printed at up to a 3:1 wide:narrow ratio
+- use the standard two-module gap for one-track symbols
+- reject POSTNET/PLANET/RM4SCC layouts with no data character
+- reject an unparseable customer information field
+- only accept canonical intermediate fields
+- reject out-of-range post code values instead of panicking
+- reject out-of-range codewords instead of panicking
+- reject non-BCD bit groups and payload-less rows on decode
+- check the all-codes decode-only and scan-only slices too
+- reject surplus positional arguments
+- scale resamples the edge instead of whitening the border
+- decode_payload requires the color stream
+- refuse PNGs that declare gigantic dimensions
+- do not panic when stdout is closed early
+- align CLI list text, README 1D note and doc comments with the code
+- MatrixBuf::new reports overflowing dimensions as a capacity error
+- composite PNG alpha over white before scanning
+- reject absurd --scale instead of panicking or exhausting memory
+- strict option parsing (flags, --, unknown options)
+- encode hosts of the form appclip.<tld>
+- keep leading zeros of numeric URL components
+- reject non-ASCII near the scheme prefix instead of panicking
+- liveeval (end-to-end live pipeline evaluation) and scantime
+- gate decoding on ring structure and the template byte
+- require quiet zones in the width-ratio reader; search every offset
+
 ### Fixed
 
 - **Live detection.** On camera-like scenes the locate → crop → decode loop read about

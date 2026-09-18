@@ -335,3 +335,141 @@ fn decodes_third_party_eci_escape() {
     );
     assert_eq!(decoded.payload_bytes(), "héllo wörld".as_bytes());
 }
+
+#[test]
+fn unsupported_layer_counts_are_errors_not_panics() {
+    // Hand-built metadata outside the supported sizes (compact 1-4, full 1-22 layers)
+    // must be rejected cleanly, whatever the payload length.
+    let enc = AztecEncoder::new();
+    for (compact, layers) in [
+        (true, 0u8),
+        (true, 5),
+        (true, 23),
+        (false, 0),
+        (false, 23),
+        (false, 32),
+        (false, 255),
+    ] {
+        for len in [1usize, 40, 1500] {
+            let symbol = anyd::symbol::Symbol::new(
+                anyd::symbology::Symbology::Aztec,
+                vec![Segment::byte(vec![b'A'; len])],
+                SymbolMeta::Aztec(anyd::codes::aztec::AztecMeta {
+                    compact,
+                    layers,
+                    rune: false,
+                }),
+            );
+            assert!(
+                enc.encode(&symbol).is_err(),
+                "compact={compact} layers={layers} len={len}"
+            );
+        }
+    }
+}
+
+/// Deterministic xorshift64* generator for the no-panic fuzz loops.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+#[test]
+fn decoder_never_panics_on_garbage() {
+    let mut rng = Rng(0x00A2_7EC0_DE5E_ED01);
+    let dec = AztecDecoder::new();
+    // Every supported size (compact, full, rune) plus a few invalid ones.
+    let mut sizes: Vec<usize> = vec![0, 1, 10, 11, 12, 14, 16, 152];
+    sizes.extend((1..=4).map(|l| 11 + 4 * l));
+    sizes.extend((1..=32).map(|l| {
+        let base = 14 + 4 * l;
+        base + 1 + 2 * ((base / 2 - 1) / 15)
+    }));
+    for &size in &sizes {
+        for density in [0u64, 1, 2, 3, 4] {
+            let mut m = anyd::output::BitMatrix::new(size, size, 0);
+            for y in 0..size {
+                for x in 0..size {
+                    m.set(x, y, rng.next() % 4 < density);
+                }
+            }
+            let _ = dec.decode(&Encoding::Matrix(m));
+        }
+    }
+    // Non-square grids are rejected.
+    let m = anyd::output::BitMatrix::new(15, 19, 0);
+    assert!(dec.decode(&Encoding::Matrix(m)).is_err());
+}
+
+#[test]
+fn corrupted_symbols_never_panic_or_misdecode_lightly_damaged() {
+    let mut rng = Rng(0x5EED_0000_0000_A27E);
+    let enc = AztecEncoder::new();
+    let dec = AztecDecoder::new();
+    for len in [1usize, 7, 20, 45, 90, 200, 600] {
+        let payload: Vec<u8> = (0..len).map(|_| rng.below(256) as u8).collect();
+        let symbol = enc.build(vec![Segment::byte(payload.clone())]).unwrap();
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("expected a matrix");
+        };
+        let size = clean.width();
+        for flips in [1usize, 1, 1, 2, 8, 40, 400] {
+            let mut m = clean.clone();
+            for _ in 0..flips {
+                let (x, y) = (rng.below(size), rng.below(size));
+                let v = m.get(x, y);
+                m.set(x, y, !v);
+            }
+            let result = dec.decode(&Encoding::Matrix(m));
+            // One flipped module damages at most one codeword (or one mode-message
+            // word); every size the encoder picks carries at least two check words.
+            if flips == 1 {
+                assert_eq!(result.unwrap().payload_bytes(), payload, "len {len}");
+            }
+        }
+    }
+}
+
+#[test]
+fn every_length_up_to_capacity_round_trips() {
+    // Sweep payload lengths across every size boundary until the encoder reports a
+    // capacity error: each accepted length must round-trip, and once a length is
+    // refused every longer one must be too (no panic, no silent truncation).
+    let enc = AztecEncoder::new();
+    let dec = AztecDecoder::new();
+    let fills: [fn(usize) -> u8; 3] = [
+        |_| b'A',
+        |i| 0x80 | (i as u8 & 0x7f),
+        |i| b"Az 09,.!\x01\xff"[i % 10],
+    ];
+    for fill in fills {
+        let mut refused = false;
+        let mut len = 1usize;
+        while len < 2600 {
+            let payload: Vec<u8> = (0..len).map(fill).collect();
+            match enc.build(vec![Segment::byte(payload.clone())]) {
+                Ok(symbol) => {
+                    assert!(!refused, "length {len} accepted after a shorter refusal");
+                    let encoding = enc.encode(&symbol).unwrap();
+                    let decoded = dec.decode(&encoding).unwrap();
+                    assert_eq!(decoded.payload_bytes(), payload, "length {len}");
+                    assert_eq!(decoded.meta, symbol.meta, "length {len}");
+                }
+                Err(_) => refused = true,
+            }
+            // Dense near the binary-shift length boundaries, sparser beyond.
+            len += if len < 80 { 1 } else { 37 };
+        }
+        assert!(refused, "capacity limit never reached");
+    }
+}

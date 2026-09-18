@@ -200,6 +200,12 @@ fn words_to_bits(words: &[u16], w: usize) -> Vec<bool> {
 
 /// Render the module matrix for `data` at a fixed `(compact, layers)` size.
 pub fn render(data: &[u8], compact: bool, layers: usize) -> Result<BitMatrix> {
+    let max_layers = if compact { 4 } else { 22 };
+    if !(1..=max_layers).contains(&layers) {
+        return Err(Error::invalid_parameter(
+            "Aztec layer count out of range (compact 1-4, full 1-22)",
+        ));
+    }
     let w = word_size(layers);
     let hl = highlevel::encode(data);
     let stuffed = stuff_bits(&hl, w);

@@ -390,6 +390,48 @@ mod tests {
         assert_eq!(block, clean);
     }
 
+    /// Every field Aztec uses must correct any pattern of up to `ec / 2` word errors.
+    #[test]
+    fn rs_corrects_up_to_capacity_in_every_field() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for (w, n, ec) in [
+            (4, 7, 5),
+            (4, 10, 6),
+            (6, 17, 6),
+            (8, 76, 20),
+            (10, 300, 41),
+        ] {
+            let gf = Gf::for_word_size(w).unwrap();
+            for _ in 0..40 {
+                let data: Vec<u16> = (0..n - ec).map(|_| next(gf.size()) as u16).collect();
+                let mut clean = data.clone();
+                clean.extend(rs_encode(&gf, &data, ec));
+                for errors in 0..=ec / 2 {
+                    let mut block = clean.clone();
+                    let mut hit = vec![false; n];
+                    for _ in 0..errors {
+                        let pos = loop {
+                            let p = next(n);
+                            if !hit[p] {
+                                break p;
+                            }
+                        };
+                        hit[pos] = true;
+                        block[pos] ^= 1 + next(gf.size() - 1) as u16;
+                    }
+                    assert!(rs_decode(&gf, &mut block, ec), "w={w} errors={errors}");
+                    assert_eq!(block, clean, "w={w} errors={errors}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn rs_detects_uncorrectable() {
         let gf = Gf::for_word_size(8).unwrap();

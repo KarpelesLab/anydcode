@@ -179,6 +179,10 @@ pub(super) fn decode_omni(tw: &[i32]) -> Result<Symbol> {
     let left_pair = dc[0] as u64 * 1597 + dc[1] as u64;
     let right_pair = dc[2] as u64 * 1597 + dc[3] as u64;
     let val = left_pair * 4_537_077 + right_pair;
+    // The four characters span more than the 13-digit GTIN body.
+    if val >= 10_000_000_000_000 {
+        return Err(Error::undecodable("DataBar value exceeds the GTIN range"));
+    }
 
     Ok(gtin_symbol(
         Symbology::DataBarOmni,
@@ -231,6 +235,12 @@ fn decode_limited(tw: &[i32]) -> Result<Symbol> {
     }
 
     let val = pair0 as u64 * 2_013_571 + pair1 as u64;
+    // Limited only carries GTINs with indicator digit 0 or 1.
+    if val >= 2_000_000_000_000 {
+        return Err(Error::undecodable(
+            "DataBar Limited value exceeds the GTIN range",
+        ));
+    }
 
     Ok(gtin_symbol(
         Symbology::DataBarLimited,
@@ -247,4 +257,26 @@ fn gtin_symbol(symbology: Symbology, variant: DataBarVariant, val: u64) -> Symbo
         vec![Segment::numeric(gtin.to_vec())],
         SymbolMeta::DataBar(DataBarMeta::new(variant)),
     )
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::super::encode::{ltd_total_widths, omn_total_widths};
+    use super::*;
+
+    /// The data characters can express values past the GTIN range (Omnidirectional up
+    /// to 4 537 077² − 1, Limited up to about 4.06 × 10¹²). Such a symbol is not a
+    /// GTIN: it must be rejected, not wrapped modulo 10¹³ (Omnidirectional) or
+    /// returned with an indicator digit Limited cannot re-encode.
+    #[test]
+    fn rejects_values_beyond_the_gtin_range() {
+        assert!(decode_omni(&omn_total_widths(9_999_999_999_999)).is_ok());
+        assert!(decode_omni(&omn_total_widths(10_000_000_000_000)).is_err());
+        assert!(decode_omni(&omn_total_widths(10_000_000_000_005)).is_err());
+        assert!(decode_omni(&omn_total_widths(4_537_077 * 4_537_077 - 1)).is_err());
+
+        assert!(decode_limited(&ltd_total_widths(1_999_999_999_999)).is_ok());
+        assert!(decode_limited(&ltd_total_widths(2_000_000_000_000)).is_err());
+        assert!(decode_limited(&ltd_total_widths(4_000_000_000_005)).is_err());
+    }
 }

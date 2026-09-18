@@ -72,3 +72,24 @@ fn encode_into_matches_encode() {
     );
     assert!(err.is_err());
 }
+
+/// A Telepen row is bar/space pairs, so it formally ends in a narrow space — which a
+/// scanner, or any row cropped to its bars like every other symbology's, never
+/// delivers: it is indistinguishable from the quiet zone. Such a row must decode.
+#[test]
+fn decodes_without_the_trailing_space() {
+    use anyd::output::Encoding;
+    let enc = TelepenEncoder::new();
+    for check in [false, true] {
+        let symbol = enc.build(b"Telepen 123!", check).unwrap();
+        let Encoding::Linear(mut pattern) = enc.encode(&symbol).unwrap() else {
+            panic!("Telepen encodes to a linear pattern");
+        };
+        assert_eq!(pattern.modules.pop(), Some(false));
+        assert_eq!(pattern.modules.last(), Some(&true));
+        let decoded = TelepenDecoder::with_check(check)
+            .decode(&Encoding::Linear(pattern))
+            .unwrap();
+        assert_eq!(decoded.segments, symbol.segments);
+    }
+}

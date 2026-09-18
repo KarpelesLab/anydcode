@@ -329,7 +329,12 @@ impl Decode for TelepenDecoder {
                 return Err(Error::invalid_parameter("Telepen expects a linear pattern"));
             }
         };
-        let widths = rle(&pattern.modules)?;
+        let mut widths = rle(&pattern.modules)?;
+        // The stop character closes on a narrow space that merges into the quiet
+        // zone; a row cropped to its last bar simply lacks it.
+        if !widths.len().is_multiple_of(2) {
+            widths.push(1);
+        }
         let bits = widths_to_bits(&widths)?;
 
         // Strip the 8-bit start and stop guards.

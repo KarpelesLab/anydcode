@@ -352,3 +352,40 @@ fn encode_text_into_matches_build_text() {
         assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
     }
 }
+
+/// Decode a raw symbol-value sequence (Start + data) rendered by `encode_into`.
+fn decode_values(symbols: &[u8]) -> anyd::Symbol {
+    let mut pattern = anyd::output::LinearPattern::new();
+    Code128Encoder::new()
+        .encode_into(symbols, &mut pattern)
+        .unwrap();
+    let encoding = Encoding::Linear(pattern);
+    let decoded = Code128Decoder::new().decode(&encoding).unwrap();
+    // Whatever the payload interpretation, the symbol values re-render identically.
+    assert_eq!(Code128Encoder::new().encode(&decoded).unwrap(), encoding);
+    decoded
+}
+
+/// ISO/IEC 15417 extended ASCII: a single FNC4 adds 128 to the next data character,
+/// two in a row latch that until the next pair, and a single FNC4 inside a latched
+/// run drops one character back to plain ASCII. Third-party encoders (zint, ...) use
+/// this for Latin-1 text; the payload used to come back without the offset.
+#[test]
+fn fnc4_extended_ascii_payload() {
+    const START_A: u8 = 103;
+    const START_B: u8 = 104;
+    const FNC4_A: u8 = 101;
+    const FNC4_B: u8 = 100;
+    // Code B: `i` is value 73, `A` 33, `B` 34.
+    let shifted = decode_values(&[START_B, 33, FNC4_B, 73, 34]);
+    assert_eq!(shifted.payload_bytes(), [b'A', 0xE9, b'B']);
+
+    let latched = decode_values(&[
+        START_B, FNC4_B, FNC4_B, 73, 73, FNC4_B, 33, 73, FNC4_B, FNC4_B, 34,
+    ]);
+    assert_eq!(latched.payload_bytes(), [0xE9, 0xE9, b'A', 0xE9, b'B']);
+
+    // Code A: FNC4 is value 101; NUL is value 64, so FNC4 NUL is 0x80.
+    let code_a = decode_values(&[START_A, FNC4_A, 64, 33]);
+    assert_eq!(code_a.payload_bytes(), [0x80, b'A']);
+}

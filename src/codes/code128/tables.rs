@@ -228,6 +228,10 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)
     let mut bytes = Vec::new();
     let mut shift: Option<CodeSet> = None;
     let mut first_data = true;
+    // FNC4 extended ASCII (ISO/IEC 15417): one FNC4 adds 128 to the next data
+    // character, two in a row latch that; inside a latched run one FNC4 drops a
+    // single character back to plain ASCII.
+    let mut upper = Upper::default();
 
     for &v in &values[1..] {
         let active = shift.take().unwrap_or(set);
@@ -246,21 +250,21 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)
                 _ => return Err(Error::undecodable("invalid symbol in Code C")),
             },
             CodeSet::A => match v {
-                0..=95 => bytes.push(if v < 64 { v + 32 } else { v - 64 }),
+                0..=95 => bytes.push(upper.apply(if v < 64 { v + 32 } else { v - 64 })),
                 96 | 97 => {} // FNC3 / FNC2: no payload byte
                 SHIFT => shift = Some(CodeSet::B),
                 CODE_C => set = CodeSet::C,
                 CODE_B => set = CodeSet::B,
-                101 => {} // FNC4 (Code A): extended latch, no payload byte
+                101 => upper.fnc4(), // FNC4 (Code A): no payload byte of its own
                 FNC1 => push_fnc1(&mut bytes, is_leading),
                 _ => return Err(Error::undecodable("invalid symbol in Code A")),
             },
             CodeSet::B => match v {
-                0..=95 => bytes.push(v + 32),
+                0..=95 => bytes.push(upper.apply(v + 32)),
                 96 | 97 => {} // FNC3 / FNC2
                 SHIFT => shift = Some(CodeSet::A),
                 CODE_C => set = CodeSet::C,
-                100 => {} // FNC4 (Code B)
+                100 => upper.fnc4(), // FNC4 (Code B)
                 CODE_A => set = CodeSet::A,
                 FNC1 => push_fnc1(&mut bytes, is_leading),
                 _ => return Err(Error::undecodable("invalid symbol in Code B")),
@@ -274,6 +278,36 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<(Vec<Segment>, bool)
         vec![Segment::byte(bytes)]
     };
     Ok((segments, gs1))
+}
+
+/// FNC4 extended-ASCII state while reconstructing a payload.
+#[cfg(feature = "alloc")]
+#[derive(Default)]
+struct Upper {
+    /// A double FNC4 has latched the +128 offset.
+    latched: bool,
+    /// A single FNC4 is pending: it inverts the latch for the next data character.
+    shifted: bool,
+}
+
+#[cfg(feature = "alloc")]
+impl Upper {
+    /// Account for one FNC4: the second of a pair toggles the latch.
+    fn fnc4(&mut self) {
+        if self.shifted {
+            self.latched = !self.latched;
+            self.shifted = false;
+        } else {
+            self.shifted = true;
+        }
+    }
+
+    /// The payload byte for the ASCII data character `b`, consuming a pending shift.
+    fn apply(&mut self, b: u8) -> u8 {
+        let high = self.latched != self.shifted;
+        self.shifted = false;
+        if high { b | 0x80 } else { b }
+    }
 }
 
 /// Push the payload effect of an FNC1: the leading (GS1-mode) FNC1 emits nothing; a

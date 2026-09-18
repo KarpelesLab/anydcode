@@ -2,8 +2,11 @@
 //!
 //! A horizontal run-length scan of the reduced dark mask flags any five-run stretch
 //! whose widths match the `1:1:3:1:1` finder ratio; each hit is confirmed by a vertical
-//! cross-check through its centre so a lone dark bar cannot pass. Confirmed centres are
-//! clustered so a single physical finder reported on several rows collapses to one hit.
+//! and a diagonal cross-check through its centre, at a consistent module size — a
+//! finder is concentric squares, so *every* line through its centre sees the ratio,
+//! while bars, text strokes and halftone only line up along one or two. Confirmed
+//! centres are clustered so a single physical finder reported on several rows collapses
+//! to one hit.
 //!
 //! This is a *coarse* signal: it does not order finders into a symbol or recover a
 //! homography (that is the sampler's job in [`crate::codes`]). It only tells the locator
@@ -161,10 +164,28 @@ pub(crate) fn find(grid: &DownGrid) -> Vec<FinderHit> {
             let Some((vc, vend)) = walk(h as i32, y as i32, |k| grid.dark(cx, k as usize)) else {
                 continue;
             };
-            if ratio_module(vc).is_none() {
+            let Some(vmodule) = ratio_module(vc) else {
+                continue;
+            };
+            // A finder is square: both axes must agree on its size (perspective and
+            // rotation stretch one against the other, but not by half).
+            if vmodule > 1.6 * module || module > 1.6 * vmodule {
                 continue;
             }
             let cy = center(vc, vend);
+            // Diagonal cross-check through the refined centre. The rings are squares, so
+            // along the diagonal each run is √2 longer — the ratio is what matters.
+            let (dx0, dy0) = (cx as i32, (cy.round() as i32).clamp(0, h as i32 - 1));
+            // Walk index i along the top-left→bottom-right diagonal, with the centre at
+            // i = off and i = 0 on the frame's top or left edge.
+            let off = dx0.min(dy0);
+            let len = off + (w as i32 - dx0).min(h as i32 - dy0);
+            let diagonal = walk(len, off, |i| {
+                grid.dark((dx0 - off + i) as usize, (dy0 - off + i) as usize)
+            });
+            if diagonal.and_then(|(dc, _)| ratio_module(dc)).is_none() {
+                continue;
+            }
             merge(&mut centers, cx as f32, cy, module);
         }
     }

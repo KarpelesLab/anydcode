@@ -4,82 +4,158 @@
 //! symbology have none. What they *do* share is a dense field of dark/light edges that
 //! blank background and smooth scene content lack. This stage measures that.
 //!
-//! The reduced dark mask is split into a grid of square tiles. For each tile we count
-//! horizontal and vertical dark/light transitions in one pass; a tile whose transition
-//! density clears a threshold is "active". Each active tile is then *labelled* by its
-//! own edge balance before any clustering: a tile whose horizontal and vertical
-//! transition counts are strongly one-directional is a **linear** tile (and remembers
-//! whether horizontal or vertical edges dominate), while a balanced tile is a **matrix**
-//! tile. Flood fill then groups only tiles that share the *same* label into regions.
+//! The reduced image is split into a grid of square tiles, and each tile's luminance
+//! gradients are summed into a 2×2 **structure tensor**. Three things fall out of it:
 //!
-//! Per-tile labelling before clustering is what lets a 1D barcode be pulled out of a
-//! busy scene. A barcode is a compact patch of tiles that all lean the same way
-//! (vertical bars ⇒ horizontal-edge-dominant); the printed text and artwork around it
-//! are edge-dense too, but *isotropic*, so they label as matrix and never merge into the
-//! barcode's component. Labelling the whole active blob at once — the old approach —
-//! averaged the barcode's strong anisotropy away against the surrounding text and lost
-//! the code entirely.
+//! * how much of the tile is edge at all (its *edge density*) — a tile below the floor
+//!   is background and ignored;
+//! * how far the tile's edges agree on one direction (its *coherence*, 0‥1) — the bars
+//!   of a linear code all point the gradient along the reading axis, so a barcode tile
+//!   scores near 1 **at any rotation**, while a 2D matrix, text and scene texture spread
+//!   their gradients and score low;
+//! * for a coherent tile, *which* direction that is — the code's reading axis.
+//!
+//! Each active tile is labelled linear or matrix from its own coherence before any
+//! clustering, and flood fill then only joins tiles of the same label — and, for linear
+//! tiles, a compatible axis. Labelling per tile is what lets a barcode be pulled out of
+//! a busy scene: the print around it is edge-dense too, but incoherent, so it never
+//! merges into the barcode's component. A linear region reports its axis and an
+//! *oriented* box, so a rotated barcode yields a tight box and a known scan direction
+//! instead of a loose axis-aligned one.
+//!
+//! Gradients, unlike a binarized mask, do not depend on a threshold being right: a code
+//! in shadow or on a dark surface has the same edges, only weaker, and the edge test
+//! adapts to each tile's own contrast.
 
 use super::grid::DownGrid;
 use alloc::{vec, vec::Vec};
 
-/// Per-tile transition tallies over the reduced dark mask.
-struct TileStats {
-    /// Tiles across.
-    cols: usize,
-    /// Tiles down.
-    rows: usize,
-    /// Tile edge length in reduced pixels.
-    tile: usize,
-    /// Horizontal transition count per tile (row-major, `cols * rows`).
-    htrans: Vec<u32>,
-    /// Vertical transition count per tile.
-    vtrans: Vec<u32>,
-    /// Pixel count per tile (border tiles are smaller).
-    area: Vec<u32>,
+/// Least luminance range (max − min) a tile must span to be considered at all. Sensor
+/// noise alone spans ~25 levels across a tile; print of any legible contrast far more.
+const MIN_TILE_CONTRAST: i32 = 36;
+
+/// A pixel is an *edge pixel* when its gradient magnitude (per-pixel 2×2 differences) reaches
+/// this fraction of the tile's luminance range …
+const EDGE_FRACTION: f32 = 0.25;
+/// … and at least this absolute value, the noise floor.
+const MIN_EDGE_GRADIENT: i32 = 16;
+
+/// Largest angle (radians) between the axes of two neighbouring linear tiles for them
+/// to belong to the same code. Generous enough for a label wrapped around a bottle,
+/// tight enough to keep a barcode apart from differently-slanted print beside it.
+const MAX_AXIS_STEP: f32 = 20.0 * core::f32::consts::PI / 180.0;
+
+/// Per-tile gradient statistics.
+#[derive(Debug, Clone, Copy, Default)]
+struct Tile {
+    /// Structure tensor sums over the tile's edge pixels.
+    sxx: f32,
+    syy: f32,
+    sxy: f32,
+    /// Number of edge pixels.
+    edges: u32,
+    /// Pixel count (border tiles are smaller).
+    area: u32,
 }
 
-/// Per-tile classification assigned before clustering. Flood fill only joins tiles that
-/// carry the same label, keeping a directional barcode patch out of the isotropic text
-/// and artwork it sits amongst.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl Tile {
+    /// Gradient coherence in `[0, 1]`: 1 when every edge shares one direction.
+    fn coherence(&self) -> f32 {
+        let trace = self.sxx + self.syy;
+        if trace <= 0.0 {
+            return 0.0;
+        }
+        let d = self.sxx - self.syy;
+        (d * d + 4.0 * self.sxy * self.sxy).sqrt() / trace
+    }
+
+    /// Dominant gradient direction — the reading axis — in `(-π/2, π/2]`.
+    fn axis(&self) -> f32 {
+        axis_of(self.sxx, self.syy, self.sxy)
+    }
+}
+
+/// Dominant direction of a structure tensor, in `(-π/2, π/2]`.
+fn axis_of(sxx: f32, syy: f32, sxy: f32) -> f32 {
+    0.5 * (2.0 * sxy).atan2(sxx - syy)
+}
+
+/// Angle between two axes (orientations mod π), in `[0, π/2]`.
+fn axis_distance(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(core::f32::consts::PI);
+    d.min(core::f32::consts::PI - d)
+}
+
+/// Per-tile classification assigned before clustering.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Label {
     /// Below the edge-density floor: ignored.
     Inactive,
-    /// Active and horizontal-edge-dominant (upright bars).
-    LinearH,
-    /// Active and vertical-edge-dominant (bars rotated ~90°).
-    LinearV,
-    /// Active but balanced: a 2D matrix or plain scene texture.
+    /// Active and coherent: a patch of bars reading along the given axis.
+    Linear(f32),
+    /// Active but incoherent: a 2D matrix or plain scene texture.
     Matrix,
 }
 
 /// The coarse layout family a region is guessed to belong to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
-    /// Balanced two-directional edge field: a 2D matrix code.
+    /// Two-directional edge field: a 2D matrix code.
     Matrix,
-    /// Strongly one-directional edge field: a 1D / stacked linear code.
+    /// One-directional edge field: a 1D / stacked linear code.
     Linear,
+}
+
+/// A box aligned with a linear region's reading axis, in reduced-pixel coordinates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct OrientedBox {
+    /// Centre.
+    pub cx: f32,
+    pub cy: f32,
+    /// Reading axis (the direction scan lines should run), radians in `(-π/2, π/2]`.
+    pub angle: f32,
+    /// Half-extent along the reading axis.
+    pub half_read: f32,
+    /// Half-extent along the bars.
+    pub half_bars: f32,
+    /// Fraction of the box covered by the region's own tiles. A barcode fills its box
+    /// with coherent tiles; a chain of tiles along a rule or a box border, or a few
+    /// scattered strokes bridged together, spans a box it mostly leaves empty.
+    pub fill: f32,
+}
+
+impl OrientedBox {
+    /// The four corners, clockwise in the box's own frame starting from the corner at
+    /// the start of the reading axis on the upper side.
+    pub fn corners(&self) -> [(f32, f32); 4] {
+        let (s, c) = self.angle.sin_cos();
+        let (ux, uy) = (c * self.half_read, s * self.half_read);
+        let (vx, vy) = (-s * self.half_bars, c * self.half_bars);
+        [
+            (self.cx - ux - vx, self.cy - uy - vy),
+            (self.cx + ux - vx, self.cy + uy - vy),
+            (self.cx + ux + vx, self.cy + uy + vy),
+            (self.cx - ux + vx, self.cy - uy + vy),
+        ]
+    }
 }
 
 /// A clustered candidate region in reduced-pixel coordinates.
 ///
-/// The box is the *core* box — the clustered tiles only, no quiet zone. The caller
-/// grows linear boxes for downstream scanning; keeping the core here lets it measure
-/// region statistics (bar coherence, overlap) on the code itself.
+/// The boxes are the *core* — the clustered tiles only, no quiet zone. The caller grows
+/// linear boxes for downstream scanning; keeping the core here lets it measure region
+/// statistics (bar coherence, overlap) on the code itself.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Region {
-    /// Inclusive-exclusive bounding box in reduced pixels: `[x0, x1) × [y0, y1)`.
+    /// Inclusive-exclusive axis-aligned bounding box: `[x0, x1) × [y0, y1)`.
     pub x0: usize,
     pub y0: usize,
     pub x1: usize,
     pub y1: usize,
     /// Coarse family guess.
     pub family: Family,
-    /// For [`Family::Linear`]: `true` when horizontal edges dominate (upright bars, the
-    /// code reads along x), `false` for the ~90°-rotated case. Meaningless for matrix.
-    pub reads_horizontal: bool,
+    /// For [`Family::Linear`]: the box aligned with the reading axis.
+    pub oriented: Option<OrientedBox>,
 }
 
 impl Region {
@@ -89,172 +165,247 @@ impl Region {
     }
 }
 
-impl TileStats {
-    /// Count transitions per tile in a single pass over the dark mask.
-    fn build(grid: &DownGrid, tile: usize) -> TileStats {
-        let tile = tile.max(1);
-        let cols = grid.width.div_ceil(tile);
-        let rows = grid.height.div_ceil(tile);
-        let mut htrans = vec![0u32; cols * rows];
-        let mut vtrans = vec![0u32; cols * rows];
-        let mut area = vec![0u32; cols * rows];
+/// Accumulate gradient statistics per tile.
+fn tile_stats(grid: &DownGrid, tile: usize, cols: usize, rows: usize) -> Vec<Tile> {
+    let (w, h) = (grid.width, grid.height);
+    let mut tiles = vec![Tile::default(); cols * rows];
+    if w < 3 || h < 3 {
+        return tiles;
+    }
 
-        let w = grid.width;
-        for y in 0..grid.height {
-            let ty = y / tile;
-            let base = ty * cols;
-            let row = &grid.dark[y * w..(y + 1) * w];
-            let prev = (y >= 1).then(|| &grid.dark[(y - 1) * w..y * w]);
-            for (x, &d) in row.iter().enumerate() {
-                let idx = base + x / tile;
-                area[idx] += 1;
-                if x >= 1 && d != row[x - 1] {
-                    htrans[idx] += 1;
+    for ty in 0..rows {
+        let (y0, y1) = (ty * tile, ((ty + 1) * tile).min(h));
+        for tx in 0..cols {
+            let (x0, x1) = (tx * tile, ((tx + 1) * tile).min(w));
+            let t = &mut tiles[ty * cols + tx];
+            t.area = ((x1 - x0) * (y1 - y0)) as u32;
+
+            // The tile's own contrast sets what counts as an edge inside it.
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for y in y0..y1 {
+                for &v in &grid.luma[y * w + x0..y * w + x1] {
+                    lo = lo.min(v);
+                    hi = hi.max(v);
                 }
-                if let Some(prev) = prev
-                    && d != prev[x]
-                {
-                    vtrans[idx] += 1;
+            }
+            let range = i32::from(hi) - i32::from(lo);
+            if range < MIN_TILE_CONTRAST {
+                continue;
+            }
+            let floor = ((range as f32 * EDGE_FRACTION) as i32).max(MIN_EDGE_GRADIENT);
+
+            // 2×2 differences (both components measured at the same half-pixel point),
+            // not central ones. A central difference responds as sin(ω) to a pattern
+            // of spatial frequency ω, which near the pixel limit — exactly where fine
+            // bars live — flattens the larger gradient component and rotates the
+            // measured axis toward 45° (by 7° for two-pixel modules at 17°). The 2×2
+            // operator's error there is under half that, and of the opposite sign.
+            for y in y0..y1.min(h - 1) {
+                for x in x0..x1.min(w - 1) {
+                    let i = y * w + x;
+                    let (a, b) = (i32::from(grid.luma[i]), i32::from(grid.luma[i + 1]));
+                    let (c, d) = (i32::from(grid.luma[i + w]), i32::from(grid.luma[i + w + 1]));
+                    // Twice the gradient; `floor` is doubled to match below.
+                    let gx = (b - a) + (d - c);
+                    let gy = (c - a) + (d - b);
+                    let floor = 2 * floor;
+                    // Euclidean magnitude: an |gx| + |gy| test admits diagonal
+                    // gradients more readily than axis-aligned ones of equal strength,
+                    // which drags every measured axis toward 45°.
+                    if gx * gx + gy * gy < floor * floor {
+                        continue;
+                    }
+                    let (gx, gy) = (gx as f32, gy as f32);
+                    t.sxx += gx * gx;
+                    t.syy += gy * gy;
+                    t.sxy += gx * gy;
+                    t.edges += 1;
                 }
             }
         }
-        TileStats {
-            cols,
-            rows,
-            tile,
-            htrans,
-            vtrans,
-            area,
-        }
     }
+    tiles
 }
 
 /// Detect candidate regions in `grid`.
 ///
 /// * `tile` — tile edge length in reduced pixels.
-/// * `edge_density` — minimum `(h + v) transitions / pixel` for a tile to be active.
+/// * `edge_density` — minimum fraction of a tile's pixels that must be edge pixels for
+///   the tile to be active.
 /// * `min_tiles` — minimum active tiles for a region to be reported.
-/// * `aniso` — `|h - v| / (h + v)` above which a region is guessed [`Family::Linear`].
+/// * `coherence` — gradient coherence at or above which a tile is labelled linear.
 pub(crate) fn regions(
     grid: &DownGrid,
     tile: usize,
     edge_density: f32,
     min_tiles: usize,
-    aniso: f32,
+    coherence: f32,
+    debug: bool,
 ) -> Vec<Region> {
-    let stats = TileStats::build(grid, tile);
-    let cols = stats.cols;
-    let rows = stats.rows;
+    let tile = tile.max(2);
+    let cols = grid.width.div_ceil(tile);
+    let rows = grid.height.div_ceil(tile);
+    let tiles = tile_stats(grid, tile, cols, rows);
 
-    // Per-tile label decided *before* clustering, so a tile's own edge balance — not the
-    // average over a whole merged blob — chooses its family. Flood fill later joins only
-    // tiles that carry the same label.
-    let label: Vec<Label> = (0..cols * rows)
-        .map(|i| {
-            let a = stats.area[i];
-            if a == 0 {
-                return Label::Inactive;
-            }
-            let h = stats.htrans[i];
-            let v = stats.vtrans[i];
-            let total = h + v;
-            if total as f32 / (a as f32) < edge_density {
-                return Label::Inactive;
-            }
-            // Anisotropy of this single tile. Vertical bars cross many row scans and few
-            // column scans, so a barcode tile is strongly horizontal-dominant (and a
-            // 90°-rotated one vertical-dominant); text and artwork are balanced.
-            let anisotropy = (h as f32 - v as f32).abs() / total as f32;
-            if anisotropy >= aniso {
-                if h >= v {
-                    Label::LinearH
-                } else {
-                    Label::LinearV
-                }
+    // Per-tile label decided *before* clustering, so a tile's own edge field — not the
+    // average over a whole merged blob — chooses its family.
+    let label: Vec<Label> = tiles
+        .iter()
+        .map(|t| {
+            if t.area == 0 || (t.edges as f32) < edge_density * t.area as f32 {
+                Label::Inactive
+            } else if t.coherence() >= coherence {
+                Label::Linear(t.axis())
             } else {
                 Label::Matrix
             }
         })
         .collect();
 
-    // Flood fill that only merges tiles sharing the start tile's label. For *linear*
-    // labels expansion reaches Chebyshev distance 2, bridging a one-tile gap: a bar or
-    // space wider than a tile (3–4-module runs at a coarse module scale) has no
-    // transitions inside it, and the resulting inactive seam would otherwise shatter
-    // one barcode into fragments that read as implausibly narrow. Matrix tiles stay
-    // 8-connected — a 2D code is transition-dense throughout, and bridging would only
-    // glue it to nearby scene texture.
+    if debug {
+        // One character per tile: '.' inactive, a digit for a matrix tile's coherence
+        // (tenths), a letter for a linear tile's axis ('a' = -90°, 10° per letter).
+        for ty in 0..rows {
+            let line: alloc::string::String = (0..cols)
+                .map(|tx| match label[ty * cols + tx] {
+                    Label::Inactive => '.',
+                    Label::Matrix => {
+                        let c = (tiles[ty * cols + tx].coherence() * 10.0) as u32;
+                        char::from_digit(c.min(9), 10).unwrap_or('?')
+                    }
+                    Label::Linear(a) => {
+                        (b'a' + ((a.to_degrees() + 90.0) / 10.0).clamp(0.0, 17.0) as u8) as char
+                    }
+                })
+                .collect();
+            std::eprintln!("tiles {line}");
+        }
+    }
+
+    // Flood fill that only merges compatible tiles. For *linear* tiles expansion
+    // reaches Chebyshev distance 2, bridging a one-tile gap: a bar or space wider than
+    // a tile (3–4-module runs at a coarse module scale) has no edges inside it, and the
+    // resulting inactive seam would otherwise shatter one barcode into fragments that
+    // read as implausibly narrow. Matrix tiles stay 8-connected — a 2D code is
+    // edge-dense throughout, and bridging would only glue it to nearby scene texture.
     let mut visited = vec![false; cols * rows];
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut members: Vec<usize> = Vec::new();
     let mut out = Vec::new();
 
-    for sy in 0..rows {
-        for sx in 0..cols {
-            let start = sy * cols + sx;
-            let seed = label[start];
-            if seed == Label::Inactive || visited[start] {
-                continue;
-            }
-            visited[start] = true;
-            stack.push((sx, sy));
-            let reach = if seed == Label::Matrix { 1 } else { 2 };
+    for start in 0..cols * rows {
+        if label[start] == Label::Inactive || visited[start] {
+            continue;
+        }
+        let linear = matches!(label[start], Label::Linear(_));
+        let reach = if linear { 2 } else { 1 };
+        visited[start] = true;
+        stack.push(start);
+        members.clear();
 
-            let mut min_tx = sx;
-            let mut max_tx = sx;
-            let mut min_ty = sy;
-            let mut max_ty = sy;
-            let mut tiles = 0usize;
-
-            while let Some((cx, cy)) = stack.pop() {
-                tiles += 1;
-                min_tx = min_tx.min(cx);
-                max_tx = max_tx.max(cx);
-                min_ty = min_ty.min(cy);
-                max_ty = max_ty.max(cy);
-
-                let x0 = cx.saturating_sub(reach);
-                let x1 = (cx + reach).min(cols - 1);
-                let y0 = cy.saturating_sub(reach);
-                let y1 = (cy + reach).min(rows - 1);
-                for ny in y0..=y1 {
-                    for nx in x0..=x1 {
-                        let nidx = ny * cols + nx;
-                        if !visited[nidx] && label[nidx] == seed {
-                            visited[nidx] = true;
-                            stack.push((nx, ny));
+        while let Some(cur) = stack.pop() {
+            members.push(cur);
+            let (cx, cy) = (cur % cols, cur / cols);
+            for ny in cy.saturating_sub(reach)..=(cy + reach).min(rows - 1) {
+                for nx in cx.saturating_sub(reach)..=(cx + reach).min(cols - 1) {
+                    let n = ny * cols + nx;
+                    if visited[n] {
+                        continue;
+                    }
+                    let joins = match (label[cur], label[n]) {
+                        (Label::Matrix, Label::Matrix) => true,
+                        (Label::Linear(a), Label::Linear(b)) => {
+                            axis_distance(a, b) <= MAX_AXIS_STEP
                         }
+                        _ => false,
+                    };
+                    if joins {
+                        visited[n] = true;
+                        stack.push(n);
                     }
                 }
             }
-
-            if tiles < min_tiles {
-                continue;
-            }
-
-            let family = match seed {
-                Label::LinearH | Label::LinearV => Family::Linear,
-                _ => Family::Matrix,
-            };
-
-            // A 2D matrix code always extends in both axes; a one-tile-thin strip of
-            // balanced tiles is not one. These strips appear where a barcode's bars
-            // terminate (the row of bar-ends adds vertical edges that cancel the
-            // horizontal dominance) and as thin runs of text — reject them so the
-            // matrix family stays meaningful. Linear codes are legitimately thin.
-            if family == Family::Matrix && (max_tx - min_tx < 1 || max_ty - min_ty < 1) {
-                continue;
-            }
-
-            let t = stats.tile;
-            out.push(Region {
-                x0: min_tx * t,
-                y0: min_ty * t,
-                x1: ((max_tx + 1) * t).min(grid.width),
-                y1: ((max_ty + 1) * t).min(grid.height),
-                family,
-                reads_horizontal: seed != Label::LinearV,
-            });
         }
+
+        if members.len() < min_tiles {
+            continue;
+        }
+
+        let (mut min_tx, mut max_tx, mut min_ty, mut max_ty) = (cols, 0, rows, 0);
+        for &m in &members {
+            min_tx = min_tx.min(m % cols);
+            max_tx = max_tx.max(m % cols);
+            min_ty = min_ty.min(m / cols);
+            max_ty = max_ty.max(m / cols);
+        }
+
+        // A 2D matrix code always extends in both axes; a one-tile-thin strip of
+        // incoherent tiles is not one. These strips appear where a barcode's bars
+        // terminate (the row of bar-ends mixes in the other gradient direction) and as
+        // thin runs of text — reject them so the matrix family stays meaningful.
+        // Linear codes are legitimately thin.
+        if !linear && (max_tx == min_tx || max_ty == min_ty) {
+            continue;
+        }
+
+        let oriented = linear.then(|| oriented_box(&tiles, &members, cols, tile, grid));
+        out.push(Region {
+            x0: min_tx * tile,
+            y0: min_ty * tile,
+            x1: ((max_tx + 1) * tile).min(grid.width),
+            y1: ((max_ty + 1) * tile).min(grid.height),
+            family: if linear {
+                Family::Linear
+            } else {
+                Family::Matrix
+            },
+            oriented,
+        });
     }
     out
+}
+
+/// The box around `members` aligned with their pooled reading axis.
+fn oriented_box(
+    tiles: &[Tile],
+    members: &[usize],
+    cols: usize,
+    tile: usize,
+    grid: &DownGrid,
+) -> OrientedBox {
+    // Pool the tensors: the region's axis is its energy-weighted consensus.
+    let (mut sxx, mut syy, mut sxy) = (0.0f32, 0.0f32, 0.0f32);
+    for &m in members {
+        sxx += tiles[m].sxx;
+        syy += tiles[m].syy;
+        sxy += tiles[m].sxy;
+    }
+    let angle = axis_of(sxx, syy, sxy);
+    let (s, c) = angle.sin_cos();
+
+    // Extent of the member tiles' corners along the reading axis (u) and the bars (v).
+    let (mut u0, mut u1, mut v0, mut v1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for &m in members {
+        let (tx, ty) = (m % cols, m / cols);
+        let (x0, y0) = ((tx * tile) as f32, (ty * tile) as f32);
+        let x1 = (((tx + 1) * tile).min(grid.width)) as f32;
+        let y1 = (((ty + 1) * tile).min(grid.height)) as f32;
+        for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+            let u = c * x + s * y;
+            let v = -s * x + c * y;
+            u0 = u0.min(u);
+            u1 = u1.max(u);
+            v0 = v0.min(v);
+            v1 = v1.max(v);
+        }
+    }
+    let (um, vm) = ((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+    OrientedBox {
+        cx: c * um - s * vm,
+        cy: s * um + c * vm,
+        angle,
+        half_read: (u1 - u0) / 2.0,
+        half_bars: (v1 - v0) / 2.0,
+        fill: (members.len() * tile * tile) as f32 / ((u1 - u0) * (v1 - v0)).max(1.0),
+    }
 }

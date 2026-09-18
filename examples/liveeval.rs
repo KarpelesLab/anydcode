@@ -347,6 +347,17 @@ fn run(code: &Code, t: &Trial) -> Outcome {
     let sc = scene(code, t.scale, t.bg, t.deg, t.gradient, t.seed);
     let small = half(&sc.image);
     let mut secs = [0.0f64; 4];
+    // LIVEEVAL_DUMP=<dir> writes every scene as a PGM for the other debug tools.
+    if let Ok(dir) = std::env::var("LIVEEVAL_DUMP") {
+        let name = format!(
+            "{dir}/{}-s{}-{:?}-r{}-g{}.pgm",
+            code.name, t.scale, t.bg, t.deg, t.gradient as u8
+        );
+        let mut bytes =
+            format!("P5\n{} {}\n255\n", sc.image.width(), sc.image.height()).into_bytes();
+        bytes.extend_from_slice(sc.image.pixels());
+        std::fs::write(name, bytes).expect("write scene dump");
+    }
 
     // --- locate on the half-res grab (as the demo does) ---
     let opts = LocateOptions {
@@ -361,13 +372,15 @@ fn run(code: &Code, t: &Trial) -> Outcome {
     let cands = locate(&frame(&small), &opts);
     secs[0] = t0.elapsed().as_secs_f64();
 
-    let boxes: Vec<([f32; 4], bool)> = cands
+    let boxes: Vec<([f32; 4], Option<f32>)> = cands
         .iter()
         .map(|c| {
             let cs = c.location.outline.corners;
             let xs = cs.iter().map(|p| p.x * 2.0);
             let ys = cs.iter().map(|p| p.y * 2.0);
             let lin = c.symbology.map(|s| s.dimension()) != Some(anyd::Dimension::Matrix);
+            // A linear candidate carries its reading axis; matrix ones none.
+            let lin = lin.then(|| c.location.rotation.unwrap_or(0.0));
             (
                 [
                     xs.clone().fold(f32::MAX, f32::min),
@@ -386,7 +399,7 @@ fn run(code: &Code, t: &Trial) -> Outcome {
         let ix = (b[2].min(tr[2]) - b[0].max(tr[0])).max(0.0);
         let iy = (b[3].min(tr[3]) - b[1].max(tr[1])).max(0.0);
         let area = (b[2] - b[0]) * (b[3] - b[1]);
-        ix * iy >= 0.7 * t_area && area <= 5.0 * t_area
+        ix * iy >= 0.7 * t_area && area <= 8.0 * t_area
     };
     let located = boxes.iter().any(|(b, _)| covers(b));
 
@@ -398,8 +411,8 @@ fn run(code: &Code, t: &Trial) -> Outcome {
         let Some(c) = crop(&sc.image, padded) else {
             continue;
         };
-        let syms = if lin {
-            anyd::pipeline::scan_1d(&frame(&c))
+        let syms = if let Some(axis) = lin {
+            anyd::pipeline::scan_1d_at(&frame(&c), axis)
         } else {
             anyd::pipeline::scan_all(&frame(&c))
         };
@@ -575,14 +588,14 @@ fn main() {
 }
 
 /// The crops the live front-end actually decodes from a candidate list.
-fn live_batch(boxes: &[([f32; 4], bool)]) -> Vec<([f32; 4], bool)> {
+fn live_batch(boxes: &[([f32; 4], Option<f32>)]) -> Vec<([f32; 4], Option<f32>)> {
     let mut v: Vec<_> = boxes.to_vec();
     if std::env::var("LIVEEVAL_LEGACY_BATCH").is_ok() {
         v.truncate(MAX_CROPS);
         return v;
     }
     // Linear crops first (cheap), then the rest, capped.
-    v.sort_by_key(|(_, lin)| !*lin);
+    v.sort_by_key(|(_, lin)| lin.is_none());
     v.truncate(MAX_CROPS);
     v
 }

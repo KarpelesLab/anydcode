@@ -2,15 +2,33 @@
 use anyd::detect::{LocateOptions, locate};
 fn main() {
     let path = std::env::args().nth(1).expect("usage: locdebug <png>");
-    let rgba = oxideav_png::decode_png_to_rgba(&std::fs::read(&path).unwrap()).unwrap();
-    let (w, h) = (rgba.width as usize, rgba.height as usize);
-    let luma: Vec<u8> = rgba
-        .data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
-        .collect();
+    let bytes = std::fs::read(&path).unwrap();
+    let (luma, w, h) = if bytes.starts_with(b"P5") {
+        // Binary PGM (as dumped by the liveeval example): "P5\nW H\n255\n" + pixels.
+        let header_end = bytes
+            .iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'\n')
+            .nth(2)
+            .map(|(i, _)| i + 1)
+            .expect("PGM header");
+        let header = String::from_utf8_lossy(&bytes[..header_end]);
+        let mut fields = header.split_whitespace().skip(1);
+        let w: usize = fields.next().unwrap().parse().unwrap();
+        let h: usize = fields.next().unwrap().parse().unwrap();
+        (bytes[header_end..].to_vec(), w, h)
+    } else {
+        let rgba = oxideav_png::decode_png_to_rgba(&bytes).unwrap();
+        let (w, h) = (rgba.width as usize, rgba.height as usize);
+        let luma: Vec<u8> = rgba
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
+            .collect();
+        (luma, w, h)
+    };
     let frame = anyd::GrayFrame::new(&luma, w, h).unwrap();
     // Env overrides for quick experiments: LOC_MAX (max_candidates), LOC_FRAC
     // (max_region_frac), LOC_DENSITY (edge_density).

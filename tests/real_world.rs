@@ -440,8 +440,10 @@ fn real_scene_locator_precision() {
     let (luma, w, h) = load("testdata/real_scene_ean.png");
     let frame = GrayFrame::new(&luma, w, h).unwrap();
     let cands = locate(&frame, &LocateOptions::default());
+    // One linear box (the barcode) plus the matrix-textured print around it: the bold
+    // kanji and the ingredient blocks genuinely are dense two-directional texture.
     assert!(
-        (1..=6).contains(&cands.len()),
+        (1..=8).contains(&cands.len()),
         "EAN scene: expected a handful of candidates, got {}",
         cands.len()
     );
@@ -450,6 +452,23 @@ fn real_scene_locator_precision() {
         cands[0].symbology.map(|s| s.dimension()),
         Some(anyd::Dimension::Linear),
         "EAN scene: strongest candidate should be the linear barcode"
+    );
+    assert_eq!(
+        cands
+            .iter()
+            .filter(|c| c.symbology.map(|s| s.dimension()) == Some(anyd::Dimension::Linear))
+            .count(),
+        1,
+        "EAN scene: rules, box borders and icon strokes must not read as barcodes"
+    );
+    let axis = cands[0]
+        .location
+        .rotation
+        .expect("linear candidates carry their axis");
+    assert!(
+        axis.to_degrees().abs() < 8.0,
+        "EAN scene: reading axis {:.1}° should be near horizontal",
+        axis.to_degrees()
     );
     assert!(
         first.0 <= 512.0 && 512.0 < first.2 && first.1 <= 295.0 && 295.0 < first.3,

@@ -15,12 +15,13 @@ const BINS: usize = 60;
 
 /// Minimum squared gradient magnitude for a pixel to vote; rejects sensor noise and
 /// flat background so the histogram is built from real edges.
-const MIN_MAG2: f32 = 24.0 * 24.0;
+const MIN_MAG2: f32 = 16.0 * 16.0;
 
 /// Fraction of total edge energy that must fall within ±2 bins (±7.5°) of the peak for
 /// the orientation to count as *dominant*. Barcodes score far above this; text, matrix
-/// codes and scene texture spread their energy and fall below.
-const MIN_COHERENCE: f32 = 0.4;
+/// codes and scene texture spread their energy and fall below (an ideal checkerboard —
+/// two equal orientations — sits at 0.5).
+const MIN_COHERENCE: f32 = 0.6;
 
 /// Share of the edge energy a *secondary* orientation peak must hold (within ±2 bins)
 /// to be reported by [`gradient_angle_peaks`]. A barcode sharing its crop with text or
@@ -82,12 +83,18 @@ fn orientation_histogram(frame: &GrayFrame<'_>) -> Option<[f32; BINS]> {
     // Histogram of gradient orientation mod π, weighted by squared magnitude.
     let mut hist = [0.0f32; BINS];
     let mut total = 0.0f32;
-    for y in 1..h - 1 {
-        for x in 1..w - 1 {
-            let gx =
-                f32::from(frame.get_unchecked(x + 1, y)) - f32::from(frame.get_unchecked(x - 1, y));
-            let gy =
-                f32::from(frame.get_unchecked(x, y + 1)) - f32::from(frame.get_unchecked(x, y - 1));
+    // 2×2 differences, both components at the same half-pixel point. A central
+    // difference's sin(ω) response flattens the larger gradient component of a pattern
+    // near the pixel limit — two-pixel bars — and turns the measured axis toward 45° by
+    // several degrees; this operator's error there is under half that.
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            let a = f32::from(frame.get_unchecked(x, y));
+            let b = f32::from(frame.get_unchecked(x + 1, y));
+            let c = f32::from(frame.get_unchecked(x, y + 1));
+            let d = f32::from(frame.get_unchecked(x + 1, y + 1));
+            let gx = 0.5 * ((b - a) + (d - c));
+            let gy = 0.5 * ((c - a) + (d - b));
             let mag2 = gx * gx + gy * gy;
             if mag2 < MIN_MAG2 {
                 continue;

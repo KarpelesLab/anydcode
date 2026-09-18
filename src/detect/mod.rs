@@ -12,18 +12,20 @@
 //! [`locate`] makes a single reduced-resolution pass:
 //!
 //! 1. **Downscale + binarize** (`grid`): box-average the frame down by
-//!    [`LocateOptions::downscale`] and Otsu-threshold the result once. Everything after
-//!    this works on the small image, which is what makes the locator fast enough to run
-//!    on every frame.
+//!    [`LocateOptions::downscale`] and threshold the result against its *local*
+//!    neighbourhood mean, so a lighting falloff or a code on a dark surface still
+//!    binarizes cleanly. Everything after this works on the small image, which is what
+//!    makes the locator fast enough to run on every frame.
 //! 2. **Concentric finders** (`finder`): a run-length row scan with a vertical
 //!    cross-check flags QR/Aztec `1:1:3:1:1` fiducials. These give a high-confidence
 //!    matrix classification and a module-size estimate.
-//! 3. **Texture tiles** (`tiles`): each dense-edged tile is first *labelled* by its own
-//!    horizontal-vs-vertical edge balance — one-directional (a 1D barcode patch) or
-//!    balanced (a 2D matrix) — and only same-label tiles are then clustered into regions.
-//!    Labelling per tile before clustering is what lets a directional barcode be pulled
-//!    out of the isotropic text and artwork it sits amongst, catching every finder-less
-//!    symbology without the barcode dissolving into the surrounding scene.
+//! 3. **Texture tiles** (`tiles`): each dense-edged tile is first *labelled* by the
+//!    coherence of its own gradient field — one-directional (a 1D barcode patch, at
+//!    *any* rotation) or not (a 2D matrix, text, texture) — and only compatible tiles
+//!    are then clustered into regions. Labelling per tile before clustering is what
+//!    lets a barcode be pulled out of the text and artwork it sits amongst, catching
+//!    every finder-less symbology without the barcode dissolving into the surrounding
+//!    scene. A linear region carries its reading axis and a box aligned with it.
 //! 4. **Gate + merge + map back**: regions that read as scene texture rather than a
 //!    code are dropped — near-frame-sized blobs (dense print flood-fills into one giant
 //!    region), linear regions without a scannable aspect or with text-like breaks along
@@ -48,9 +50,18 @@
 //! not a decode claim: a finder-backed matrix reports [`Symbology::QrCode`], a
 //! finder-less matrix [`Symbology::DataMatrix`], and a linear region [`Symbology::Code128`].
 //! Recover just the family with [`Symbology::dimension`].
+//!
+//! # Linear candidates are oriented
+//!
+//! A linear candidate's [`Location::outline`] is a box aligned with the code, not with
+//! the frame, and its [`Location::rotation`] is the code's reading axis (radians,
+//! clockwise from +x, in `(-π/2, π/2]` — an axis, so a code and its upside-down self
+//! report the same value). Crop the outline's bounds and hand the axis to
+//! [`crate::pipeline::scan_1d_at`] to read it without an orientation search.
 
 use alloc::vec::Vec;
 use std::eprintln;
+use std::sync::OnceLock;
 
 mod finder;
 mod grid;
@@ -118,12 +129,14 @@ pub struct LocateOptions {
     pub max_candidates: usize,
     /// Tile edge length in reduced pixels for the texture pass. Default `8`.
     pub tile: usize,
-    /// Minimum `(h + v) transitions / pixel` for a tile to count as active. Default `0.12`.
+    /// Minimum fraction of a tile's pixels that must be edge pixels (strong local
+    /// gradient) for the tile to count as active. Default `0.12`.
     pub edge_density: f32,
     /// Minimum active tiles for a region to be reported. Default `3`.
     pub min_region_tiles: usize,
-    /// `|h - v| / (h + v)` above which a region is classed linear rather than matrix.
-    /// Default `0.55`.
+    /// Gradient coherence (`0` = edges in every direction, `1` = all edges parallel) at
+    /// or above which a tile is classed linear rather than matrix. Rotation-invariant.
+    /// Default `0.7`.
     pub anisotropy: f32,
     /// Largest fraction of the frame area a single region may cover. Textured scenes
     /// (dense print, foliage) flood-fill into one giant blob; a real code is a bounded
@@ -142,7 +155,7 @@ impl Default for LocateOptions {
             tile: 8,
             edge_density: 0.12,
             min_region_tiles: 3,
-            anisotropy: 0.55,
+            anisotropy: 0.7,
             max_region_frac: 0.6,
             seed: 0x_D0D0_CAFE,
         }
@@ -163,9 +176,9 @@ impl Default for LocateOptions {
 /// overlap at all, so half the smaller box is a safe duplicate signal.
 const SUPPRESS_OVERLAP: f32 = 0.5;
 
-/// Dark-pixel fraction bounds for a finderless matrix guess. Every 2D symbology prints
-/// close to half ink; a region far outside this band is a solid blob (logo, fill) or
-/// sparse print, not a matrix code. Finder-backed and linear regions are exempt — bar
+/// Dark-pixel fraction bounds (under the locally thresholded mask) for a finderless
+/// matrix guess. Every 2D symbology prints close to half ink; a region far outside this
+/// band is a solid blob (logo, fill) or sparse print, not a matrix code. Finder-backed and linear regions are exempt — bar
 /// widths legitimately skew linear ink coverage.
 const MATRIX_DARK_FRAC: core::ops::Range<f32> = 0.22..0.85;
 
@@ -181,9 +194,34 @@ const LINEAR_MIN_ASPECT: f32 = 0.75;
 /// the human-readable digits); a row of text flips at every glyph boundary.
 const MAX_BAR_FLIPS_PER_PX: f32 = 0.20;
 
-/// Minimum cluster confirmations before an unclaimed finder hit is trusted enough to
-/// synthesize a candidate on its own (no texture region backing it).
-const FINDER_SYNTH_MIN_COUNT: u32 = 2;
+/// Minimum cluster confirmations (scan rows agreeing on one centre) before a finder hit
+/// is trusted — to vouch for the region it sits in, or to synthesize a candidate on its
+/// own. A real finder's centre is three modules tall, so even at the smallest module
+/// the locator resolves it is crossed by several rows; dense print throws up the odd
+/// `1:1:3:1:1` run with a matching column, but not on row after row.
+const FINDER_SYNTH_MIN_COUNT: u32 = 3;
+
+/// Least luminance spread (90th − 10th percentile) inside a finderless matrix guess. A
+/// 2D code is two well-separated tones; the local threshold will happily split the
+/// grain of a dark surface or a shadow into "half ink" too, and only the spread tells
+/// them apart.
+const MATRIX_MIN_SPREAD: u32 = 56;
+
+/// Least share of its oriented box a linear region's tiles must cover (see
+/// `OrientedBox::fill`). A rotated box is measured around whole tiles, so even a solid
+/// block of bars only reaches ~0.6 at 45°.
+const LINEAR_MIN_FILL: f32 = 0.3;
+
+/// Fewest dark/light flips a line along the reading axis must cross inside a linear
+/// region. The shortest linear symbols have well over a dozen bars; an icon outline, a
+/// rule, a box border or a letter or two have a handful of parallel strokes at most.
+const MIN_BARS_FLIPS: u32 = 10;
+
+/// The same spread floor for a linear region. Lower, because bars are easier to confirm
+/// than a matrix (the scan that follows is cheap and self-validating) and thin bars
+/// blurred into their spaces genuinely lose contrast — but grain on a dark surface with
+/// a brushed direction is "coherent" too, and has almost none.
+const LINEAR_MIN_SPREAD: u32 = 40;
 
 pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
     // Too small to hold any code worth locating.
@@ -193,12 +231,17 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
 
     let grid = DownGrid::build(frame, opts.downscale);
     let finders = finder::find(&grid);
+    // Read once: an environment lookup takes a process-wide lock, and this runs on
+    // every frame.
+    static DEBUG: OnceLock<bool> = OnceLock::new();
+    let debug = *DEBUG.get_or_init(|| std::env::var_os("ANYD_LOC_DEBUG").is_some());
     let regions = tiles::regions(
         &grid,
         opts.tile,
         opts.edge_density,
         opts.min_region_tiles,
         opts.anisotropy,
+        debug,
     );
 
     // Gate and classify regions before ranking. A region bigger than the cap is scene
@@ -209,7 +252,6 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
         family: Family,
         hit: Option<&'a FinderHit>,
     }
-    let debug = std::env::var("ANYD_LOC_DEBUG").is_ok();
     if debug {
         for f in &finders {
             eprintln!(
@@ -225,33 +267,31 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
     for region in regions {
         if debug {
             eprintln!(
-                "region ({},{})-({},{}) {:?} rh={} area={} lin_ok={} mat_ok={}",
+                "region ({},{})-({},{}) {:?} axis={:?} area={} lin_ok={} mat_ok={}",
                 region.x0 * grid.scale,
                 region.y0 * grid.scale,
                 region.x1 * grid.scale,
                 region.y1 * grid.scale,
                 region.family,
-                region.reads_horizontal,
+                region.oriented.map(|o| o.angle.to_degrees()),
                 region.area(),
                 linear_plausible(&grid, &region),
                 matrix_plausible(&grid, &region),
             );
         }
-        // A finder falling inside the region upgrades it to a matrix guess and lends
-        // its module size.
-        let hit = enclosing_finder(&finders, &region);
-        let finder_backed = hit.is_some_and(|h| h.count >= FINDER_SYNTH_MIN_COUNT);
+        // A confirmed finder inside a matrix-textured region vouches for it and lends
+        // its module size. A *linear* region keeps its family: its bars are coherent
+        // evidence of their own, and bar patterns throw up finder-like runs.
+        let hit = enclosing_finder(&finders, &region)
+            .filter(|h| h.count >= FINDER_SYNTH_MIN_COUNT && region.family == Family::Matrix);
+        let finder_backed = hit.is_some();
         // A region bigger than the cap is scene texture — dense print flood-fills into
         // one giant blob — *unless* a confirmed finder backs it: a code held close to
         // the camera legitimately fills the frame.
         if region.area() > max_area && !finder_backed {
             continue;
         }
-        let family = if hit.is_some() {
-            Family::Matrix
-        } else {
-            region.family
-        };
+        let family = region.family;
         if !opts.families.allows(family) {
             continue;
         }
@@ -268,31 +308,40 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
         });
     }
 
-    // Rank: finder-backed regions first (a concentric fiducial is a far stronger signal
-    // than raw texture), then largest first, so max_candidates keeps the best.
+    // Rank by strength of evidence, then largest first, so max_candidates (and a
+    // caller's decode budget) keeps the best: a concentric fiducial is the strongest
+    // signal there is; a coherent, structurally plausible bar field is next — and the
+    // cheapest to confirm; a finderless matrix guess is only "textured like a code".
     scored.sort_by_key(|s| {
-        (
-            core::cmp::Reverse(u8::from(s.hit.is_some())),
-            core::cmp::Reverse(s.region.area()),
-        )
+        let class = match (s.hit.is_some(), s.family) {
+            (true, _) => 0u8,
+            (false, Family::Linear) => 1,
+            (false, Family::Matrix) => 2,
+        };
+        (class, core::cmp::Reverse(s.region.area()))
     });
 
     let scale = grid.scale as f32;
-    let mut accepted: Vec<[usize; 4]> = Vec::new();
+    // Accepted core boxes with their family and whether a finder backs them.
+    let mut accepted: Vec<([usize; 4], Family, bool)> = Vec::new();
     let mut out: Vec<Candidate> = Vec::new();
     for s in &scored {
         if out.len() >= opts.max_candidates {
             break;
         }
         let core = [s.region.x0, s.region.y0, s.region.x1, s.region.y1];
-        // Suppress duplicates: fragments of an object already reported.
-        if accepted
-            .iter()
-            .any(|a| overlap_min_frac(*a, core) > SUPPRESS_OVERLAP)
-        {
+        // Suppress duplicates: fragments of an object already reported. A bar field is
+        // not a fragment of a *finderless* matrix box, though — a barcode printed amid
+        // text sits inside the text's texture blob, and is the one thing in it worth
+        // reading. Inside a finder-backed box it is: a QR's finder rings and timing
+        // tracks are coherent stripes too.
+        if accepted.iter().any(|&(a, family, finder)| {
+            !(s.family == Family::Linear && family == Family::Matrix && !finder)
+                && overlap_min_frac(a, core) > SUPPRESS_OVERLAP
+        }) {
             continue;
         }
-        accepted.push(core);
+        accepted.push((core, s.family, s.hit.is_some()));
 
         let symbology = match (s.family, s.hit.is_some()) {
             (Family::Matrix, true) => Symbology::QrCode,
@@ -302,21 +351,34 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
         let module_size = s.hit.map(|h| h.module * scale);
 
         // Barcodes read across their bars, so a linear box needs the quiet zone on each
-        // side of the bars to survive downstream scanning. Grow it one tile out (matrix
-        // codes carry their own quiet zone inside the finder search).
-        let [mut x0, mut y0, mut x1, mut y1] = core;
-        if s.family == Family::Linear {
-            let t = opts.tile.max(1);
-            x0 = x0.saturating_sub(t);
-            y0 = y0.saturating_sub(t);
-            x1 = (x1 + t).min(grid.width);
-            y1 = (y1 + t).min(grid.height);
-        }
-
-        let location = Location {
-            outline: box_quad([x0, y0, x1, y1], scale),
-            rotation: None,
-            module_size,
+        // side of the bars to survive downstream scanning: grow it along the reading
+        // axis (matrix codes carry their own quiet zone inside the finder search).
+        let location = match (s.family, s.region.oriented) {
+            (Family::Linear, Some(mut o)) => {
+                let t = opts.tile.max(1) as f32;
+                o.half_read += 1.5 * t;
+                o.half_bars += 0.25 * t;
+                let (w, h) = (grid.width as f32, grid.height as f32);
+                let corner = |(x, y): (f32, f32)| {
+                    Point::new(x.clamp(0.0, w) * scale, y.clamp(0.0, h) * scale)
+                };
+                let cs = o.corners();
+                Location {
+                    outline: Quad::new([
+                        corner(cs[0]),
+                        corner(cs[1]),
+                        corner(cs[2]),
+                        corner(cs[3]),
+                    ]),
+                    rotation: Some(o.angle),
+                    module_size,
+                }
+            }
+            _ => Location {
+                outline: box_quad(core, scale),
+                rotation: None,
+                module_size,
+            },
         };
         out.push(Candidate {
             location,
@@ -341,7 +403,7 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
             let (fx, fy) = (f.x as usize, f.y as usize);
             if accepted
                 .iter()
-                .any(|&[x0, y0, x1, y1]| fx >= x0 && fx < x1 && fy >= y0 && fy < y1)
+                .any(|&([x0, y0, x1, y1], _, _)| fx >= x0 && fx < x1 && fy >= y0 && fy < y1)
             {
                 continue;
             }
@@ -357,7 +419,7 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
                 continue;
             }
             let core = [x0, y0, x1, y1];
-            accepted.push(core);
+            accepted.push((core, Family::Matrix, true));
             out.push(Candidate {
                 location: Location {
                     outline: box_quad(core, scale),
@@ -384,62 +446,117 @@ fn overlap_min_frac(a: [usize; 4], b: [usize; 4]) -> f32 {
     if min > 0.0 { inter / min } else { 0.0 }
 }
 
-/// Ink-coverage gate for a finderless matrix guess: the dark fraction of the region
-/// under the frame's binarization must sit in the code-like band [`MATRIX_DARK_FRAC`].
+/// Ink gate for a finderless matrix guess: the dark fraction of the region under the
+/// frame's local binarization must sit in the code-like band [`MATRIX_DARK_FRAC`], and
+/// its two tones must actually be apart ([`MATRIX_MIN_SPREAD`]).
 fn matrix_plausible(grid: &DownGrid, region: &Region) -> bool {
     let area = region.area();
     if area == 0 {
         return false;
     }
     let mut dark = 0usize;
+    let mut hist = [0u32; 256];
     for y in region.y0..region.y1 {
         for x in region.x0..region.x1 {
             dark += usize::from(grid.dark(x, y));
+            hist[usize::from(grid.luma(x, y))] += 1;
         }
     }
     MATRIX_DARK_FRAC.contains(&(dark as f32 / area as f32))
+        && spread(&hist, area as u32) >= MATRIX_MIN_SPREAD
+}
+
+/// Distance between the 10th and 90th percentiles of a luminance histogram of `count`
+/// samples.
+fn spread(hist: &[u32; 256], count: u32) -> u32 {
+    let percentile = |frac: f32| {
+        let target = (frac * count as f32) as u32;
+        let mut seen = 0u32;
+        hist.iter()
+            .position(|&n| {
+                seen += n;
+                seen > target
+            })
+            .unwrap_or(255) as u32
+    };
+    percentile(0.9) - percentile(0.1)
 }
 
 /// Structural gate for a linear-family region: scannable aspect and coherent bars.
 ///
-/// Printed text shares a barcode's edge anisotropy but not its structure: a column of
-/// text is taller than a scanline can use, and a row of text breaks up along the bar
-/// axis where real bars run unbroken. Both checks are orientation-normalized via
-/// [`Region::reads_horizontal`].
+/// Printed text shares a barcode's one-directional strokes but not its structure: a
+/// column of text is taller than a scanline can use, and a row of text breaks up along
+/// the bar axis where real bars run unbroken. Both checks are made in the region's own
+/// frame, so they hold at any rotation.
 fn linear_plausible(grid: &DownGrid, region: &Region) -> bool {
-    let w = region.x1 - region.x0;
-    let h = region.y1 - region.y0;
-    if w == 0 || h == 0 {
+    let Some(o) = region.oriented else {
         return false;
-    }
-    // Extent along the reading axis vs along the bars.
-    let (read, bars) = if region.reads_horizontal {
-        (w, h)
-    } else {
-        (h, w)
     };
-    if (read as f32) < LINEAR_MIN_ASPECT * bars as f32 {
+    if o.half_read <= 0.0 || o.half_bars <= 0.0 {
         return false;
     }
-    // Flips of the dark mask along the bar axis, averaged per scanline, per pixel.
-    let mut flips = 0u32;
-    for u in 0..read {
+    if o.half_read < LINEAR_MIN_ASPECT * o.half_bars || o.fill < LINEAR_MIN_FILL {
+        return false;
+    }
+    // Flips of the dark mask walking along the bars, averaged per pixel walked, on
+    // lines spread across the reading axis.
+    let (sin, cos) = o.angle.sin_cos();
+    let (mut flips, mut walked) = (0u32, 0u32);
+    let mut hist = [0u32; 256];
+    let lines = ((2.0 * o.half_read) as usize / 2).clamp(4, 96);
+    let steps = (2.0 * o.half_bars) as usize;
+    for l in 0..lines {
+        let u = -o.half_read + (l as f32 + 0.5) / lines as f32 * 2.0 * o.half_read;
         let mut prev: Option<bool> = None;
-        for v in 0..bars {
-            let (x, y) = if region.reads_horizontal {
-                (region.x0 + u, region.y0 + v)
-            } else {
-                (region.x0 + v, region.y0 + u)
-            };
-            let d = grid.dark(x, y);
+        for k in 0..steps {
+            let v = -o.half_bars + k as f32 + 0.5;
+            let x = o.cx + cos * u - sin * v;
+            let y = o.cy + sin * u + cos * v;
+            if x < 0.0 || y < 0.0 || x >= grid.width as f32 || y >= grid.height as f32 {
+                prev = None;
+                continue;
+            }
+            let d = grid.dark(x as usize, y as usize);
             if prev == Some(!d) {
                 flips += 1;
             }
             prev = Some(d);
+            hist[usize::from(grid.luma(x as usize, y as usize))] += 1;
+            walked += 1;
         }
     }
-    let per_px = flips as f32 / (read * bars) as f32;
-    per_px <= MAX_BAR_FLIPS_PER_PX
+    if walked == 0
+        || flips as f32 / walked as f32 > MAX_BAR_FLIPS_PER_PX
+        || spread(&hist, walked) < LINEAR_MIN_SPREAD
+    {
+        return false;
+    }
+
+    // Enough bars: the best of three lines along the reading axis must cross a
+    // barcode's worth of edges.
+    let steps = (2.0 * o.half_read) as usize;
+    let most = [-0.4f32, 0.0, 0.4]
+        .iter()
+        .map(|&f| {
+            let v = f * o.half_bars;
+            let mut prev: Option<bool> = None;
+            let mut n = 0u32;
+            for k in 0..steps {
+                let u = -o.half_read + k as f32 + 0.5;
+                let x = o.cx + cos * u - sin * v;
+                let y = o.cy + sin * u + cos * v;
+                if x < 0.0 || y < 0.0 || x >= grid.width as f32 || y >= grid.height as f32 {
+                    continue;
+                }
+                let d = grid.dark(x as usize, y as usize);
+                n += u32::from(prev == Some(!d));
+                prev = Some(d);
+            }
+            n
+        })
+        .max()
+        .unwrap_or(0);
+    most >= MIN_BARS_FLIPS
 }
 
 /// The finder hit whose centre lies inside `region`, if any (highest count wins).

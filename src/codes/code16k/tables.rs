@@ -16,8 +16,10 @@ use alloc::{vec, vec::Vec};
 /// The 107 Code 128 symbol patterns, indexed by symbol value `0..=106`.
 ///
 /// Each string is a run of element widths starting with a bar; every entry sums to
-/// 11 modules. Identical to the Code 128 table (values `103`/`104`/`105` are the
-/// Start A/B/C patterns, reused by Code 16K for its mode/pad characters).
+/// 11 modules. Identical to the Code 128 table for values `0..=105` (`103`/`104`/`105`
+/// are the Start A/B/C patterns, reused by Code 16K for its mode/pad characters).
+/// Value `106` — which Code 16K only ever produces as a modulo-107 check character —
+/// is `211133`, not Code 128's 13-module Stop.
 pub const C128_PATTERNS: [&str; 107] = [
     "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212",
     "221213", "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221",
@@ -30,7 +32,7 @@ pub const C128_PATTERNS: [&str; 107] = [
     "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111", "111242",
     "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
     "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311",
-    "113141", "114131", "311141", "411131", "211412", "211214", "211232", "233111",
+    "113141", "114131", "311141", "411131", "211412", "211214", "211232", "211133",
 ];
 
 /// EN 12323 Table 3/4: the eight start/stop delimiter patterns, four element widths

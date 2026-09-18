@@ -137,3 +137,32 @@ fn zint_implied_shift_b_modes() {
     assert_eq!(meta.values[..5], [6, 33, 34, 12, 34]);
     assert_eq!(decoded.text().as_deref(), Some("AB1234"));
 }
+
+/// Symbol value 106 (reachable only as a modulo-107 check character) has its own
+/// Code 16K pattern `211133`; it is not Code 128's Stop character cut to six elements.
+/// Reference: zint 2.16.0 `zint -b CODE16K -d lnlmfghxvylucwb --dump`, whose second
+/// check character is 106.
+#[test]
+fn zint_check_character_106() {
+    let dump = [
+        "E5 46 66 BC F5 9A F0 8A 34",
+        "CD 4F 6C BD 9E 86 D0 B6 64",
+        "D9 24 26 BD 86 BD 30 D6 4C",
+        "85 6F 25 EC BD BB 32 8E F4",
+    ];
+    let decoded = decode_zint_dump(&dump);
+    assert_eq!(decoded.text().as_deref(), Some("lnlmfghxvylucwb"));
+
+    // Our own encoder picks the same symbol values here, so the output is identical.
+    let enc = Code16kEncoder::new();
+    let symbol = enc.build(b"lnlmfghxvylucwb").unwrap();
+    assert_eq!(symbol.meta, decoded.meta);
+    let Encoding::Matrix(m) = enc.encode(&symbol).unwrap() else {
+        panic!("expected matrix");
+    };
+    for (row, hex) in dump.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, 70).iter().enumerate() {
+            assert_eq!(m.get(x, row), b, "row {row} col {x} differs from zint");
+        }
+    }
+}

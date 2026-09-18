@@ -161,10 +161,20 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
 fn write_text(out: Option<&String>, s: &str) -> Result<(), String> {
     match out {
         Some(path) => std::fs::write(path, s).map_err(|e| format!("writing {path}: {e}")),
-        None => {
-            println!("{s}");
-            Ok(())
+        None => print_out(s),
+    }
+}
+
+/// Write `s` to stdout. A reader that closes the pipe early (`anyd ... | head`) ends
+/// the output quietly, where `println!` would panic.
+fn print_out(s: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut stdout = std::io::stdout().lock();
+    match stdout.write_all(s.as_bytes()).and_then(|()| stdout.flush()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+            Err(format!("writing to stdout: {e}"))
         }
+        _ => Ok(()),
     }
 }
 
@@ -461,14 +471,15 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     if found.is_empty() {
         return Err("no barcode found in image".into());
     }
+    let mut report = String::new();
     for sym in &found {
         let name = sym.symbology.to_string();
         match sym.text() {
-            Some(t) => println!("{name}: {t}"),
-            None => println!("{name}: <binary> {}", hex(&sym.payload_bytes())),
+            Some(t) => report.push_str(&format!("{name}: {t}\n")),
+            None => report.push_str(&format!("{name}: <binary> {}\n", hex(&sym.payload_bytes()))),
         }
     }
-    Ok(())
+    print_out(&report)
 }
 
 /// Decode every symbol found in a PNG file's bytes.

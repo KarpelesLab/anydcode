@@ -179,6 +179,12 @@ fn rejects_invalid_urls() {
         "https://exämple.com",           // non-ASCII host
         "https://xn--e1afmkfd.xn--p1ai", // punycode
         "https://example",               // no TLD
+        // A multi-byte character straddling the end of the scheme prefix must be
+        // rejected, not panic on a char-boundary slice.
+        "https:/\u{e9}xample.com",
+        "https:\u{20ac}",
+        "\u{20ac}\u{20ac}\u{20ac}",
+        "https://example.com/caf\u{e9}", // non-ASCII path
         // Legitimate URL that simply does not fit 128 compressed bits: rejected
         // with a capacity error rather than silently truncated.
         "https://karpeleslab.github.io/anydcode/scanner-docs",

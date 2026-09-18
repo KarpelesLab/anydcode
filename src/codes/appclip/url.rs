@@ -496,7 +496,11 @@ enum Component {
 
 fn parse_url(raw: &str) -> Result<ParsedUrl> {
     let scheme = "https://";
-    if raw.len() < scheme.len() || !raw[..scheme.len()].eq_ignore_ascii_case(scheme) {
+    // `get` rather than slicing: byte 8 may fall inside a multi-byte character.
+    if !raw
+        .get(..scheme.len())
+        .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+    {
         return Err(Error::invalid_parameter(
             "App Clip URL scheme must be https",
         ));

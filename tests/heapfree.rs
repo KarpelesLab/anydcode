@@ -161,7 +161,7 @@ fn linear_encoders() {
     check!(
         "pharmacode",
         PharmacodeEncoder::max_modules(Symbology::Pharmacode),
-        (29, 10, 1679928630445318993),
+        (38, 10, 2703172591498899849),
         |out| { PharmacodeEncoder::new().encode_into(Symbology::Pharmacode, 1234, out) }
     );
 }

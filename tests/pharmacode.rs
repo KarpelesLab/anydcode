@@ -88,7 +88,8 @@ fn encode_into_matches_encode() {
         assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
     }
     // The bound is reached by the largest values.
-    let mut storage = [0u8; 8];
+    let mut storage =
+        [0u8; LinearBuf::bytes_for(PharmacodeEncoder::max_modules(Symbology::Pharmacode))];
     for (symbology, value) in [
         (Symbology::Pharmacode, 131070),
         (Symbology::PharmacodeTwoTrack, 64570080),
@@ -109,4 +110,30 @@ fn encode_into_matches_encode() {
             .is_err()
     );
     assert!(enc.encode_into(Symbology::Code39, 42, &mut buf).is_err());
+}
+
+/// One-track dimensions per the Laetus specification (and zint's `12` / `32` element
+/// pairs): thin bar 1X, thick bar 3X, and a 2X gap between bars.
+#[test]
+fn one_track_uses_the_standard_two_module_gap() {
+    use anyd::output::{Encoding, LinearPattern};
+    // Spelled out by hand so the expectation is independent of the encoder: 12 is
+    // `thick thin thick` (2·4 + 1·2 + 2·1).
+    let mut expected = LinearPattern::new();
+    for (i, w) in [3usize, 1, 3].into_iter().enumerate() {
+        if i > 0 {
+            expected.modules.extend([false, false]);
+        }
+        expected.modules.extend(core::iter::repeat_n(true, w));
+    }
+    let enc = PharmacodeEncoder::new();
+    let Encoding::Linear(got) = enc.encode(&enc.build(12).unwrap()).unwrap() else {
+        panic!("Pharmacode encodes to a linear pattern");
+    };
+    assert_eq!(got.modules, expected.modules);
+    // ...and a third-party symbol with those dimensions decodes.
+    let decoded = PharmacodeDecoder::new()
+        .decode(&Encoding::Linear(expected))
+        .unwrap();
+    assert_eq!(decoded.segments, vec![Segment::numeric(b"12".to_vec())]);
 }

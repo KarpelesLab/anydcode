@@ -3,9 +3,11 @@
 //! # One-track ([`Symbology::Pharmacode`])
 //!
 //! Encodes a single integer `3..=131070` as a run of thin/thick bars separated by
-//! narrow spaces. Reading right-to-left, bar position `n` contributes `2^n` (thin) or
+//! fixed gaps. Reading right-to-left, bar position `n` contributes `2^n` (thin) or
 //! `2·2^n` (thick); equivalently each value maps to a bijective base-2 numeral with
-//! digits {1, 2}. A thin bar is one module wide, a thick bar is `WIDE` modules.
+//! digits {1, 2}. Per the Laetus dimensions (0.5 mm thin bar, 1.5 mm thick bar, 1.0 mm
+//! gap) a thin bar is one module wide, a thick bar `WIDE` modules and every gap
+//! `ONE_TRACK_GAP` modules — the same `12` / `32` element pairs zint emits.
 //!
 //! # Two-track ([`Symbology::PharmacodeTwoTrack`])
 //!
@@ -59,6 +61,10 @@ use alloc::vec::Vec;
 /// Module width of a thick (one-track) bar.
 #[cfg(feature = "encode")]
 const WIDE: u8 = 3;
+/// Module width of the gap between one-track bars (twice the thin bar).
+const ONE_TRACK_GAP: usize = 2;
+/// Module width of the gap between bars of the linearized two-track form.
+const TWO_TRACK_GAP: usize = 1;
 /// Quiet-zone width in narrow modules on each side.
 #[cfg(feature = "encode")]
 const QUIET_ZONE: usize = 10;
@@ -118,12 +124,12 @@ impl Bars {
     }
 }
 
-/// Render a left-to-right sequence of bar widths, joined by single-module spaces.
+/// Render a left-to-right sequence of bar widths, joined by `gap`-module spaces.
 #[cfg(feature = "encode")]
-fn render_bars(out: &mut impl LinearSink, bar_widths: &[u8]) -> Result<()> {
+fn render_bars(out: &mut impl LinearSink, bar_widths: &[u8], gap: usize) -> Result<()> {
     for (i, &w) in bar_widths.iter().enumerate() {
         if i > 0 {
-            out.push(false)?;
+            out.push_run(false, gap)?;
         }
         out.push_run(true, w as usize)?;
     }
@@ -131,9 +137,9 @@ fn render_bars(out: &mut impl LinearSink, bar_widths: &[u8]) -> Result<()> {
 }
 
 /// Run-length encode into element widths, and return only the bar widths (the
-/// spaces, at odd indices, must all be narrow).
+/// spaces, at odd indices, must all be `gap` modules wide).
 #[cfg(feature = "decode")]
-fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
+fn bar_widths(modules: &[bool], gap: usize) -> Result<Vec<u32>> {
     if modules.is_empty() || !modules[0] {
         return Err(Error::undecodable("linear pattern must start with a bar"));
     }
@@ -150,13 +156,13 @@ fn bar_widths(modules: &[bool]) -> Result<Vec<u32>> {
         }
     }
     runs.push(len);
-    // Bars at even indices, spaces (all narrow) at odd indices.
+    // Bars at even indices, fixed-width gaps at odd indices.
     if runs.len() % 2 == 0 {
         return Err(Error::undecodable("Pharmacode must end with a bar"));
     }
     for (i, &w) in runs.iter().enumerate() {
-        if i % 2 == 1 && w != 1 {
-            return Err(Error::undecodable("Pharmacode space not narrow"));
+        if i % 2 == 1 && w as usize != gap {
+            return Err(Error::undecodable("Pharmacode gap has the wrong width"));
         }
     }
     Ok(runs.iter().step_by(2).copied().collect())
@@ -248,10 +254,11 @@ impl PharmacodeEncoder {
 
     /// Upper bound on the modules [`PharmacodeEncoder::encode_into`] emits for
     /// `symbology`, excluding quiet zones: sixteen bars of width 3 joined by fifteen
-    /// single-module spaces, the widest value of either variant.
+    /// gaps, the widest value of the variant.
     pub const fn max_modules(symbology: Symbology) -> usize {
         match symbology {
-            Symbology::Pharmacode | Symbology::PharmacodeTwoTrack => MAX_BARS * 3 + (MAX_BARS - 1),
+            Symbology::Pharmacode => MAX_BARS * 3 + (MAX_BARS - 1) * ONE_TRACK_GAP,
+            Symbology::PharmacodeTwoTrack => MAX_BARS * 3 + (MAX_BARS - 1) * TWO_TRACK_GAP,
             _ => 0,
         }
     }
@@ -267,23 +274,23 @@ impl PharmacodeEncoder {
         value: u32,
         out: &mut S,
     ) -> Result<()> {
-        let bars = match symbology {
+        let (bars, gap) = match symbology {
             Symbology::Pharmacode => {
                 if !ONE_TRACK_RANGE.contains(&value) {
                     return Err(Error::capacity("one-track Pharmacode value out of range"));
                 }
-                one_track_bars(value)
+                (one_track_bars(value), ONE_TRACK_GAP)
             }
             Symbology::PharmacodeTwoTrack => {
                 if !TWO_TRACK_RANGE.contains(&value) {
                     return Err(Error::capacity("two-track Pharmacode value out of range"));
                 }
-                two_track_bars(value)
+                (two_track_bars(value), TWO_TRACK_GAP)
             }
             _ => return Err(Error::invalid_parameter("not a Pharmacode symbology")),
         };
         out.begin(QUIET_ZONE)?;
-        render_bars(out, bars.as_slice())
+        render_bars(out, bars.as_slice(), gap)
     }
 }
 
@@ -364,7 +371,12 @@ impl Decode for PharmacodeDecoder {
                 ));
             }
         };
-        let bars = bar_widths(&pattern.modules)?;
+        let gap = if self.two_track {
+            TWO_TRACK_GAP
+        } else {
+            ONE_TRACK_GAP
+        };
+        let bars = bar_widths(&pattern.modules, gap)?;
         let (value, symbology, range) = if self.two_track {
             (
                 two_track_value(&bars)?,

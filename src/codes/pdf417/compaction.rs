@@ -11,6 +11,10 @@
 //!
 //! Content codewords are always below 900; only mode latches and padding are ≥ 900,
 //! which is what lets the decoder split the stream back into segments.
+//!
+//! The decoder additionally reads what other encoders emit but this one does not: a
+//! leading Text run without its (default-mode) latch, and the 913 single-byte shift
+//! out of Text compaction.
 
 use crate::error::{Error, Result};
 use crate::segment::{Mode, Segment};
@@ -20,6 +24,8 @@ const LATCH_TEXT: u32 = 900;
 const LATCH_BYTE: u32 = 901;
 const LATCH_NUMERIC: u32 = 902;
 const LATCH_BYTE_6: u32 = 924;
+/// Shift to Byte compaction for the single following codeword (from Text only).
+const SHIFT_BYTE: u32 = 913;
 
 // Text sub-mode control values (used within Text compaction only).
 const TEXT_LL: u8 = 27; // latch to Lower
@@ -144,16 +150,8 @@ pub fn decode_segments(data: &[u32]) -> Result<Vec<Segment>> {
         let latch = cws[i];
         match latch {
             LATCH_TEXT => {
-                i += 1;
-                let start = i;
-                while i < cws.len() && cws[i] < 900 {
-                    i += 1;
-                }
-                let bytes = text_decode(&cws[start..i]);
-                if !bytes.is_empty() {
-                    segments.push(Segment::alphanumeric(bytes));
-                }
-                // else: an empty text run is padding — skip it.
+                // An empty text run is padding and yields no segment.
+                i = text_run_decode(cws, i + 1, &mut segments)?;
             }
             LATCH_NUMERIC => {
                 i += 1;
@@ -177,21 +175,14 @@ pub fn decode_segments(data: &[u32]) -> Result<Vec<Segment>> {
                     segments.push(Segment::byte(bytes));
                 }
             }
+            _ if latch < 900 || latch == SHIFT_BYTE => {
+                // A content codeword (or byte shift) with no active latch. The default
+                // PDF417 mode is Text; treat the run as text.
+                i = text_run_decode(cws, i, &mut segments)?;
+            }
             _ => {
-                // A content codeword with no active latch (or an unsupported control
-                // codeword). The default PDF417 mode is Text; treat the run as text.
-                let start = i;
-                while i < cws.len() && cws[i] < 900 {
-                    i += 1;
-                }
-                if i == start {
-                    // A ≥900 codeword we do not handle; stop to avoid looping.
-                    return Err(Error::undecodable("unsupported PDF417 mode codeword"));
-                }
-                let bytes = text_decode(&cws[start..i]);
-                if !bytes.is_empty() {
-                    segments.push(Segment::alphanumeric(bytes));
-                }
+                // A ≥900 control codeword we do not handle.
+                return Err(Error::undecodable("unsupported PDF417 mode codeword"));
             }
         }
     }
@@ -303,7 +294,41 @@ fn text_encode(data: &[u8], out: &mut Vec<u32>) -> Result<()> {
     Ok(())
 }
 
-fn text_decode(cws: &[u32]) -> Vec<u8> {
+/// Decode one Text compaction run starting at `cws[i]`, pushing its segments and
+/// returning the index of the codeword that ends it (a mode latch, or the end).
+///
+/// A 913 "shift to Byte" inside the run yields a one-byte [`Mode::Byte`] segment
+/// between the surrounding text; the Text sub-mode carries across it, while a
+/// sub-mode shift left pending before it (the odd-length pad) is dropped.
+fn text_run_decode(cws: &[u32], mut i: usize, segments: &mut Vec<Segment>) -> Result<usize> {
+    let mut submode = SubMode::Alpha;
+    let mut prior = SubMode::Alpha;
+    loop {
+        let start = i;
+        while i < cws.len() && cws[i] < 900 {
+            i += 1;
+        }
+        let bytes = text_decode(&cws[start..i], &mut submode, &mut prior);
+        if !bytes.is_empty() {
+            segments.push(Segment::alphanumeric(bytes));
+        }
+        if i >= cws.len() || cws[i] != SHIFT_BYTE {
+            return Ok(i);
+        }
+        match cws.get(i + 1) {
+            Some(&b) if b < 256 => segments.push(Segment::byte(vec![b as u8])),
+            _ => return Err(Error::undecodable("invalid PDF417 byte shift")),
+        }
+        i += 2;
+        if matches!(submode, SubMode::AlphaShift | SubMode::PunctShift) {
+            submode = prior;
+        }
+    }
+}
+
+/// Decode Text compaction codewords, continuing from (and updating) the given
+/// sub-mode state.
+fn text_decode(cws: &[u32], submode_state: &mut SubMode, prior_state: &mut SubMode) -> Vec<u8> {
     // Unpack each codeword into two sub-mode values.
     let mut values = Vec::with_capacity(cws.len() * 2);
     for &cw in cws {
@@ -312,8 +337,8 @@ fn text_decode(cws: &[u32]) -> Vec<u8> {
     }
 
     let mut out = Vec::new();
-    let mut submode = SubMode::Alpha;
-    let mut prior = SubMode::Alpha;
+    let mut submode = *submode_state;
+    let mut prior = *prior_state;
     for &v in &values {
         match submode {
             SubMode::Alpha => {
@@ -392,6 +417,8 @@ fn text_decode(cws: &[u32]) -> Vec<u8> {
             }
         }
     }
+    *submode_state = submode;
+    *prior_state = prior;
     out
 }
 
@@ -564,6 +591,53 @@ mod tests {
             encode_segments(&[Segment::byte(b"abcd".to_vec())]).unwrap(),
             vec![901, 97, 98, 99, 100]
         );
+    }
+
+    /// zint 2.16.0's data codewords for "abc\xE9def": the 913 byte shift interrupts
+    /// the text run without resetting the Lower sub-mode.
+    #[test]
+    fn byte_shift_keeps_text_submode() {
+        let segs = decode_segments(&[7, 810, 32, 913, 233, 94, 179]).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::alphanumeric(b"abc".to_vec()),
+                Segment::byte(vec![0xe9]),
+                Segment::alphanumeric(b"def".to_vec()),
+            ]
+        );
+        // A dangling or out-of-range byte shift is malformed.
+        assert!(decode_segments(&[3, 810, 913]).is_err());
+        assert!(decode_segments(&[4, 810, 913, 256]).is_err());
+    }
+
+    /// Garbage codeword streams must decode or fail cleanly, never panic.
+    #[test]
+    fn garbage_streams_never_panic() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let len = 1 + (next() % 60) as usize;
+            let mut data: Vec<u32> = (0..len)
+                .map(|_| {
+                    // Bias towards the mode latches so every branch is reached.
+                    match next() % 8 {
+                        0 => 900 + (next() % 29) as u32,
+                        1 => [900, 901, 902, 913, 924][(next() % 5) as usize],
+                        _ => (next() % 900) as u32,
+                    }
+                })
+                .collect();
+            if next() % 4 != 0 {
+                data[0] = len as u32;
+            }
+            let _ = decode_segments(&data);
+        }
     }
 
     fn roundtrip(seg: Segment) {

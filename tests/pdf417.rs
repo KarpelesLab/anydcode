@@ -195,3 +195,52 @@ fn reference_codewords_via_public_api() {
     let decoded = Pdf417Decoder::new().decode(&Encoding::Matrix(m)).unwrap();
     assert_eq!(decoded.text().as_deref(), Some("ABCD"));
 }
+
+/// Build a module matrix from a zint `--dump` (one hex row per codeword row, MSB
+/// first), repeating each row to this crate's three-module row height.
+fn matrix_from_zint_dump(rows: &[&str], width: usize) -> anyd::output::BitMatrix {
+    let mut m = anyd::output::BitMatrix::new(width, rows.len() * 3, 2);
+    for (y, hex) in rows.iter().enumerate() {
+        let bytes: Vec<u8> = hex
+            .split_whitespace()
+            .map(|b| u8::from_str_radix(b, 16).unwrap())
+            .collect();
+        for x in 0..width {
+            if (bytes[x / 8] >> (7 - x % 8)) & 1 == 1 {
+                for dy in 0..3 {
+                    m.set(x, y * 3 + dy, true);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Third-party symbol (zint 2.16.0, `zint -b PDF417 -d "abcédef" --dump`). zint omits
+/// the initial Text latch (Text/Alpha is the default mode) and encodes the lone
+/// non-text byte with the 913 "shift to Byte" codeword, after which the Lower
+/// sub-mode is still in effect: data codewords `810 32 913 233 94 179`.
+#[test]
+fn decodes_zint_symbol_with_byte_shift() {
+    let dump = [
+        "FF 54 7D 5F 35 0C 10 50 4F 57 87 F4 52",
+        "FF 54 7E A3 BD 73 97 E4 6F 52 07 F4 52",
+        "FF 54 75 7E 2C 81 D4 41 EE A3 F7 F4 52",
+        "FF 54 6B CF BB 4C 10 C6 4A F3 C7 F4 52",
+        "FF 54 75 C3 3F 57 14 3E CF 5C E7 F4 52",
+        "FF 54 7A F4 2E 19 DB 43 CE BE 87 F4 52",
+        "FF 54 74 EF A3 06 9E F3 6D 3B C7 F4 52",
+        "FF 54 7D 2C 3E 3B 5E 4D 8A FD C7 F4 52",
+    ];
+    let m = matrix_from_zint_dump(&dump, 17 * 2 + 69);
+    let decoded = Pdf417Decoder::new().decode(&Encoding::Matrix(m)).unwrap();
+    assert_eq!(decoded.payload_bytes(), b"abc\xe9def");
+    assert_eq!(
+        decoded.segments,
+        vec![
+            Segment::alphanumeric(b"abc".to_vec()),
+            Segment::byte(vec![0xe9]),
+            Segment::alphanumeric(b"def".to_vec()),
+        ]
+    );
+}

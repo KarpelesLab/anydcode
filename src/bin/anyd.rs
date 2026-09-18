@@ -482,8 +482,30 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
     print_out(&report)
 }
 
+/// Upper bound on the pixels of a PNG accepted for decoding (as [`MAX_PNG_PIXELS`]).
+/// Checked against the header up front, so a file that merely *declares* gigantic
+/// dimensions is refused before the PNG decoder sizes any buffer from them.
+const MAX_DECODE_PIXELS: u64 = 1 << 28;
+
+/// The `(width, height)` an IHDR-first PNG declares, if `bytes` has that shape.
+fn png_declared_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.get(..8)? != b"\x89PNG\r\n\x1a\n" || bytes.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+    let h = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+    Some((w, h))
+}
+
 /// Decode every symbol found in a PNG file's bytes.
 fn decode_png_bytes(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
+    if let Some((w, h)) = png_declared_size(bytes)
+        && u64::from(w) * u64::from(h) > MAX_DECODE_PIXELS
+    {
+        return Err(format!(
+            "PNG is {w}x{h}, over the {MAX_DECODE_PIXELS}-pixel limit"
+        ));
+    }
     let rgba = oxideav_png::decode_png_to_rgba(bytes).map_err(|e| format!("decoding PNG: {e}"))?;
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma = rgba_to_luma(&rgba.data);
@@ -641,6 +663,19 @@ mod tests {
         let found = decode_png_bytes(&bytes).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].text().as_deref(), Some("TRANSPARENT"));
+    }
+
+    /// A header declaring absurd dimensions is an error, never a panic or a huge
+    /// allocation, whatever the (tiny) pixel data says.
+    #[test]
+    fn png_with_gigantic_declared_size_is_rejected() {
+        // 0x7fffffff x 0x7fffffff, 16-bit RGBA, with a valid 10-byte IDAT.
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\x7f\xff\xff\xff\x7f\xff\xff\xff\x10\x06\0\0\0\x44\x59\xd7\x25\
+            \0\0\0\x0bIDAT\x78\x9c\x63\x60\x80\x01\0\0\x0a\0\x01\x7f\x80\x74\x5e\
+            \0\0\0\0IEND\xae\x42\x60\x82";
+        assert!(decode_png_bytes(png).is_err());
+        assert!(decode_png_bytes(b"").is_err());
+        assert!(decode_png_bytes(b"\x89PNG\r\n\x1a\n").is_err());
     }
 
     #[test]

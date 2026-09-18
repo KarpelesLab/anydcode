@@ -140,3 +140,11 @@ required-features = ["cli"]
 [[example]]
 name = "eanvotedebug"
 required-features = ["cli"]
+
+[[example]]
+name = "scantime"
+required-features = ["cli"]
+
+[[example]]
+name = "liveeval"
+required-features = ["scan", "encode", "all-codes"]

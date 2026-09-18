@@ -29,7 +29,7 @@ use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
 use crate::imgproc::cluster::CenterIndex;
-use crate::imgproc::components::{extreme_quad, flood_region};
+use crate::imgproc::components::{extreme_quad, flood_region_bounded};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::{sample_bilinear, sample_grid};
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
@@ -504,10 +504,17 @@ fn ring_corners(bin: &BinaryImage, eye: &Bullseye) -> Option<[(f32, f32); 4]> {
             in_dark = false;
         }
     }
-    let pixels = flood_region(bin, seed?, false);
     // Sanity: the annulus must span roughly the expected width — a leak through a
-    // broken ring floods the page background and fails this immediately.
+    // broken ring floods the page background and fails this immediately (the flood
+    // itself gives up once it outgrows the limit, rather than collecting the page).
     let span = if eye.full { 11.0 } else { 7.0 } * eye.module;
+    let pixels = flood_region_bounded(
+        bin,
+        seed?,
+        false,
+        (span * 1.5) as usize,
+        (span * 3.0) as usize,
+    );
     let (min_x, max_x) = pixels.iter().fold((usize::MAX, 0), |(lo, hi), &(px, _)| {
         (lo.min(px), hi.max(px))
     });

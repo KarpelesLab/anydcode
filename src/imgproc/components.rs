@@ -148,6 +148,21 @@ pub fn connected_components(img: &BinaryImage, conn: Connectivity) -> Vec<Compon
 /// a finder ring, a bullseye ring, an enclosed quiet annulus — flood just that
 /// region and keep the pixels for geometry extraction.
 pub fn flood_region(img: &BinaryImage, seed: (usize, usize), value: bool) -> Vec<(usize, usize)> {
+    flood_region_bounded(img, seed, value, usize::MAX, usize::MAX)
+}
+
+/// [`flood_region`] for a caller that only wants a region spanning at most `max_dx`
+/// pixels in x and `max_dy` in y (`max − min` of its pixel coordinates): gives up,
+/// returning empty, as soon as the region outgrows either. A fiducial flood that leaks
+/// — through a broken ring, or seeded on noise — otherwise collects the whole page
+/// background, megabytes of pixels per attempt, only for the caller to discard it.
+pub fn flood_region_bounded(
+    img: &BinaryImage,
+    seed: (usize, usize),
+    value: bool,
+    max_dx: usize,
+    max_dy: usize,
+) -> Vec<(usize, usize)> {
     let (w, h) = (img.width(), img.height());
     if seed.0 >= w || seed.1 >= h || img.get(seed.0, seed.1) != value {
         return Vec::new();
@@ -155,8 +170,14 @@ pub fn flood_region(img: &BinaryImage, seed: (usize, usize), value: bool) -> Vec
     let mut visited = vec![false; w * h];
     let mut stack = vec![seed];
     let mut out = Vec::new();
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (seed.0, seed.0, seed.1, seed.1);
     visited[seed.1 * w + seed.0] = true;
     while let Some((x, y)) = stack.pop() {
+        (min_x, max_x) = (min_x.min(x), max_x.max(x));
+        (min_y, max_y) = (min_y.min(y), max_y.max(y));
+        if max_x - min_x > max_dx || max_y - min_y > max_dy {
+            return Vec::new();
+        }
         out.push((x, y));
         for dy in -1i32..=1 {
             for dx in -1i32..=1 {
@@ -301,6 +322,67 @@ mod tests {
         let eight = connected_components(&img, Connectivity::Eight);
         assert_eq!(eight.len(), 1);
         assert_eq!(eight[0].area, 2);
+    }
+
+    #[test]
+    fn one_pixel_images() {
+        let mut img = BinaryImage::new(1, 1);
+        assert!(connected_components(&img, Connectivity::Eight).is_empty());
+        assert_eq!(flood_region(&img, (0, 0), false), vec![(0, 0)]);
+        assert!(flood_region(&img, (0, 0), true).is_empty());
+        img.set(0, 0, true);
+        let comps = connected_components(&img, Connectivity::Four);
+        assert_eq!(comps.len(), 1);
+        assert_eq!((comps[0].area, comps[0].centroid), (1, (0.0, 0.0)));
+        assert_eq!(flood_region(&img, (0, 0), true), vec![(0, 0)]);
+        // Seeds outside the image are empty, not an index panic.
+        assert!(flood_region(&img, (1, 0), true).is_empty());
+        assert!(flood_region(&img, (usize::MAX, usize::MAX), true).is_empty());
+    }
+
+    #[test]
+    fn bounded_flood_gives_up_on_a_leak() {
+        // A 3×3 blob joined by a one-pixel bridge to a long bar.
+        let mut img = BinaryImage::new(40, 12);
+        draw_rect(&mut img, 2, 2, 5, 5);
+        draw_rect(&mut img, 5, 3, 8, 4); // bridge
+        draw_rect(&mut img, 8, 0, 40, 12);
+        let all = flood_region(&img, (3, 3), true);
+        assert_eq!(all.len(), 9 + 3 + 32 * 12);
+        // Same region when the bounds allow it; empty as soon as either is outgrown.
+        assert_eq!(
+            flood_region_bounded(&img, (3, 3), true, 37, 11).len(),
+            all.len()
+        );
+        assert!(flood_region_bounded(&img, (3, 3), true, 36, 11).is_empty());
+        assert!(flood_region_bounded(&img, (3, 3), true, 37, 10).is_empty());
+        assert!(flood_region_bounded(&img, (3, 3), true, 0, 0).is_empty());
+        // An isolated blob inside its bounds is returned whole.
+        let mut img = BinaryImage::new(10, 10);
+        draw_rect(&mut img, 4, 4, 7, 6);
+        assert_eq!(flood_region_bounded(&img, (5, 5), true, 2, 1).len(), 6);
+        assert!(flood_region_bounded(&img, (5, 5), true, 1, 1).is_empty());
+    }
+
+    #[test]
+    fn extreme_quad_of_degenerate_clouds() {
+        // Too few pixels, a single repeated pixel, and collinear clouds (horizontal,
+        // vertical, diagonal) carry no quad.
+        assert!(extreme_quad(&[]).is_none());
+        assert!(extreme_quad(&[(1, 1), (2, 2), (3, 3)]).is_none());
+        assert!(extreme_quad(&[(5, 5); 10]).is_none());
+        let row: Vec<(usize, usize)> = (0..20).map(|x| (x, 3)).collect();
+        assert!(extreme_quad(&row).is_none());
+        let col: Vec<(usize, usize)> = (0..20).map(|y| (3, y)).collect();
+        assert!(extreme_quad(&col).is_none());
+        let diag: Vec<(usize, usize)> = (0..20).map(|i| (i, i)).collect();
+        assert!(extreme_quad(&diag).is_none());
+        // A filled square yields its four outer corners.
+        let square: Vec<(usize, usize)> = (0..16).map(|i| (10 + i % 4, 20 + i / 4)).collect();
+        let quad = extreme_quad(&square).expect("square has corners");
+        for corner in [(10.0, 20.0), (14.0, 20.0), (14.0, 24.0), (10.0, 24.0)] {
+            assert!(quad.contains(&corner), "{corner:?} missing from {quad:?}");
+        }
     }
 
     #[test]

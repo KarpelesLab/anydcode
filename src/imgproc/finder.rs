@@ -6,7 +6,7 @@ use crate::imgproc::binary::BinaryImage;
 #[cfg(any(feature = "microqr", feature = "rmqr"))]
 use crate::imgproc::cluster::CenterIndex;
 #[cfg(any(feature = "microqr", feature = "rmqr"))]
-use crate::imgproc::components::{extreme_quad, flood_region};
+use crate::imgproc::components::{extreme_quad, flood_region_bounded};
 use alloc::vec::Vec;
 
 /// Check that five run lengths match the finder 1:1:3:1:1 ratio; return the module
@@ -255,12 +255,20 @@ pub(crate) fn finder_ring_corners(bin: &BinaryImage, finder: &Finder) -> Option<
             break;
         }
     }
-    let pixels = flood_region(bin, seed?, true);
+    // Sanity: the ring must span ~7 modules. A flood that outgrows that (twice over
+    // in y, where the row-measured module says less) is abandoned on the spot: on a
+    // noisy frame it would otherwise collect every connected dark pixel of the image.
+    let span = 7.0 * finder.module;
+    let pixels = flood_region_bounded(
+        bin,
+        seed?,
+        true,
+        (span * 1.5) as usize,
+        (span * 3.0) as usize,
+    );
     if pixels.is_empty() {
         return None;
     }
-    // Sanity: the ring must span ~7 modules.
-    let span = 7.0 * finder.module;
     let (min_x, max_x) = pixels.iter().fold((usize::MAX, 0), |(lo, hi), &(px, _)| {
         (lo.min(px), hi.max(px))
     });

@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
-use crate::imgproc::components::flood_region;
+use crate::imgproc::components::flood_region_bounded;
 use crate::imgproc::finder::{find_finders, finder_ring_corners, shoelace};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::sample_bilinear;
@@ -189,7 +189,8 @@ fn refine_with_sub_dot(
             continue;
         }
         let seed = (px.round() as usize, py.round() as usize);
-        let pixels = flood_region(bin, seed, true);
+        // Bounded: a probe landing on a large dark area must not flood all of it.
+        let pixels = flood_region_bounded(bin, seed, true, max_span as usize, max_span as usize);
         if pixels.is_empty() || pixels.len() > (max_span * max_span) as usize {
             continue;
         }

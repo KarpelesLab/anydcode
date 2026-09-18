@@ -141,18 +141,21 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
         }
         for located in cands {
             let thr = located.threshold(&integral);
+            // A grid that is a QR — even one sampled slightly wrongly — shows finders
+            // and timing tracks where a QR has them; one built on false finders in
+            // noise, print or a checkerboard shows chance. Sampling and decoding a whole
+            // grid is not free (false triples tend to imply large versions, and every
+            // module of the adaptive passes is a windowed 16-tap vote), and the recovery
+            // machinery below costs far more, so the fixed patterns are read first and
+            // nothing more is spent on a grid that lacks them.
+            if !plausible_grid(&located.sample_fixed(frame, &thr)) {
+                continue;
+            }
             let matrix = located.sample(frame, &thr);
             match decoder.decode_matrix(&matrix) {
                 Ok(sym) => return Ok(sym),
                 Err(e) => {
                     last = e;
-                    // Everything below is the expensive recovery machinery, and it only
-                    // makes sense for a grid that *is* a QR sampled slightly wrongly. A
-                    // false finder triple in text yields a grid whose finder corners and
-                    // timing tracks are noise; spend nothing more on it.
-                    if !plausible_grid(&matrix) {
-                        continue;
-                    }
                     // The single-homography sample failed. If this symbol carries
                     // interior alignment patterns (version ≥ 2), fit a smooth non-planar
                     // (thin-plate-spline) warp through every finder and alignment anchor
@@ -628,7 +631,15 @@ impl Located {
     /// Sample every module center into a clean [`BitMatrix`] through the planar
     /// projection.
     fn sample(&self, frame: &GrayFrame<'_>, thr: &ModuleThreshold<'_>) -> BitMatrix {
-        self.sample_map(frame, thr, |x, y| self.projection.map(x, y))
+        self.sample_map(frame, thr, false, |x, y| self.projection.map(x, y))
+    }
+
+    /// Sample only the fixed patterns — the three finder corners with their separators
+    /// and the two timing tracks — leaving every other module light. A few hundred
+    /// modules instead of up to thirty thousand: enough for [`plausible_grid`] to tell a
+    /// QR from a false finder triple before the whole grid is paid for.
+    fn sample_fixed(&self, frame: &GrayFrame<'_>, thr: &ModuleThreshold<'_>) -> BitMatrix {
+        self.sample_map(frame, thr, true, |x, y| self.projection.map(x, y))
     }
 
     /// Sample every module center through a non-planar [`ThinPlateSpline`] warp instead
@@ -640,7 +651,7 @@ impl Located {
         thr: &ModuleThreshold<'_>,
         warp: &ThinPlateSpline,
     ) -> BitMatrix {
-        self.sample_map(frame, thr, |x, y| warp.map(x, y))
+        self.sample_map(frame, thr, false, |x, y| warp.map(x, y))
     }
 
     /// Sample every module centre `(col+0.5, row+0.5)` into a clean [`BitMatrix`],
@@ -661,6 +672,7 @@ impl Located {
         &self,
         frame: &GrayFrame<'_>,
         thr: &ModuleThreshold<'_>,
+        fixed_only: bool,
         map: impl Fn(f64, f64) -> (f64, f64),
     ) -> BitMatrix {
         let dim = self.dimension;
@@ -676,6 +688,13 @@ impl Located {
         let mut matrix = BitMatrix::new(dim, dim, QUIET_ZONE);
         for my in 0..dim {
             for mx in 0..dim {
+                if fixed_only {
+                    let edge = |m: usize| m < 8 || m + 8 >= dim;
+                    let finder = edge(mx) && edge(my) && !(mx + 8 >= dim && my + 8 >= dim);
+                    if !(finder || mx == 6 || my == 6) {
+                        continue;
+                    }
+                }
                 let gx = mx as f64 + 0.5;
                 let gy = my as f64 + 0.5;
                 let dark = match *thr {

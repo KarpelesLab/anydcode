@@ -287,7 +287,7 @@ runs (`cargo run --release --example liveeval`):
 | | read rate | wrong values | decode time / frame |
 |---|---:|---:|---:|
 | 1D (EAN-13, Code 128, Code 39, ITF) | 100% (240/240) | 0 | ~50 ms crop batch |
-| 2D (QR, Data Matrix, Aztec, PDF417) | 95% (228/240) | 0 | ~120 ms whole-frame pass |
+| 2D (QR, Data Matrix, Aztec, PDF417) | 95% (228/240) | 0 | ~80 ms whole-frame pass |
 
 QR and Data Matrix read 60/60, Aztec 58/60; PDF417 (50/60) is the weak one — its sampler
 is affine-only and wants ≥3 px modules. `tests/live_pipeline.rs` pins this behaviour in CI, including the things that

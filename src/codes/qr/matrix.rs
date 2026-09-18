@@ -272,11 +272,7 @@ impl<'a> Canvas<'a> {
         }
 
         // Rule 4: deviation of the dark-module proportion from 50%.
-        let dark = self.grid.count_dark() as u32;
-        let total = (s * s) as u32;
-        let percent = dark * 100 / total;
-        let k = (percent as i32 - 50).unsigned_abs() / 5;
-        score += k * 10;
+        score += balance_penalty(self.grid.count_dark() as u32, (s * s) as u32);
 
         score
     }
@@ -313,6 +309,12 @@ impl<'a> Canvas<'a> {
             (None, None) => None,
         }
     }
+}
+
+/// Penalty rule 4: 10 points for every full 5% step by which the dark-module
+/// proportion deviates from 50%, in either direction alike.
+fn balance_penalty(dark: u32, total: u32) -> u32 {
+    (dark * 2).abs_diff(total) * 10 / total * 10
 }
 
 /// Iterator over the data-module coordinates of a version, in placement order.
@@ -466,6 +468,22 @@ mod tests {
                 assert_eq!(decode_format(corrupted), Some((lvl, mask)));
             }
         }
+    }
+
+    /// Rule 4 is symmetric about 50%: 40.5% dark is 9.5% off, one full 5% step, just
+    /// like 59.5% (flooring the percentage first used to score the former as two).
+    #[test]
+    fn balance_penalty_is_symmetric() {
+        assert_eq!(balance_penalty(500, 1000), 0);
+        assert_eq!(balance_penalty(549, 1000), 0);
+        assert_eq!(balance_penalty(451, 1000), 0);
+        assert_eq!(balance_penalty(550, 1000), 10);
+        assert_eq!(balance_penalty(450, 1000), 10);
+        assert_eq!(balance_penalty(595, 1000), 10);
+        assert_eq!(balance_penalty(405, 1000), 10);
+        assert_eq!(balance_penalty(400, 1000), 20);
+        assert_eq!(balance_penalty(0, 1000), 100);
+        assert_eq!(balance_penalty(1000, 1000), 100);
     }
 
     #[test]

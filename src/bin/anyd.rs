@@ -7,7 +7,7 @@
 //! Usage:
 //!   anyd encode <symbology> <data> [--format png|unicode|svg] [--out FILE]
 //!                                  [--scale N] [--ec L|M|Q|H|0-8] [--invert]
-//!   anyd decode <image.png> [--symbology <name>]
+//!   anyd decode <image.png>
 //!   anyd list
 //!   anyd help
 
@@ -56,30 +56,53 @@ struct Opts {
     options: BTreeMap<String, String>,
 }
 
-fn parse_opts(args: &[String]) -> Opts {
+/// `value_opts` names the options that consume a value, `flag_opts` the bare flags;
+/// anything else is rejected so a typo cannot be silently ignored. A lone `--` ends
+/// option parsing (the rest is positional, e.g. data that itself starts with `--`).
+fn parse_opts(args: &[String], value_opts: &[&str], flag_opts: &[&str]) -> Result<Opts, String> {
     let mut positional = Vec::new();
     let mut options = BTreeMap::new();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if let Some(rest) = a.strip_prefix("--") {
-            if let Some((k, v)) = rest.split_once('=') {
-                options.insert(k.to_string(), v.to_string());
-            } else if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                options.insert(rest.to_string(), args[i + 1].clone());
-                i += 1;
-            } else {
-                options.insert(rest.to_string(), "true".to_string());
-            }
-        } else {
-            positional.push(a.clone());
-        }
         i += 1;
+        let Some(rest) = a.strip_prefix("--") else {
+            positional.push(a.clone());
+            continue;
+        };
+        if rest.is_empty() {
+            positional.extend_from_slice(&args[i..]);
+            break;
+        }
+        let (key, inline) = match rest.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (rest, None),
+        };
+        if flag_opts.contains(&key) {
+            if inline.is_some() {
+                return Err(format!("option --{key} does not take a value"));
+            }
+            options.insert(key.to_string(), "true".to_string());
+        } else if value_opts.contains(&key) {
+            let value = match inline {
+                Some(v) => v.to_string(),
+                None => {
+                    let v = args
+                        .get(i)
+                        .ok_or_else(|| format!("option --{key} needs a value"))?;
+                    i += 1;
+                    v.clone()
+                }
+            };
+            options.insert(key.to_string(), value);
+        } else {
+            return Err(format!("unknown option '--{key}'"));
+        }
     }
-    Opts {
+    Ok(Opts {
         positional,
         options,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +110,7 @@ fn parse_opts(args: &[String]) -> Opts {
 // ---------------------------------------------------------------------------
 
 fn cmd_encode(args: &[String]) -> Result<(), String> {
-    let opts = parse_opts(args);
+    let opts = parse_opts(args, &["format", "out", "scale", "ec"], &["invert"])?;
     if opts.positional.len() < 2 {
         return Err("usage: anyd encode <symbology> <data> [--format ...] [--out ...]".into());
     }
@@ -115,7 +138,9 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
         "png" => {
             let bytes = render_png(&encoding, scale)?;
             match out {
-                Some(path) => std::fs::write(path, &bytes).map_err(|e| e.to_string())?,
+                Some(path) => {
+                    std::fs::write(path, &bytes).map_err(|e| format!("writing {path}: {e}"))?
+                }
                 None => return Err("--out FILE is required for --format png".into()),
             }
             eprintln!("wrote {} bytes to {}", bytes.len(), out.unwrap());
@@ -135,7 +160,7 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
 
 fn write_text(out: Option<&String>, s: &str) -> Result<(), String> {
     match out {
-        Some(path) => std::fs::write(path, s).map_err(|e| e.to_string()),
+        Some(path) => std::fs::write(path, s).map_err(|e| format!("writing {path}: {e}")),
         None => {
             println!("{s}");
             Ok(())
@@ -396,7 +421,7 @@ fn render_svg(encoding: &Encoding, scale: usize) -> String {
 // ---------------------------------------------------------------------------
 
 fn cmd_decode(args: &[String]) -> Result<(), String> {
-    let opts = parse_opts(args);
+    let opts = parse_opts(args, &[], &[])?;
     let path = opts
         .positional
         .first()
@@ -488,4 +513,43 @@ fn print_symbologies() {
     println!(
         "\nDecodable from PNG: QR, Data Matrix, PDF417, and 1D (Code 128, EAN/UPC, Code 39/93, ITF, Codabar)."
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn flag_does_not_swallow_positional() {
+        let opts =
+            parse_opts(&args(&["qr", "--invert", "HELLO"]), &["scale"], &["invert"]).unwrap();
+        assert_eq!(opts.positional, ["qr", "HELLO"]);
+        assert!(opts.options.contains_key("invert"));
+    }
+
+    #[test]
+    fn double_dash_ends_options() {
+        let opts = parse_opts(
+            &args(&["code128", "--scale", "3", "--", "--5"]),
+            &["scale"],
+            &["invert"],
+        )
+        .unwrap();
+        assert_eq!(opts.positional, ["code128", "--5"]);
+        assert_eq!(opts.options.get("scale").map(String::as_str), Some("3"));
+    }
+
+    #[test]
+    fn unknown_and_malformed_options_are_errors() {
+        let parse = |list: &[&str]| parse_opts(&args(list), &["scale"], &["invert"]);
+        assert!(parse(&["qr", "x", "--sacle", "3"]).is_err());
+        assert!(parse(&["qr", "x", "--scale"]).is_err());
+        assert!(parse(&["qr", "x", "--invert=1"]).is_err());
+        let opts = parse(&["qr", "x", "--scale=4"]).unwrap();
+        assert_eq!(opts.options.get("scale").map(String::as_str), Some("4"));
+    }
 }

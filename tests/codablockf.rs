@@ -98,3 +98,33 @@ fn rejects_non_codablockf_symbol() {
     let bogus = Symbol::new(Symbology::Code128, Vec::new(), SymbolMeta::Generic);
     assert!(enc.encode(&bogus).is_err());
 }
+
+/// Extended ASCII via FNC4 (zint 2.16.0, `zint -b CODABLOCKF --binary --esc -d
+/// 'A\xE9B \xE0\xE1\xE2\xE3\xE4\xE5x\xE6' --dump`): single-FNC4 shifts and a
+/// double-FNC4 latched run. K1/K2 are computed over the extended bytes, so the symbol
+/// only validates when FNC4 is honoured.
+#[test]
+fn zint_extended_ascii_fnc4() {
+    let dump = [
+        "D0 97 BA 13 51 8B DD 0D 22 C4 26 C7 58",
+        "D0 97 BB 12 6C CB DD 43 2E F7 A8 C7 58",
+        "D0 97 BA CE 5E E9 61 7B A4 34 46 C7 58",
+        "D0 97 BA 6E 5E E8 59 7B A1 37 68 C7 58",
+        "D0 97 BA 67 5E EB 21 E4 AE F6 F6 C7 58",
+        "D0 97 BA E6 5E EB 09 84 A2 C6 EE C7 58",
+    ];
+    let width = 9 * 11 + 2;
+    let mut m = anyd::output::BitMatrix::new(width, dump.len(), 10);
+    for (y, hex) in dump.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, width).iter().enumerate() {
+            m.set(x, y, b);
+        }
+    }
+    let encoding = Encoding::Matrix(m);
+    let decoded = CodablockFDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(
+        decoded.payload_bytes(),
+        b"A\xE9B \xE0\xE1\xE2\xE3\xE4\xE5x\xE6"
+    );
+    assert_eq!(CodablockFEncoder::new().encode(&decoded).unwrap(), encoding);
+}

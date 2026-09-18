@@ -190,6 +190,7 @@ pub(crate) fn reconstruct_payload(
     columns: usize,
 ) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
+    let mut fnc4 = Fnc4::default();
     for (r, vals) in row_syms.iter().enumerate() {
         let mut set = sel_set(vals[1])?;
         let mut data_end = columns - 2; // exclusive; excludes C128 check and Stop
@@ -211,21 +212,21 @@ pub(crate) fn reconstruct_payload(
                     _ => return Err(Error::undecodable("invalid symbol in Codablock F set C")),
                 },
                 Set::A => match v {
-                    0..=95 => bytes.push(if v < 64 { v + 32 } else { v - 64 }),
+                    0..=95 => bytes.push(fnc4.apply(if v < 64 { v + 32 } else { v - 64 })),
                     96 | 97 => {}
                     98 => shift = Some(Set::B),
                     99 => set = Set::C,
                     100 => set = Set::B,
-                    101 => {} // FNC4
+                    101 => fnc4.toggle(), // FNC4
                     102 => {}
                     _ => return Err(Error::undecodable("invalid symbol in Codablock F set A")),
                 },
                 Set::B => match v {
-                    0..=95 => bytes.push(v + 32),
+                    0..=95 => bytes.push(fnc4.apply(v + 32)),
                     96 | 97 => {}
                     98 => shift = Some(Set::A),
                     99 => set = Set::C,
-                    100 => {} // FNC4
+                    100 => fnc4.toggle(), // FNC4
                     101 => set = Set::A,
                     102 => {}
                     _ => return Err(Error::undecodable("invalid symbol in Codablock F set B")),
@@ -234,4 +235,32 @@ pub(crate) fn reconstruct_payload(
         }
     }
     Ok(bytes)
+}
+
+/// Code 128 extended-ASCII (FNC4) state: a single FNC4 adds 128 to the next data
+/// character, two in a row latch (or unlatch) that for all following characters, and
+/// within a latched run a single FNC4 exempts the next character.
+#[derive(Default)]
+struct Fnc4 {
+    latched: bool,
+    shift: bool,
+}
+
+impl Fnc4 {
+    /// Record an FNC4 symbol.
+    fn toggle(&mut self) {
+        if self.shift {
+            self.latched = !self.latched;
+            self.shift = false;
+        } else {
+            self.shift = true;
+        }
+    }
+
+    /// Apply the pending state to a set A / set B data byte.
+    fn apply(&mut self, byte: u8) -> u8 {
+        let extended = self.latched != self.shift;
+        self.shift = false;
+        if extended { byte | 0x80 } else { byte }
+    }
 }

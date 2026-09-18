@@ -166,3 +166,20 @@ fn zint_check_character_106() {
         }
     }
 }
+
+/// Extended ASCII via FNC4 (zint 2.16.0, `--binary --esc`): a single FNC4 shifts one
+/// character by 128 (`A\xE9B`), a double FNC4 latches a run of them and a single FNC4
+/// inside the run exempts the plain `x` (`\xE0\xE1\xE2\xE3\xE4\xE5x\xE6`).
+#[test]
+fn zint_extended_ascii_fnc4() {
+    let decoded = decode_zint_dump(&["E5 32 6B 9D 08 BC B7 4E 34", "CD 2F 65 EC BD 9D B4 2E 64"]);
+    assert_eq!(decoded.payload_bytes(), b"A\xE9B");
+
+    let decoded = decode_zint_dump(&[
+        "E5 46 68 45 79 A1 16 9E 34",
+        "CD 42 2D E5 08 BD 34 22 64",
+        "D9 7B 28 45 37 86 D4 22 4C",
+        "85 4F 65 EC BD B3 75 CE F4",
+    ]);
+    assert_eq!(decoded.payload_bytes(), b"\xE0\xE1\xE2\xE3\xE4\xE5x\xE6");
+}

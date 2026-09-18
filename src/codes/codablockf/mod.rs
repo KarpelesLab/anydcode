@@ -27,8 +27,9 @@
 //! The fresh-input layout ([`CodablockFEncoder::build`]) uses Code 128 sets A and B
 //! (no Code C numeric compression, no extended-ASCII FNC4) for bytes `0..=127`, chooses
 //! a roughly-square column count automatically, and always appends a dedicated final row
-//! for the K1/K2 checks. The decoder is more general: it validates any A/B/C row layout,
-//! so it can read symbols (e.g. zint's) that pack the checks into a data row.
+//! for the K1/K2 checks. The decoder is more general: it validates any A/B/C row layout
+//! and honours FNC4 extended ASCII, so it can read symbols (e.g. zint's) that pack the
+//! checks into a data row or carry bytes above 127.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

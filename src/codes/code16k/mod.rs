@@ -29,7 +29,8 @@
 //!
 //! The fresh-input planner ([`Code16kEncoder::build`]) uses Code 128 sets A and B only
 //! (no Code C numeric compression) and supports bytes `0..=127`; the decoder handles
-//! Code C, FNC1/GS1 and shifts so it can also read symbols that use them.
+//! Code C, FNC1/GS1, shifts, the implied-shift start modes and FNC4 extended ASCII so
+//! it can also read symbols that use them.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

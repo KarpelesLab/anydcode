@@ -127,6 +127,7 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     };
     let mut bytes = Vec::new();
     let mut shift: Option<Set> = None;
+    let mut fnc4 = Fnc4::default();
 
     for &v in &values[1..] {
         if v == PAD {
@@ -150,21 +151,21 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set C")),
             },
             Set::A => match v {
-                0..=95 => bytes.push(if v < 64 { v + 32 } else { v - 64 }),
+                0..=95 => bytes.push(fnc4.apply(if v < 64 { v + 32 } else { v - 64 })),
                 96 | 97 => {} // FNC3 / FNC2
                 SHIFT => shift = Some(Set::B),
                 CODE_C => set = Set::C,
                 CODE_B => set = Set::B,
-                101 => {} // FNC4 in Set A
+                101 => fnc4.toggle(), // FNC4 in Set A
                 FNC1 => {}
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set A")),
             },
             Set::B => match v {
-                0..=95 => bytes.push(v + 32),
+                0..=95 => bytes.push(fnc4.apply(v + 32)),
                 96 | 97 => {} // FNC3 / FNC2
                 SHIFT => shift = Some(Set::A),
                 CODE_C => set = Set::C,
-                100 => {} // FNC4 in Set B
+                100 => fnc4.toggle(), // FNC4 in Set B
                 CODE_A => set = Set::A,
                 FNC1 => {}
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set B")),
@@ -177,6 +178,34 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     } else {
         vec![Segment::byte(bytes)]
     })
+}
+
+/// Code 128 extended-ASCII (FNC4) state: a single FNC4 adds 128 to the next data
+/// character, two in a row latch (or unlatch) that for all following characters, and
+/// within a latched run a single FNC4 exempts the next character.
+#[derive(Default)]
+struct Fnc4 {
+    latched: bool,
+    shift: bool,
+}
+
+impl Fnc4 {
+    /// Record an FNC4 symbol.
+    fn toggle(&mut self) {
+        if self.shift {
+            self.latched = !self.latched;
+            self.shift = false;
+        } else {
+            self.shift = true;
+        }
+    }
+
+    /// Apply the pending state to a set A / set B data byte.
+    fn apply(&mut self, byte: u8) -> u8 {
+        let extended = self.latched != self.shift;
+        self.shift = false;
+        if extended { byte | 0x80 } else { byte }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

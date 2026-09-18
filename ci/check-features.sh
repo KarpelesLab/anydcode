@@ -18,7 +18,8 @@ check() {
 
 if [ "$#" -eq 0 ]; then
   for f in "" alloc std encode decode scan all-codes "all-codes,encode" \
-           "all-codes,alloc,encode" "all-codes,decode" "all-codes,std,encode"; do
+           "all-codes,alloc,encode" "all-codes,decode" "all-codes,std,encode" \
+           "all-codes,alloc,encode,decode" "all-codes,std,decode" "all-codes,scan"; do
     check "$f"
   done
 fi

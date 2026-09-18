@@ -198,10 +198,9 @@ fn kanji_value(hi: u8, lo: u8) -> Option<u32> {
 
 /// Write one segment's 3-bit mode indicator, character count and payload bits.
 fn write_segment(w: &mut BitWriter, seg: &Segment, size: RmqrSize) -> Result<()> {
-    let mv = mode_value(&seg.mode).ok_or_else(|| Error::invalid_data("ECI unsupported in rMQR"))?;
-    w.push(mv as u32, 3);
-    let ccb = char_count_bits(size, &seg.mode)
-        .ok_or_else(|| Error::invalid_data("ECI unsupported in rMQR"))?;
+    w.push(mode_value(&seg.mode) as u32, 3);
+    // ECI carries its assignment number instead of a character count.
+    let ccb = char_count_bits(size, &seg.mode).unwrap_or(0);
     match &seg.mode {
         Mode::Numeric => {
             w.push(seg.data.len() as u32, ccb);
@@ -254,7 +253,14 @@ fn write_segment(w: &mut BitWriter, seg: &Segment, size: RmqrSize) -> Result<()>
                 w.push(v, 13);
             }
         }
-        Mode::Eci(_) => return Err(Error::invalid_data("ECI unsupported in rMQR")),
+        // The assignment number, in the variable-length form QR uses; the
+        // following segment carries the data.
+        Mode::Eci(n) => match *n {
+            0..128 => w.push(*n, 8),
+            128..16384 => w.push(0b10 << 14 | *n, 16),
+            16384..1_000_000 => w.push(0b110 << 21 | *n, 24),
+            _ => return Err(Error::invalid_data("ECI assignment out of range")),
+        },
     }
     Ok(())
 }

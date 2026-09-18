@@ -190,16 +190,24 @@ fn kanji_bytes(v: u32) -> (u8, u8) {
     ((code >> 8) as u8, (code & 0xFF) as u8)
 }
 
-/// Parse the corrected content bits into segments, stopping at the terminator (an
-/// invalid 3-bit mode indicator) or when the remaining bits are exhausted.
+/// Parse the corrected content bits into segments, stopping at the terminator (the
+/// `000` mode indicator) or when the remaining bits are exhausted.
 fn parse_segments(content: &[bool], size: RmqrSize) -> Result<Vec<Segment>> {
     let mut r = BitReader::new(content);
     let mut segments = Vec::new();
 
     while let Some(mv) = r.read(3) {
-        let Some(mode) = mode_from_value(mv as u8) else {
-            break; // terminator / padding
-        };
+        if mv == 0 {
+            break; // terminator
+        }
+        let mode = mode_from_value(mv as u8).ok_or(Error::Unsupported {
+            what: "rMQR FNC1 modes",
+        })?;
+        if let Mode::Eci(_) = mode {
+            // No character count: the assignment number follows directly.
+            segments.push(Segment::eci(read_eci_assignment(&mut r)?));
+            continue;
+        }
         let ccb = char_count_bits(size, &mode).unwrap();
         let Some(count) = r.read(ccb) else { break };
         // A zero count is an (empty) segment: only the `000` indicator terminates.
@@ -264,10 +272,26 @@ fn parse_segments(content: &[bool], size: RmqrSize) -> Result<Vec<Segment>> {
                 }
                 segments.push(Segment::kanji(out));
             }
-            Mode::Eci(_) => break,
+            Mode::Eci(_) => unreachable!("handled above"),
         }
     }
     Ok(segments)
+}
+
+/// The variable-length (1–3 byte) ECI assignment number, as in QR.
+fn read_eci_assignment(r: &mut BitReader<'_>) -> Result<u32> {
+    let first = r.read(8).ok_or_else(trunc)?;
+    if first & 0x80 == 0 {
+        Ok(first)
+    } else if first & 0xC0 == 0x80 {
+        let rest = r.read(8).ok_or_else(trunc)?;
+        Ok(((first & 0x3F) << 8) | rest)
+    } else if first & 0xE0 == 0xC0 {
+        let rest = r.read(16).ok_or_else(trunc)?;
+        Ok(((first & 0x1F) << 16) | rest)
+    } else {
+        Err(Error::undecodable("invalid ECI assignment"))
+    }
 }
 
 fn trunc() -> Error {

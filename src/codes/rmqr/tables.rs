@@ -376,24 +376,27 @@ pub fn char_count_bits(size: RmqrSize, mode: &Mode) -> Option<usize> {
     })
 }
 
-/// The 3-bit rMQR mode indicator value for a data mode.
-pub fn mode_value(mode: &Mode) -> Option<u8> {
-    Some(match mode {
+/// The 3-bit rMQR mode indicator value for a mode.
+pub fn mode_value(mode: &Mode) -> u8 {
+    match mode {
         Mode::Numeric => 0b001,
         Mode::Alphanumeric => 0b010,
         Mode::Byte => 0b011,
         Mode::Kanji => 0b100,
-        Mode::Eci(_) => return None,
-    })
+        Mode::Eci(_) => 0b111,
+    }
 }
 
-/// Recover a data mode from a 3-bit rMQR mode indicator value.
+/// Recover a mode (ECI without its assignment number) from a 3-bit rMQR mode
+/// indicator value. The terminator (`000`) and the FNC1 indicators (`101`, `110`)
+/// return `None`.
 pub fn mode_from_value(v: u8) -> Option<Mode> {
     Some(match v {
         0b001 => Mode::Numeric,
         0b010 => Mode::Alphanumeric,
         0b011 => Mode::Byte,
         0b100 => Mode::Kanji,
+        0b111 => Mode::Eci(0),
         _ => return None,
     })
 }

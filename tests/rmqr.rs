@@ -334,3 +334,54 @@ fn kanji_roundtrips_and_rejects_bad_trail_byte() {
     let bad = enc.build(vec![Segment::kanji(vec![0x82, 0x00])], RmqrEcLevel::M);
     assert!(bad.is_err());
 }
+
+/// Parse a flattened `0`/`1` reference bitmap.
+fn matrix_from(flat: &str, w: usize, h: usize) -> BitMatrix {
+    assert_eq!(flat.len(), w * h);
+    let mut m = BitMatrix::new(w, h, 2);
+    for (i, b) in flat.bytes().enumerate() {
+        m.set(i % w, i / w, b == b'1');
+    }
+    m
+}
+
+/// ECI (mode `111`) against a zint bitmap: `zint -b 145 --eci=26 -d cafe`
+/// (R11x27-M). The assignment must be decoded — not mistaken for the terminator,
+/// dropping the payload — and re-encode bit-for-bit.
+#[test]
+fn eci_matches_zint_and_roundtrips() {
+    let reference = Encoding::Matrix(matrix_from(
+        "111111101010101010101010111100000101110101000100010001101110100111101111110111101101110100010001111001000000101110100001001110111001001100000100110110110001110100111111101111111110000111111000000000000111001101010001110011011101000001010110101101011001111110010101010001111010101010101010101011111",
+        27,
+        11,
+    ));
+    let decoded = RmqrDecoder::new().decode(&reference).unwrap();
+    assert_eq!(
+        decoded.segments,
+        [Segment::eci(26), Segment::byte(b"cafe".to_vec())]
+    );
+    assert_eq!(RmqrEncoder::new().encode(&decoded).unwrap(), reference);
+
+    // Two- and three-byte assignment numbers round-trip too.
+    let enc = RmqrEncoder::new();
+    for assignment in [0, 127, 128, 16383, 16384, 999_999] {
+        let segments = vec![Segment::eci(assignment), Segment::byte(b"x".to_vec())];
+        let sym = enc.build(segments, RmqrEcLevel::H).unwrap();
+        let encoding = enc.encode(&sym).unwrap();
+        assert_eq!(RmqrDecoder::new().decode(&encoding).unwrap(), sym);
+    }
+}
+
+/// FNC1 modes (`101` / `110`, GS1 and AIM symbols) cannot be represented: the
+/// decoder must say so rather than report an empty symbol. Bitmap: `zint -b 145
+/// --gs1 -d "[01]12345678901231"` (R13x27-M).
+#[test]
+fn fnc1_symbol_is_unsupported_not_empty() {
+    let reference = Encoding::Matrix(matrix_from(
+        "111111101010101010101010111100000100001000011100000101101110101100100001110111001101110100110100111111101000101110101111111000100010001100000100010111100000001110111111101110110101111001101000000001010011011010001110111100101100010111010011111010110111010000001100010001101101110000100000001010101100101100000101101000010001111010101010101010101011111",
+        27,
+        13,
+    ));
+    let err = RmqrDecoder::new().decode(&reference).unwrap_err();
+    assert!(matches!(err, anyd::Error::Unsupported { .. }), "{err:?}");
+}

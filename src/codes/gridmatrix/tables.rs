@@ -10,23 +10,25 @@
 //! (`gm_data_cws`, `gm_n1`, `gm_b1`, `gm_b2`, `gm_e1b3e2`); those arrays are the
 //! independent cross-reference for this implementation.
 
-/// The five Grid Matrix error-correction levels, in ascending order of *data*
-/// capacity (descending order of redundancy). `L1` is the strongest protection
-/// (least data), `L5` the weakest (most data). The numeric index used by the
-/// specification tables is `level as usize + 1` (1–5).
+/// The five Grid Matrix error-correction levels, in ascending order of redundancy
+/// (descending order of *data* capacity). `L1` is the weakest protection (about 10 %
+/// of the codewords are EC, most data), `L5` the strongest (about 50 %, least data);
+/// see [`GM_DATA_CWS`]. The numeric index used by the specification tables is
+/// `level as usize + 1` (1–5).
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EcLevel {
-    /// Strongest error correction (roughly half the codewords are EC).
+    /// Weakest error correction, about 10 % (maximum data capacity; unusable in
+    /// version 1).
     L1,
-    /// Strong error correction.
+    /// Light error correction, about 20 %.
     L2,
-    /// Balanced error correction (the encoder default).
+    /// Balanced error correction, about 30 %.
     L3,
-    /// Light error correction.
+    /// Strong error correction, about 40 %.
     L4,
-    /// Weakest error correction (maximum data capacity).
+    /// Strongest error correction (roughly half the codewords are EC).
     L5,
 }
 
@@ -48,7 +50,7 @@ impl EcLevel {
         }
     }
 
-    /// All five levels, strongest first.
+    /// All five levels, weakest first.
     pub const ALL: [EcLevel; 5] = [
         EcLevel::L1,
         EcLevel::L2,

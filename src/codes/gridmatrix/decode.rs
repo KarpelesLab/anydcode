@@ -42,6 +42,12 @@ impl GridMatrixDecoder {
 
         let ec = read_ec_level(version, matrix)
             .ok_or_else(|| Error::undecodable("could not read Grid Matrix EC level"))?;
+        // Version 1 has no level-1 variant: it would carry no EC codewords at all.
+        if version.data_codewords(ec) == 0 {
+            return Err(Error::undecodable(
+                "Grid Matrix EC level is not defined for this version",
+            ));
+        }
 
         let cws = read_codewords(version, matrix);
         let data = deinterleave_and_correct(&cws, version, ec)?;
@@ -95,4 +101,71 @@ fn deinterleave_and_correct(cws: &[u8], version: Version, ec: super::EcLevel) ->
         data.extend_from_slice(&corrected[..data_size]);
     }
     Ok(data)
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+    use crate::codes::gridmatrix::layout::render;
+    use crate::codes::gridmatrix::{EcLevel, GridMatrixEncoder};
+    use crate::traits::Encode;
+    use alloc::vec;
+
+    /// Version 1 has no level-1 variant (its table row holds no EC codewords at all),
+    /// so layer ids claiming it must not yield an unprotected "successful" decode.
+    #[test]
+    fn rejects_version_1_level_1() {
+        let version = Version::new(1).unwrap();
+        // Upper 'A' then end-of-data: 0100 00000 11011 -> codewords 0x20, 0x1B.
+        let mut cws = vec![0u8; version.total_codewords()];
+        cws[0] = 0x20;
+        cws[1] = 0x1B;
+        let m = render(version, EcLevel::L1, &cws);
+        assert!(GridMatrixDecoder::new().decode_matrix(&m).is_err());
+    }
+
+    /// In every usable version and EC level, every RS block corrects `ec / 2` codeword
+    /// errors simultaneously; one more error in any block is reported, not mis-decoded.
+    #[test]
+    fn corrects_up_to_capacity_in_every_block() {
+        let enc = GridMatrixEncoder::new();
+        for v in 1..=13u8 {
+            let version = Version::new(v).unwrap();
+            for ec in EcLevel::ALL {
+                if version.data_codewords(ec) == 0 {
+                    continue;
+                }
+                let symbol = enc.build_sized(b"GM 2026", version, ec).unwrap();
+                let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+                    panic!("expected a matrix");
+                };
+                let cws = read_codewords(version, &clean);
+                let layout = blocks(version, ec);
+                let n = layout.len();
+                // Codeword `j` of block `i` sits at `n * j + i`; spread the errors
+                // evenly over the block's data and EC codewords.
+                let hit = |cws: &mut [u8], i: usize, count: usize| {
+                    for k in 0..count {
+                        cws[n * (k * layout[i].total / count) + i] ^= 0x55;
+                    }
+                };
+
+                let mut bad = cws.clone();
+                for (i, blk) in layout.iter().enumerate() {
+                    hit(&mut bad, i, blk.ec / 2);
+                }
+                let decoded = GridMatrixDecoder::new()
+                    .decode_matrix(&render(version, ec, &bad))
+                    .unwrap();
+                assert_eq!(decoded, symbol, "v{v} {ec:?}");
+
+                for (i, blk) in layout.iter().enumerate() {
+                    let mut bad = cws.clone();
+                    hit(&mut bad, i, blk.ec / 2 + 1);
+                    let result = GridMatrixDecoder::new().decode_matrix(&render(version, ec, &bad));
+                    assert!(result.is_err(), "v{v} {ec:?} block {i}");
+                }
+            }
+        }
+    }
 }

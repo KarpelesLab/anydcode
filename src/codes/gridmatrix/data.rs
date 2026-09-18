@@ -19,12 +19,12 @@
 //!
 //! **Scope.** `Mixed` and `Chinese` (GB2312) modes are modelled in [`GmMode`] and
 //! recognised by the decoder as *unsupported*, but are not produced by the encoder;
-//! GB2312 double-byte encodation is left as future work. Two Grid Matrix `Byte`-mode
-//! details are simplified into a self-consistent "anyd profile" that this encoder and
-//! decoder agree on (and which differs from zint): a byte run carries a 9-bit *count*
-//! (not `count - 1`), the otherwise-unused byte→byte control (`6`) marks a continued
-//! run so a segment may exceed 511 bytes, and end-of-data from byte mode uses the
-//! 4-bit control `0`. All other modes use the exact AIMD014 codeword values.
+//! GB2312 double-byte encodation is left as future work, as are the shift characters
+//! and the punctuation glyphs of numeral mode. Every mode that *is* produced uses the
+//! exact AIMD014 bit format, so the symbols match zint's module for module: a short
+//! final numeral group is padded with trailing zeros, and a byte block carries
+//! `L - 1` as its 9-bit prefix (at most 512 bytes; the 4-bit control `7` opens a
+//! further block, so one segment may span several).
 
 use crate::segment::{Mode, Segment};
 
@@ -100,7 +100,7 @@ impl<'a> BitReader<'a> {
 }
 
 // -------------------------------------------------------------------------------------
-// Mode transitions (AIMD014 gm_mode_switch / gm_mode_len; byte details per module docs)
+// Mode transitions (AIMD014, as zint gm_encode)
 // -------------------------------------------------------------------------------------
 
 /// Switch codeword `(value, bit length)` to move from mode `from` (0 = start) to mode
@@ -113,7 +113,7 @@ fn switch_code(from: u8, to: u8) -> Option<(u32, usize)> {
         (0, 3) => Some((3, 4)),
         (0, 4) => Some((4, 4)),
         (0, 5) => Some((5, 4)),
-        (0, 6) => Some((7, 4)),
+        (0, 6) => Some((6, 4)),
         // From NUMERAL.
         (2, 1) => Some((1019, 10)),
         (2, 3) => Some((1020, 10)),
@@ -148,16 +148,16 @@ fn eod_code(mode: u8) -> Option<(u32, usize)> {
         2 => Some((1018, 10)), // NUMERAL
         3 => Some((27, 5)),    // LOWER
         4 => Some((27, 5)),    // UPPER
-        6 => Some((0, 4)),     // BYTE (anyd profile)
+        6 => Some((0, 4)),     // BYTE
         _ => None,
     }
 }
 
-/// Continuation control inside byte mode: another length-prefixed run follows.
-const BYTE_CONTINUE: u32 = 6;
+/// Continuation control inside byte mode: another length-prefixed block follows.
+const BYTE_CONTINUE: u32 = 7;
 
-/// Max bytes in one byte-mode length block (9-bit count).
-const BYTE_BLOCK_MAX: usize = 511;
+/// Max bytes in one byte-mode block (the 9-bit prefix holds `L - 1`).
+const BYTE_BLOCK_MAX: usize = 512;
 
 // -------------------------------------------------------------------------------------
 // Per-mode payload encoding
@@ -198,23 +198,29 @@ fn encode_numeral(bits: &mut Vec<bool>, digits: &[u8]) -> Result<()> {
         for &d in &digits[i..i + take] {
             val = val * 10 + (d - b'0') as u32;
         }
+        // A short final group is padded with trailing zeros ("7" is sent as 700).
+        val *= 10u32.pow((3 - take) as u32);
         append(bits, val, 10);
         i += take;
     }
     Ok(())
 }
 
-fn encode_byte(bits: &mut Vec<bool>, data: &[u8]) {
+fn encode_byte(bits: &mut Vec<bool>, data: &[u8]) -> Result<()> {
+    // The block prefix is `L - 1`, so an empty block cannot be expressed.
+    if data.is_empty() {
+        return Err(Error::invalid_data("empty Grid Matrix byte segment"));
+    }
     let mut i = 0;
     loop {
         let chunk = (data.len() - i).min(BYTE_BLOCK_MAX);
-        append(bits, chunk as u32, 9);
+        append(bits, (chunk - 1) as u32, 9);
         for &b in &data[i..i + chunk] {
             append(bits, b as u32, 8);
         }
         i += chunk;
         if i >= data.len() {
-            break;
+            return Ok(());
         }
         append(bits, BYTE_CONTINUE, 4);
     }
@@ -239,7 +245,7 @@ pub fn encode_segments(segs: &[(GmMode, Vec<u8>)]) -> Result<Vec<bool>> {
             GmMode::Numeral => encode_numeral(&mut bits, data)?,
             GmMode::Upper => encode_alpha(&mut bits, data, b'A')?,
             GmMode::Lower => encode_alpha(&mut bits, data, b'a')?,
-            GmMode::Byte => encode_byte(&mut bits, data),
+            GmMode::Byte => encode_byte(&mut bits, data)?,
             GmMode::Chinese | GmMode::Mixed => {
                 return Err(Error::Unsupported {
                     what: "Grid Matrix Chinese/Mixed encodation",
@@ -266,7 +272,7 @@ fn start_mode(sel: u32) -> Result<GmMode> {
         3 => Ok(GmMode::Lower),
         4 => Ok(GmMode::Upper),
         5 => unsupported_mode(),
-        7 => Ok(GmMode::Byte),
+        6 => Ok(GmMode::Byte),
         _ => Err(Error::undecodable("invalid Grid Matrix mode selector")),
     }
 }
@@ -346,13 +352,13 @@ fn decode_numeral(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Next)> {
     let mut data = Vec::new();
     let count = groups.len();
     for (k, &g) in groups.iter().enumerate() {
+        // The final group keeps only its leading digits; the rest is zero padding.
         let len = if k + 1 == count { last_len } else { 3 };
-        let mut buf = [0u8; 3];
-        let mut vv = g;
-        for slot in buf[..len].iter_mut().rev() {
-            *slot = b'0' + (vv % 10) as u8;
-            vv /= 10;
-        }
+        let buf = [
+            b'0' + (g / 100) as u8,
+            b'0' + (g / 10 % 10) as u8,
+            b'0' + (g % 10) as u8,
+        ];
         data.extend_from_slice(&buf[..len]);
     }
     let next = match control {
@@ -370,7 +376,7 @@ fn decode_numeral(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Next)> {
 fn decode_byte(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Next)> {
     let mut data = Vec::new();
     loop {
-        let count = reader.read(9)? as usize;
+        let count = reader.read(9)? as usize + 1;
         for _ in 0..count {
             data.push(reader.read(8)? as u8);
         }
@@ -452,7 +458,8 @@ fn fits(mode: GmMode, b: u8) -> bool {
 /// switches in the bitstream — the property that makes the round-trip lossless.
 pub fn canonical_segments(data: &[u8]) -> Vec<(GmMode, Vec<u8>)> {
     if data.is_empty() {
-        return vec![(GmMode::Byte, Vec::new())];
+        // Byte and numeral blocks cannot be empty; an alpha run can.
+        return vec![(GmMode::Upper, Vec::new())];
     }
     let mut segs = Vec::new();
     let mut i = 0;
@@ -507,13 +514,91 @@ mod tests {
         assert_eq!(back, segs, "segment bitstream round trip");
     }
 
+    /// Build a bit vector from `(value, width)` fields.
+    fn fields(f: &[(u32, usize)]) -> Vec<bool> {
+        let mut bits = Vec::new();
+        for &(value, len) in f {
+            append(&mut bits, value, len);
+        }
+        bits
+    }
+
+    // AIMD014 6.3.2 (as zint's `gm_encode`): a short final digit group is padded with
+    // trailing zeros — "1234567" is 123, 456, 7[00] with a pad indicator of 2.
+    #[test]
+    fn numeral_short_group_is_right_padded() {
+        let bits = encode_segments(&[(GmMode::Numeral, b"1234567".to_vec())]).unwrap();
+        let expected = fields(&[(2, 4), (2, 2), (123, 10), (456, 10), (700, 10), (1018, 10)]);
+        assert_eq!(bits, expected);
+        let bits = encode_segments(&[(GmMode::Numeral, b"12".to_vec())]).unwrap();
+        assert_eq!(bits, fields(&[(2, 4), (1, 2), (120, 10), (1018, 10)]));
+    }
+
+    // AIMD014 6.3.7 (as zint): byte mode is selected with `6`, a block carries `L - 1`
+    // as its 9-bit prefix (so up to 512 bytes), and `7` opens a further byte block.
+    #[test]
+    fn byte_mode_follows_aimd014() {
+        let bits = encode_segments(&[(GmMode::Byte, vec![0x80, 0x81, 0xFE])]).unwrap();
+        let expected = fields(&[(6, 4), (2, 9), (0x80, 8), (0x81, 8), (0xFE, 8), (0, 4)]);
+        assert_eq!(bits, expected);
+
+        let bits = encode_segments(&[(GmMode::Byte, vec![0xAA; 513])]).unwrap();
+        let mut f = vec![(6, 4), (511, 9)];
+        f.extend([(0xAA, 8); 512]);
+        f.extend([(7, 4), (0, 9), (0xAA, 8), (0, 4)]);
+        assert_eq!(bits, fields(&f));
+
+        let bits = encode_segments(&[
+            (GmMode::Upper, b"A".to_vec()),
+            (GmMode::Byte, vec![0xFF]),
+            (GmMode::Numeral, b"5".to_vec()),
+        ])
+        .unwrap();
+        let expected = fields(&[
+            (4, 4),
+            (0, 5),
+            (126, 7),
+            (0, 9),
+            (0xFF, 8),
+            (2, 4),
+            (2, 2),
+            (500, 10),
+            (1018, 10),
+        ]);
+        assert_eq!(bits, expected);
+    }
+
+    /// Arbitrary bitstreams (what a mis-corrected or hostile symbol yields) must parse
+    /// or fail cleanly.
+    #[test]
+    fn garbage_bitstreams_never_panic() {
+        let mut seed = 0x6D5E_ED00_DA7A_0001u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..3000 {
+            let len = (next() % 300) as usize + (round % 5) * 2000;
+            let mut bits: Vec<bool> = (0..len).map(|_| next() & 1 != 0).collect();
+            // Force each supported start mode in turn so every sub-decoder is reached.
+            let selector = [2, 3, 4, 6][round % 4];
+            for (k, bit) in bits.iter_mut().take(4).enumerate() {
+                *bit = (selector >> (3 - k)) & 1 != 0;
+            }
+            let _ = decode_segments(&bits);
+        }
+    }
+
     #[test]
     fn bitstream_round_trips_each_mode() {
         roundtrip(&[(GmMode::Numeral, b"1234567".to_vec())]);
         roundtrip(&[(GmMode::Upper, b"HELLO WORLD".to_vec())]);
         roundtrip(&[(GmMode::Lower, b"grid matrix".to_vec())]);
         roundtrip(&[(GmMode::Byte, vec![0, 1, 2, 255, 128, 127])]);
-        roundtrip(&[(GmMode::Byte, Vec::new())]);
+        roundtrip(&[(GmMode::Upper, Vec::new())]);
+        assert!(encode_segments(&[(GmMode::Byte, Vec::new())]).is_err());
     }
 
     #[test]

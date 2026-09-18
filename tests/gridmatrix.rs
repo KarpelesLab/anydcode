@@ -204,3 +204,145 @@ fn version1_frame_matches_zint_layout() {
         );
     }
 }
+
+// ---- Third-party reference vectors --------------------------------------------
+//
+// 18x18 (version 1) matrices produced by zint 2.16 (`zint -b GRIDMATRIX --dump`), one
+// string per row, '1' = dark: "1234567" (numeral mode, short final group) and the bytes
+// 80 81 FE (byte mode).
+
+#[rustfmt::skip]
+const ZINT_NUMERAL_1234567: &[&str] = &[
+    "111111000000111111",
+    "101101001010101011",
+    "111001000010111111",
+    "101111001100111011",
+    "111101011100111101",
+    "111111000000111111",
+    "000000111111000000",
+    "001110100001001000",
+    "000110111111000000",
+    "001010100011001010",
+    "010000101001000000",
+    "000000111111000000",
+    "111111000000111111",
+    "101001001000101111",
+    "101101001110110101",
+    "111001000010100001",
+    "111011001010100001",
+    "111111000000111111",
+];
+#[rustfmt::skip]
+const ZINT_BYTES_80_81_FE: &[&str] = &[
+    "111111000000111111",
+    "101011001100101101",
+    "110111000000100001",
+    "110001000000101111",
+    "100111000000111111",
+    "111111000000111111",
+    "000000111111000000",
+    "001100100001001110",
+    "001100100101011110",
+    "010110110111000000",
+    "001010100001000000",
+    "000000111111000000",
+    "111111000000111111",
+    "101011001000101001",
+    "101111010110111001",
+    "101101010110100001",
+    "101111011100100001",
+    "111111000000111111",
+];
+
+/// A zint symbol must decode to `payload`, and both re-encoding the decoded symbol
+/// and building `payload` from scratch must reproduce zint's matrix exactly.
+fn assert_matches_zint(rows: &[&str], payload: &[u8], modes: &[GmMode]) {
+    let mut m = anyd::output::BitMatrix::new(rows[0].len(), rows.len(), 2);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x, y, c == b'1');
+        }
+    }
+    let reference = Encoding::Matrix(m);
+    let decoded = GridMatrixDecoder::new().decode(&reference).unwrap();
+    assert_eq!(decoded.payload_bytes(), payload);
+    let SymbolMeta::GridMatrix(meta) = &decoded.meta else {
+        panic!("expected GridMatrixMeta");
+    };
+    assert_eq!(meta.modes, modes);
+    let enc = GridMatrixEncoder::new();
+    assert_eq!(enc.encode(&decoded).unwrap(), reference);
+    let built = enc
+        .build_sized(payload, meta.version, meta.ec_level)
+        .unwrap();
+    assert_eq!(enc.encode(&built).unwrap(), reference);
+}
+
+#[test]
+fn numeral_mode_matches_zint() {
+    assert_matches_zint(ZINT_NUMERAL_1234567, b"1234567", &[GmMode::Numeral]);
+}
+
+#[test]
+fn byte_mode_matches_zint() {
+    assert_matches_zint(ZINT_BYTES_80_81_FE, &[0x80, 0x81, 0xFE], &[GmMode::Byte]);
+}
+
+#[test]
+fn decoder_never_panics_on_garbage() {
+    // Deterministic xorshift noise: random grids of every valid (and some invalid)
+    // size, then valid symbols with growing numbers of flipped modules.
+    let mut seed = 0x6A1D_3A7A_1C5E_ED01u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let dec = GridMatrixDecoder::new();
+    let mut sizes: Vec<usize> = (1..=14).map(|v| 6 + 12 * v).collect();
+    sizes.extend([0, 1, 6, 17, 19, 24]);
+    for size in sizes {
+        for density in [0u64, 1, 2, 3, 4] {
+            for _ in 0..3 {
+                let mut m = anyd::output::BitMatrix::new(size, size, 2);
+                for y in 0..size {
+                    for x in 0..size {
+                        m.set(x, y, next() % 4 < density);
+                    }
+                }
+                let _ = dec.decode(&Encoding::Matrix(m));
+            }
+        }
+    }
+    assert!(
+        dec.decode(&Encoding::Matrix(anyd::output::BitMatrix::new(18, 30, 2)))
+            .is_err()
+    );
+
+    let enc = GridMatrixEncoder::new();
+    for len in [0usize, 1, 9, 40, 200, 400] {
+        let payload: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+        let symbol = enc.build(&payload).unwrap();
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("expected matrix");
+        };
+        let size = clean.width();
+        for flips in [1usize, 10, 100, 1000] {
+            let mut m = clean.clone();
+            for _ in 0..flips {
+                let (x, y) = (
+                    (next() % size as u64) as usize,
+                    (next() % size as u64) as usize,
+                );
+                let dark = m.get(x, y);
+                m.set(x, y, !dark);
+            }
+            let result = dec.decode(&Encoding::Matrix(m));
+            // One module is at most one codeword error, within every level's capacity.
+            if flips == 1 {
+                assert_eq!(result.unwrap(), symbol, "len {len}");
+            }
+        }
+    }
+}

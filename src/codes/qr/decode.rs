@@ -41,10 +41,13 @@ impl QrDecoder {
         // nothing on grids that were going to fail anyway.
         let read = canvas.read_format();
         let mut last = Error::undecodable("unreadable format information");
+        // Once RS accepts a combination the format question is settled: a content
+        // error after that (e.g. an unsupported mode) is final, not a cue to retry.
         if let Some((level, mask)) = read {
             match decode_with_format(&canvas, version, level, mask) {
                 Ok(sym) => return Ok(sym),
-                Err(e) => last = e,
+                Err(Error::ErrorCorrectionFailed) => last = Error::ErrorCorrectionFailed,
+                Err(e) => return Err(e),
             }
         }
         // The exhaustive pass only makes sense on a grid that is plausibly a QR at all:
@@ -62,7 +65,8 @@ impl QrDecoder {
         {
             match decode_with_format(&canvas, version, level, mask) {
                 Ok(sym) => return Ok(sym),
-                Err(e) => last = e,
+                Err(Error::ErrorCorrectionFailed) => last = Error::ErrorCorrectionFailed,
+                Err(e) => return Err(e),
             }
         }
         Err(last)
@@ -270,8 +274,12 @@ fn parse_segments(data: &[u8], version: Version) -> Result<Vec<Segment>> {
         if indicator == 0 {
             break; // terminator (or padding)
         }
-        let mode = mode_from_indicator(indicator)
-            .ok_or_else(|| Error::undecodable("unknown QR mode indicator"))?;
+        let mode = mode_from_indicator(indicator).ok_or(match indicator {
+            0b0011 | 0b0101 | 0b1001 => Error::Unsupported {
+                what: "QR Structured Append / FNC1 modes",
+            },
+            _ => Error::undecodable("unknown QR mode indicator"),
+        })?;
         match mode {
             Mode::Eci(_) => {
                 let assignment = read_eci_assignment(&mut r)?;

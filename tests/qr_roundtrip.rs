@@ -318,3 +318,19 @@ fn kanji_is_injective_over_all_byte_pairs() {
         EcLevel::M,
     );
 }
+
+/// FNC1 (GS1 / AIM) and Structured Append cannot be represented by `Mode`. A symbol
+/// using them passes Reed–Solomon, so the decoder must report the real reason —
+/// not retry every format and end on a misleading `ErrorCorrectionFailed`. Bitmap:
+/// `zint -b 58 --gs1 -d "[01]12345678901231"` (version 1).
+#[test]
+fn fnc1_symbol_is_reported_as_unsupported() {
+    let flat = "111111100011001111111100000100011101000001101110101110101011101101110101001001011101101110100100001011101100000100100001000001111111101010101111111000000000000000000000000110110001000001100111000011111001110001010101101010110100001010110000000110101100100101110011100100011000000001010101110011111111101111100010000100000100111010010001101110101001110111001101110101100110001110101110100110110000011100000100010011101101111111100111001001000";
+    assert_eq!(flat.len(), 21 * 21);
+    let mut m = anyd::output::BitMatrix::new(21, 21, 4);
+    for (i, b) in flat.bytes().enumerate() {
+        m.set(i % 21, i / 21, b == b'1');
+    }
+    let err = QrDecoder::new().decode(&Encoding::Matrix(m)).unwrap_err();
+    assert!(matches!(err, anyd::Error::Unsupported { .. }), "{err:?}");
+}

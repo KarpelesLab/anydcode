@@ -374,11 +374,23 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
                     module_size,
                 }
             }
-            _ => Location {
-                outline: box_quad(core, scale),
-                rotation: None,
-                module_size,
-            },
+            _ => {
+                // The texture cluster stops at the last edge-dense tile, which on a
+                // rotated or small symbol cuts its corners and quiet zone off; a
+                // sampler needs both. One tile out restores them.
+                let t = opts.tile.max(1);
+                let grown = [
+                    core[0].saturating_sub(t),
+                    core[1].saturating_sub(t),
+                    (core[2] + t).min(grid.width),
+                    (core[3] + t).min(grid.height),
+                ];
+                Location {
+                    outline: box_quad(grown, scale),
+                    rotation: None,
+                    module_size,
+                }
+            }
         };
         out.push(Candidate {
             location,

@@ -406,7 +406,7 @@ fn run(code: &Code, t: &Trial) -> Outcome {
             continue;
         };
         let syms = if let Some(axis) = lin {
-            anyd::pipeline::scan_1d_at(&frame(&c), axis)
+            anyd::pipeline::scan_linear_at(&frame(&c), axis)
         } else {
             anyd::pipeline::scan_all(&frame(&c))
         };

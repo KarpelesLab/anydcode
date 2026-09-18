@@ -164,8 +164,8 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
     export(symbols_json(&crate::pipeline::scan_all(&frame)))
 }
 
-/// Decode only the **1D / linear** symbologies in a `w`×`h` luminance frame; returns
-/// the same JSON shape as `decode`.
+/// Decode only the **linear-textured** symbologies — 1D, and the stacked PDF417 family —
+/// in a `w`×`h` luminance frame; returns the same JSON shape as `decode`.
 ///
 /// This exists for the live pipeline: a crop the locator classified as *linear* should
 /// never pay for the 2D samplers — their finder/geometry fallbacks are the expensive
@@ -182,7 +182,7 @@ pub unsafe extern "C" fn decode1d(w: usize, h: usize, luma_ptr: *const u8, axis:
     let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
         return export(b"[]".to_vec());
     };
-    export(symbols_json(&crate::pipeline::scan_1d_at(&frame, axis)))
+    export(symbols_json(&crate::pipeline::scan_linear_at(&frame, axis)))
 }
 
 /// Borrow a `w`×`h` luminance frame from wasm memory, or `None` for dimensions that do

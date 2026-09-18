@@ -203,6 +203,83 @@ pub fn scan_1d_at(frame: &crate::image::GrayFrame<'_>, angle: f32) -> Vec<Symbol
     scan_1d(frame)
 }
 
+/// Decode a region the locator classed as **linear** — a 1D code *or* a stacked one —
+/// whose reading axis is `angle` (radians, clockwise from +x, as in
+/// [`Location::rotation`]): [`scan_1d_at`] first, then [`scan_stacked_at`].
+///
+/// A stacked symbol (PDF417, MicroPDF417) is rows of bars, so to a texture-based
+/// locator it *is* a linear region; only the decoders can tell the two apart.
+pub fn scan_linear_at(frame: &crate::image::GrayFrame<'_>, angle: f32) -> Vec<Symbol> {
+    let found = scan_1d_at(frame, angle);
+    if !found.is_empty() {
+        return found;
+    }
+    scan_stacked_at(frame, angle)
+}
+
+/// Decode the stacked symbologies (PDF417, MicroPDF417) from a crop whose rows run
+/// along `angle` (radians, clockwise from +x).
+///
+/// Their samplers trace the start/stop guard columns down the image rows, which only
+/// works with the symbol within about ±12° of upright — so beyond a few degrees the crop
+/// is derotated by the known axis first, and the decoded outline mapped back.
+pub fn scan_stacked_at(frame: &crate::image::GrayFrame<'_>, angle: f32) -> Vec<Symbol> {
+    #[allow(unused_mut)]
+    let mut found: Vec<Symbol> = Vec::new();
+    #[cfg(feature = "pdf417")]
+    {
+        let stacked = |f: &crate::image::GrayFrame<'_>| {
+            let mut out: Vec<Symbol> = Vec::new();
+            out.extend(crate::codes::pdf417::scan(f));
+            out.extend(crate::codes::pdf417::scan_micro(f).ok());
+            out
+        };
+        if !angle.is_finite() || angle.abs() < MIN_DEROTATE_ANGLE {
+            found = stacked(frame);
+        }
+        if found.is_empty() && angle.is_finite() && angle.abs() >= MIN_DEROTATE_ANGLE {
+            let (w, h) = (frame.width(), frame.height());
+            let mut data = Vec::with_capacity(w * h);
+            for y in 0..h {
+                data.extend_from_slice(frame.row(y).expect("row in range"));
+            }
+            let image = crate::image::GrayImage::from_raw(w, h, data);
+            // An axis is mod 180°: the derotated symbol may be upside down, which the
+            // samplers cannot read, so try both.
+            for turn in [0.0, core::f32::consts::PI] {
+                let by = -angle + turn;
+                let rotated = crate::transform::rotate(&image, by);
+                found = stacked(&rotated.as_frame());
+                if found.is_empty() {
+                    continue;
+                }
+                // Map outlines from the derotated image back into the crop.
+                let (s, c) = by.sin_cos();
+                let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+                let (ncx, ncy) = (rotated.width() as f32 / 2.0, rotated.height() as f32 / 2.0);
+                for sym in &mut found {
+                    if let Some(loc) = &mut sym.location {
+                        for p in &mut loc.outline.corners {
+                            let (dx, dy) = (p.x - ncx, p.y - ncy);
+                            p.x = c * dx + s * dy + cx;
+                            p.y = -s * dx + c * dy + cy;
+                        }
+                        loc.rotation = Some(loc.rotation.unwrap_or(0.0) - by);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    let _ = (frame, angle); // unused when no stacked symbology is enabled
+    found
+}
+
+/// Smallest rotation (radians) worth derotating a stacked-code crop for; their samplers
+/// tolerate about ±12° on their own.
+#[cfg(feature = "pdf417")]
+const MIN_DEROTATE_ANGLE: f32 = 8.0 * core::f32::consts::PI / 180.0;
+
 /// Half-width (degrees) of the band of reading axes one sweep covers: its outermost
 /// scan angle plus the slant a full-height scan line tolerates.
 const SWEEP_COVER_DEG: f32 = 8.0;

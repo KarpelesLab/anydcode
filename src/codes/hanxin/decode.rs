@@ -280,6 +280,35 @@ fn trunc() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::segment::Mode;
+
+    /// Deterministic xorshift64 byte source for the no-panic fuzz loops.
+    fn noise(state: &mut u64) -> u8 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u8
+    }
+
+    /// Segment parsing sees attacker-controlled bits (anything that passes RS): it
+    /// must return `Ok`/`Err` on arbitrary streams, never panic.
+    #[test]
+    fn parse_segments_never_panics_on_garbage() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for round in 0..6000 {
+            let len = 1 + round % 42;
+            let mut data: Vec<u8> = (0..len).map(|_| noise(&mut state)).collect();
+            // Steer most streams into one of the three implemented modes.
+            data[0] = (data[0] & 0x0F) | [0x10, 0x20, 0x30, 0x10][round % 4];
+            if let Ok(segments) = parse_segments(&data) {
+                for seg in segments {
+                    if seg.mode == Mode::Numeric {
+                        assert!(seg.data.iter().all(u8::is_ascii_digit));
+                    }
+                }
+            }
+        }
+    }
 
     /// A numeric group must fit the digit count it stands for: the final group's
     /// width comes from the terminator, so e.g. 1020 as a single digit is malformed

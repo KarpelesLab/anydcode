@@ -278,6 +278,34 @@ fn trunc() -> Error {
 mod tests {
     use super::*;
 
+    /// Deterministic xorshift64 byte source for the no-panic fuzz loops.
+    fn noise(state: &mut u64) -> u8 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u8
+    }
+
+    /// Segment parsing sees attacker-controlled bits (anything that passes RS): it
+    /// must return `Ok`/`Err` on arbitrary streams, never panic.
+    #[test]
+    fn parse_segments_never_panics_on_garbage() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for size in RmqrSize::all() {
+            for round in 0..200 {
+                let len = round * 3;
+                let content: Vec<bool> = (0..len).map(|_| noise(&mut state) & 1 != 0).collect();
+                if let Ok(segments) = parse_segments(&content, size) {
+                    for seg in segments {
+                        if seg.mode == Mode::Numeric {
+                            assert!(seg.data.iter().all(u8::is_ascii_digit));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn bits(s: &str) -> Vec<bool> {
         s.bytes()
             .filter(|b| !b.is_ascii_whitespace())

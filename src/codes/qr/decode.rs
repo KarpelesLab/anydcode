@@ -378,6 +378,38 @@ fn trunc() -> Error {
 mod tests {
     use super::*;
 
+    /// Deterministic xorshift64 byte source for the no-panic fuzz loops.
+    fn noise(state: &mut u64) -> u8 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u8
+    }
+
+    /// Segment parsing sees attacker-controlled bits (anything that passes RS): it
+    /// must return `Ok`/`Err` on arbitrary streams, never panic, and whatever it
+    /// accepts must be re-encodable content.
+    #[test]
+    fn parse_segments_never_panics_on_garbage() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        for v in [1, 9, 10, 26, 27, 40] {
+            let version = Version::new(v).unwrap();
+            for round in 0..1500 {
+                let len = 1 + round % 40;
+                let data: Vec<u8> = (0..len).map(|_| noise(&mut state)).collect();
+                if let Ok(segments) = parse_segments(&data, version) {
+                    for seg in segments {
+                        match seg.mode {
+                            Mode::Numeric => assert!(seg.data.iter().all(u8::is_ascii_digit)),
+                            Mode::Kanji => assert!(seg.data.len().is_multiple_of(2)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127
     /// and 10..=15 are malformed, not extra digits.
     #[test]

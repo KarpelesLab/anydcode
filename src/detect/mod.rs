@@ -208,9 +208,9 @@ const FINDER_SYNTH_MIN_COUNT: u32 = 3;
 const MATRIX_MIN_SPREAD: u32 = 56;
 
 /// Least share of its oriented box a linear region's tiles must cover (see
-/// `OrientedBox::fill`). A rotated box is measured around whole tiles, so even a solid
-/// block of bars only reaches ~0.6 at 45°.
-const LINEAR_MIN_FILL: f32 = 0.3;
+/// `OrientedBox::fill`). Gap bridging and the wide runs of a coarse code leave holes in
+/// a genuine barcode's tile set too, hence well under one half.
+const LINEAR_MIN_FILL: f32 = 0.35;
 
 /// Fewest dark/light flips a line along the reading axis must cross inside a linear
 /// region. The shortest linear symbols have well over a dozen bars; an icon outline, a

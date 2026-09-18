@@ -131,7 +131,8 @@ fn codes() -> Vec<Code> {
                     s,
                 )
             },
-            scales: [2, 4],
+            // 200 modules wide: 3 px/module is the most that fits the frame upright.
+            scales: [2, 3],
         },
         Code {
             name: "code39",
@@ -341,6 +342,9 @@ struct Outcome {
     secs: [f64; 4],
     cands: usize,
     falses: Vec<String>,
+    /// Candidate boxes (full-res) and the truth box, for diagnosing misses.
+    boxes: Vec<([f32; 4], Option<f32>)>,
+    truth: [f32; 4],
 }
 
 fn run(code: &Code, t: &Trial) -> Outcome {
@@ -353,10 +357,12 @@ fn run(code: &Code, t: &Trial) -> Outcome {
             "{dir}/{}-s{}-{:?}-r{}-g{}.pgm",
             code.name, t.scale, t.bg, t.deg, t.gradient as u8
         );
-        let mut bytes =
-            format!("P5\n{} {}\n255\n", sc.image.width(), sc.image.height()).into_bytes();
-        bytes.extend_from_slice(sc.image.pixels());
-        std::fs::write(name, bytes).expect("write scene dump");
+        for (img, suffix) in [(&sc.image, ""), (&small, "-half")] {
+            let mut bytes = format!("P5\n{} {}\n255\n", img.width(), img.height()).into_bytes();
+            bytes.extend_from_slice(img.pixels());
+            std::fs::write(name.replace(".pgm", &format!("{suffix}.pgm")), bytes)
+                .expect("write scene dump");
+        }
     }
 
     // --- locate on the half-res grab (as the demo does) ---
@@ -456,6 +462,8 @@ fn run(code: &Code, t: &Trial) -> Outcome {
         secs,
         cands: boxes.len(),
         falses,
+        boxes,
+        truth: tr,
     }
 }
 
@@ -544,6 +552,16 @@ fn main() {
                 out.cands,
                 out.falses
             );
+            if out.tally.located == 0 {
+                println!("      truth {:?}", out.truth.map(|v| v as i32));
+                for (b, axis) in &out.boxes {
+                    println!(
+                        "      cand  {:?} axis={:?}",
+                        b.map(|v| v as i32),
+                        axis.map(f32::to_degrees)
+                    );
+                }
+            }
         }
     }
 

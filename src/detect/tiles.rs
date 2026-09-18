@@ -118,9 +118,10 @@ pub(crate) struct OrientedBox {
     pub half_read: f32,
     /// Half-extent along the bars.
     pub half_bars: f32,
-    /// Fraction of the box covered by the region's own tiles. A barcode fills its box
-    /// with coherent tiles; a chain of tiles along a rule or a box border, or a few
-    /// scattered strokes bridged together, spans a box it mostly leaves empty.
+    /// Fraction of the box covered by the region's own tiles (rotation-normalised, so a
+    /// solid block scores ~1 at any angle). A barcode fills its box with coherent tiles;
+    /// a chain of tiles along a rule or a box border, or a few scattered strokes bridged
+    /// together, spans a box it mostly leaves empty.
     pub fill: f32,
 }
 
@@ -406,6 +407,10 @@ fn oriented_box(
         angle,
         half_read: (u1 - u0) / 2.0,
         half_bars: (v1 - v0) / 2.0,
-        fill: (members.len() * tile * tile) as f32 / ((u1 - u0) * (v1 - v0)).max(1.0),
+        // The box is measured around whole tiles, and a square tile projects onto a
+        // rotated axis as (|cos| + |sin|) tile — 1.41 tiles at 45° — so normalise the
+        // box back to the extent the same tiles would have had axis-aligned.
+        fill: (members.len() * tile * tile) as f32 * (c.abs() + s.abs()).powi(2)
+            / ((u1 - u0) * (v1 - v0)).max(1.0),
     }
 }

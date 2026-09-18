@@ -23,6 +23,7 @@
 
 use super::decode::read_mode_message;
 use super::layout::Layout;
+use super::rune::{RUNE_SIZE, render_rune};
 use super::{AztecDecoder, QUIET_ZONE};
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
@@ -33,7 +34,9 @@ use crate::imgproc::components::{extreme_quad, flood_region_bounded};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::{sample_bilinear, sample_grid};
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
+use crate::output::BitMatrix;
 use crate::symbol::Symbol;
+use crate::symbology::Symbology;
 use alloc::vec::Vec;
 use std::eprintln;
 
@@ -138,7 +141,7 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
             // and a real rune is alone inside its quiet zone.
             if !eye.full
                 && quiet_beyond_core(frame, &h, threshold)
-                && let Ok(mut sym) = try_grid(frame, &h, 11, threshold, &decoder)
+                && let Ok(mut sym) = try_rune(frame, &h, threshold, &decoder)
             {
                 sym.location = Some(location_from(&h, eye));
                 return Ok(sym);
@@ -213,7 +216,8 @@ fn decode_via_mode(
     try_grid(frame, core, layout.size, threshold, decoder)
 }
 
-/// Sample a `size`×`size` grid through the centre-relative core homography.
+/// Sample a `size`×`size` grid through the centre-relative core homography and
+/// decode it.
 fn try_grid(
     frame: &GrayFrame<'_>,
     core: &Homography,
@@ -221,6 +225,55 @@ fn try_grid(
     threshold: u8,
     decoder: &AztecDecoder,
 ) -> Result<Symbol> {
+    decoder.decode_matrix(&sample_core_grid(frame, core, size, threshold)?)
+}
+
+/// Modules of the 11×11 rune grid that may disagree with the rune it decodes to.
+const MAX_RUNE_MISMATCH: usize = 6;
+
+/// Sample and decode the 11×11 Aztec Rune grid.
+///
+/// A rune's only protection is its ring's RS(7,2) over GF(16), and correcting two of
+/// seven words makes that accept one random ring in ~200 — with four rotations, several
+/// eyes and two binarizations per frame, a texture that merely passes the bullseye
+/// cross-section would "decode" as a rune within seconds of video. But a rune has no
+/// free modules at all: its value fixes every one of the 121. So the read is only
+/// believed when the whole sampled grid — all the rings, the orientation marks, the
+/// mode ring — is the rune it claims to be, give or take a few modules of damage.
+fn try_rune(
+    frame: &GrayFrame<'_>,
+    core: &Homography,
+    threshold: u8,
+    decoder: &AztecDecoder,
+) -> Result<Symbol> {
+    let matrix = sample_core_grid(frame, core, RUNE_SIZE, threshold)?;
+    let sym = decoder.decode_matrix(&matrix)?;
+    let value = match sym.payload_bytes().as_slice() {
+        [value] if sym.symbology == Symbology::AztecRunes => *value,
+        _ => return Err(Error::undecodable("11×11 Aztec grid is not a rune")),
+    };
+    let ideal = render_rune(value);
+    let mismatches = (0..RUNE_SIZE * RUNE_SIZE)
+        .filter(|i| {
+            let (x, y) = (i % RUNE_SIZE, i / RUNE_SIZE);
+            matrix.get(x, y) != ideal.get(x, y)
+        })
+        .count();
+    if mismatches > MAX_RUNE_MISMATCH {
+        return Err(Error::undecodable(
+            "Aztec Rune grid does not match its value",
+        ));
+    }
+    Ok(sym)
+}
+
+/// Sample a `size`×`size` grid through the centre-relative core homography.
+fn sample_core_grid(
+    frame: &GrayFrame<'_>,
+    core: &Homography,
+    size: usize,
+    threshold: u8,
+) -> Result<BitMatrix> {
     // sample_grid maps absolute continuous grid coordinates (module (i,j) centred at
     // (i+0.5, j+0.5)) while the core homography is centre-relative with *module
     // centres* on integer coordinates — the bullseye centre module (c,c) sits at
@@ -240,8 +293,7 @@ fn try_grid(
     });
     let h = Homography::from_correspondences(abs_src, dst)
         .map_err(|_| Error::undecodable("degenerate Aztec homography"))?;
-    let matrix = sample_grid(frame, &h, size, threshold, QUIET_ZONE);
-    decoder.decode_matrix(&matrix)
+    Ok(sample_grid(frame, &h, size, threshold, QUIET_ZONE))
 }
 
 /// A reported [`Location`] for the decoded symbol: the core corners scaled out make

@@ -277,3 +277,132 @@ fn rejects_wrong_size_grid() {
     let m = BitMatrix::new(30, 30, 1);
     assert!(MaxiCodeDecoder::new().decode(&Encoding::Matrix(m)).is_err());
 }
+
+/// `sym` with its MaxiCode metadata edited by `edit`.
+fn with_meta(sym: &anyd::Symbol, edit: impl FnOnce(&mut MaxiCodeMeta)) -> anyd::Symbol {
+    let mut sym = sym.clone();
+    let SymbolMeta::MaxiCode(m) = &mut sym.meta else {
+        panic!("expected MaxiCodeMeta");
+    };
+    edit(m);
+    sym
+}
+
+#[test]
+fn out_of_range_meta_is_an_error_not_a_panic() {
+    // A hand-built body is placed verbatim, so values that are not six-bit codewords
+    // (or a carrier that cannot be packed) must be refused rather than reach the
+    // GF(64) tables or silently encode something else.
+    let enc = MaxiCodeEncoder::new();
+    let sym = enc.build(b"BODY").unwrap();
+    for bad in [64u8, 255] {
+        let broken = with_meta(&sym, |m| m.body[3] = bad);
+        assert!(enc.encode(&broken).is_err(), "body value {bad}");
+    }
+
+    let sym = enc.build_structured(2, "12345", 840, 1, b"X").unwrap();
+    for postcode in ["", "1234567890", "12 45", "+1234", "99999999999999999999"] {
+        let broken = with_meta(&sym, |m| {
+            m.carrier.as_mut().unwrap().postcode = postcode.into();
+        });
+        assert!(enc.encode(&broken).is_err(), "postcode {postcode:?}");
+    }
+    let broken = with_meta(&sym, |m| m.carrier.as_mut().unwrap().country = 1000);
+    assert!(enc.encode(&broken).is_err());
+    let broken = with_meta(&sym, |m| m.carrier.as_mut().unwrap().service = 1000);
+    assert!(enc.encode(&broken).is_err());
+
+    let sym = enc.build_structured(3, "B1050", 56, 999, b"X").unwrap();
+    for postcode in ["B10500 ", "b1050 ", "B1!50 ", "B1050"] {
+        let broken = with_meta(&sym, |m| {
+            m.carrier.as_mut().unwrap().postcode = postcode.into();
+        });
+        assert!(enc.encode(&broken).is_err(), "postcode {postcode:?}");
+    }
+}
+
+#[test]
+fn exactly_full_and_one_over() {
+    // Code Set A characters cost one codeword each: modes 4/6 hold 93, mode 5 holds
+    // 77 and the Structured Carrier secondary (modes 2/3) 84.
+    let enc = MaxiCodeEncoder::new();
+    for (mode, cap) in [(4u8, 93usize), (5, 77), (6, 93)] {
+        let full = vec![b'Z'; cap];
+        let sym = enc.build_mode(&full, mode).unwrap();
+        assert_eq!(sym.payload_bytes(), full);
+        assert_lossless(&sym);
+        assert!(enc.build_mode(&vec![b'Z'; cap + 1], mode).is_err());
+    }
+    for mode in [2u8, 3] {
+        let full = vec![b'Z'; 84];
+        let sym = enc.build_structured(mode, "12345", 1, 1, &full).unwrap();
+        assert_eq!(sym.payload_bytes(), full);
+        assert_lossless(&sym);
+        assert!(
+            enc.build_structured(mode, "12345", 1, 1, &[b'Z'; 85])
+                .is_err()
+        );
+    }
+    // A Code Set C/D tail needs one more codeword to latch back before padding, but
+    // not when it ends exactly at capacity.
+    let sym = enc.build_mode(&[0xC0; 40], 4).unwrap();
+    assert_eq!(sym.payload_bytes(), [0xC0; 40]);
+    assert_lossless(&sym);
+}
+
+#[test]
+fn decoder_never_panics_on_garbage() {
+    let mut seed = 0x3A81_C0DE_5EED_0001u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let dec = MaxiCodeDecoder::new();
+    for density in [0u64, 1, 2, 3, 4] {
+        for _ in 0..20 {
+            let mut m = BitMatrix::new(30, 33, 1);
+            for y in 0..33 {
+                for x in 0..30 {
+                    m.set(x, y, next() % 4 < density);
+                }
+            }
+            let _ = dec.decode(&Encoding::Matrix(m));
+        }
+    }
+    // Valid symbols of every mode with growing damage: never a panic, and whatever
+    // still decodes must re-encode without error.
+    let enc = MaxiCodeEncoder::new();
+    let mut symbols = vec![
+        enc.build_structured(2, "152382802", 840, 1, b"1Z00004951")
+            .unwrap(),
+        enc.build_structured(3, "B1050", 56, 999, b"CEN DATA")
+            .unwrap(),
+    ];
+    for mode in 4..=6 {
+        let payload: Vec<u8> = (0..30).map(|_| next() as u8).collect();
+        symbols.push(enc.build_mode(&payload, mode).unwrap());
+    }
+    for sym in &symbols {
+        let Encoding::Matrix(clean) = enc.encode(sym).unwrap() else {
+            panic!("expected matrix");
+        };
+        for flips in [1usize, 4, 12, 30, 60, 120, 400] {
+            for _ in 0..30 {
+                let mut m = clean.clone();
+                for _ in 0..flips {
+                    let (x, y) = ((next() % 30) as usize, (next() % 33) as usize);
+                    let v = m.get(x, y);
+                    m.set(x, y, !v);
+                }
+                if let Ok(decoded) = dec.decode(&Encoding::Matrix(m)) {
+                    if flips <= 4 {
+                        assert_eq!(&decoded, sym);
+                    }
+                    let _ = enc.encode(&decoded);
+                }
+            }
+        }
+    }
+}

@@ -132,3 +132,55 @@ fn decode_primary_3(cw: &[u8; TOTAL_CW]) -> Carrier {
         service: service as u16,
     }
 }
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+    use crate::codes::maxicode::{MaxiCodeEncoder, render_matrix};
+    use crate::traits::Encode;
+    use alloc::vec::Vec;
+
+    /// The primary block corrects 5 codeword errors and each secondary interleave 10
+    /// (Standard EC) or 14 (Enhanced EC, mode 5) simultaneously; one more error in
+    /// any block is reported rather than mis-decoded.
+    #[test]
+    fn corrects_up_to_capacity_in_every_block() {
+        let enc = MaxiCodeEncoder::new();
+        for mode in [4u8, 5, 6] {
+            let symbol = enc
+                .build_mode(b"MAXICODE BLOCK CAPACITY 2026", mode)
+                .unwrap();
+            let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+                panic!("expected a matrix");
+            };
+            let cw = read_codewords(&clean);
+            let t2 = secondary_lengths(mode).1 / 4;
+            // Codeword indices of the primary block and of each secondary interleave.
+            let primary: Vec<usize> = (0..20).collect();
+            let even: Vec<usize> = (20..TOTAL_CW).step_by(2).collect();
+            let odd: Vec<usize> = (21..TOTAL_CW).step_by(2).collect();
+            let blocks = [(&primary, 5usize), (&even, t2), (&odd, t2)];
+            let hit = |cw: &mut [u8; TOTAL_CW], idx: &[usize], count: usize| {
+                for k in 0..count {
+                    cw[idx[k * idx.len() / count]] ^= 0x2A;
+                }
+            };
+
+            let mut bad = cw;
+            for (idx, t) in blocks {
+                hit(&mut bad, idx, t);
+            }
+            let decoded = MaxiCodeDecoder::new()
+                .decode_matrix(&render_matrix(&bad))
+                .unwrap();
+            assert_eq!(decoded, symbol, "mode {mode}");
+
+            for (b, (idx, t)) in blocks.into_iter().enumerate() {
+                let mut bad = cw;
+                hit(&mut bad, idx, t + 1);
+                let result = MaxiCodeDecoder::new().decode_matrix(&render_matrix(&bad));
+                assert!(result.is_err(), "mode {mode} block {b}");
+            }
+        }
+    }
+}

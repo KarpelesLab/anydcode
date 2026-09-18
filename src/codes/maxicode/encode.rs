@@ -116,6 +116,11 @@ impl Encode for MaxiCodeEncoder {
                 "MaxiCode body length does not match the mode",
             ));
         }
+        if meta.body.iter().any(|&c| c > 63) {
+            return Err(Error::invalid_parameter(
+                "MaxiCode body codewords must be six-bit values (0..=63)",
+            ));
+        }
 
         let mut cw = [0u8; TOTAL_CW];
         if mode <= 3 {
@@ -188,6 +193,14 @@ fn normalize_carrier(mode: u8, postcode: &str, country: u16, service: u16) -> Re
 
 /// Format the Structured Carrier primary message (`cw[0..10]`) for mode 2 or 3.
 fn format_primary(cw: &mut [u8; TOTAL_CW], mode: u8, carrier: &Carrier) -> Result<()> {
+    // The carrier may be hand-built: hold it to the canonical form `build_structured`
+    // stores, which is also the only form the decoder reproduces.
+    let canonical = normalize_carrier(mode, &carrier.postcode, carrier.country, carrier.service)?;
+    if canonical != *carrier {
+        return Err(Error::invalid_data(
+            "MaxiCode mode 3 postcode must be 6 upper-case characters (space-padded)",
+        ));
+    }
     let country = carrier.country as u32;
     let service = carrier.service as u32;
     if mode == 2 {

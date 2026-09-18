@@ -111,8 +111,12 @@ fn parse_opts(args: &[String], value_opts: &[&str], flag_opts: &[&str]) -> Resul
 
 fn cmd_encode(args: &[String]) -> Result<(), String> {
     let opts = parse_opts(args, &["format", "out", "scale", "ec"], &["invert"])?;
-    if opts.positional.len() < 2 {
-        return Err("usage: anyd encode <symbology> <data> [--format ...] [--out ...]".into());
+    if opts.positional.len() != 2 {
+        return Err(
+            "usage: anyd encode <symbology> <data> [--format ...] [--out ...] \
+                    (quote data that contains spaces)"
+                .into(),
+        );
     }
     let symbology = opts.positional[0].to_lowercase();
     let data = &opts.positional[1];
@@ -461,10 +465,9 @@ fn render_svg(encoding: &Encoding, scale: usize) -> Result<String, String> {
 
 fn cmd_decode(args: &[String]) -> Result<(), String> {
     let opts = parse_opts(args, &[], &[])?;
-    let path = opts
-        .positional
-        .first()
-        .ok_or("usage: anyd decode <image.png>")?;
+    let [path] = opts.positional.as_slice() else {
+        return Err("usage: anyd decode <image.png>".into());
+    };
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
     let found = decode_png_bytes(&bytes)?;
 
@@ -676,6 +679,17 @@ mod tests {
         assert!(decode_png_bytes(png).is_err());
         assert!(decode_png_bytes(b"").is_err());
         assert!(decode_png_bytes(b"\x89PNG\r\n\x1a\n").is_err());
+    }
+
+    /// Unquoted data with a space must not be silently cut at the first word.
+    #[test]
+    fn surplus_positionals_are_errors() {
+        let out = std::env::temp_dir().join(format!("anyd-cli-test-{}.txt", std::process::id()));
+        let out = out.to_str().unwrap();
+        assert!(run(&args(&["encode", "qr", "HELLO", "WORLD", "--out", out])).is_err());
+        assert!(run(&args(&["decode", "a.png", "b.png"])).is_err());
+        assert!(run(&args(&["encode", "qr", "HELLO WORLD", "--out", out])).is_ok());
+        let _ = std::fs::remove_file(out);
     }
 
     #[test]

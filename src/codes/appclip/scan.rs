@@ -45,6 +45,22 @@ const MAX_ROTATION_CANDIDATES: usize = 8;
 const BG_RADIUS: f64 = 400.0;
 const STROKE: f64 = 23.5;
 const TEMPLATE_BITS: [bool; 8] = [false, true, false, true, false, true, false, false];
+/// Largest tolerated ratio of edge energy on the radii that must be *quiet* (between
+/// the rings) to edge energy on the ring edges themselves, under the fitted transform.
+///
+/// This is the scanner's only structural test, and it has to exist: the payload's
+/// Reed–Solomon blocks correct a single symbol each (the metadata block is RS(4,2) over
+/// GF(16), which a quarter of all random words satisfy) and every candidate is decoded
+/// under thousands of rotation × threshold × polarity hypotheses, so on its own the
+/// codec accepts roughly one junk frame in ten — reporting a fluent-looking URL off a
+/// page of text or an ordinary barcode. Five concentric rings are unmistakable to this
+/// measure: a real code scores ≈ 0 (≤ 0.2 blurred and tilted), while text, bars, a
+/// checkerboard, and wrong-radius fits over a real code all score 0.5–1.0.
+const MAX_QUIET_RATIO: f64 = 0.40;
+/// A bit vector whose fixed template byte is wrong in more than this many of its eight
+/// bits is a bad hypothesis, not a damaged code: the template is not error-corrected,
+/// so it is the one part of the payload that can vouch for the sampling.
+const MAX_TEMPLATE_MISMATCH: u8 = 1;
 
 /// Scan `frame` for an App Clip Code and decode its URL.
 pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
@@ -66,13 +82,15 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
 
     if std::env::var("ANYD_APPCLIP_DEBUG").is_ok() {
         for c in &candidates {
+            let (edge, quiet) = ring_energies(&full_field, c.cx, c.cy, c.scale);
             eprintln!(
-                "appclip cand cx={:.1} cy={:.1} scale={:.4} (outer r {:.1}px) score={:.4}",
+                "appclip cand cx={:.1} cy={:.1} scale={:.4} (outer r {:.1}px) score={:.4} edge={edge:.4} quiet={quiet:.4} ratio={:.2}",
                 c.cx,
                 c.cy,
                 c.scale,
                 BG_RADIUS * c.scale,
-                c.score
+                c.score,
+                quiet / edge.max(1e-9)
             );
         }
     }
@@ -415,6 +433,13 @@ fn top_local_maxima(
 }
 
 fn circle_score(field: &EdgeField, cx: f64, cy: f64, scale: f64) -> f64 {
+    let (edge, quiet) = ring_energies(field, cx, cy, scale);
+    edge - quiet * 0.75
+}
+
+/// Mean edge energy sampled around the expected ring-edge radii, and around the radii
+/// that must be quiet, for a circle hypothesis.
+fn ring_energies(field: &EdgeField, cx: f64, cy: f64, scale: f64) -> (f64, f64) {
     let er = edge_radii(scale);
     let qr = quiet_radii(scale);
     let samples = 72usize;
@@ -430,7 +455,10 @@ fn circle_score(field: &EdgeField, cx: f64, cy: f64, scale: f64) -> f64 {
             quiet_energy += field.sample(cx + c * r, cy + s * r);
         }
     }
-    edge_energy / (er.len() * samples) as f64 - quiet_energy / (qr.len() * samples) as f64 * 0.75
+    (
+        edge_energy / (er.len() * samples) as f64,
+        quiet_energy / (qr.len() * samples) as f64,
+    )
 }
 
 fn refine_candidate(field: &EdgeField, cand: Candidate) -> Candidate {
@@ -494,6 +522,13 @@ impl Xform {
 }
 
 fn xform_score(field: &EdgeField, x: &Xform) -> f64 {
+    let (edge, quiet) = xform_energies(field, x);
+    edge - quiet * 0.7
+}
+
+/// Mean edge energy on the expected ring edges and on the must-be-quiet radii under an
+/// affine (tilted-circle) hypothesis.
+fn xform_energies(field: &EdgeField, x: &Xform) -> (f64, f64) {
     let er = edge_radii(1.0);
     let qr = quiet_radii(1.0);
     let samples = 96usize;
@@ -510,7 +545,10 @@ fn xform_score(field: &EdgeField, x: &Xform) -> f64 {
             quiet_energy += field.sample(px, py);
         }
     }
-    edge_energy / (er.len() * samples) as f64 - quiet_energy / (qr.len() * samples) as f64 * 0.7
+    (
+        edge_energy / (er.len() * samples) as f64,
+        quiet_energy / (qr.len() * samples) as f64,
+    )
 }
 
 /// Estimate tilt from the outer-circle edge cloud's second moments and refine by
@@ -851,6 +889,10 @@ fn rotation_candidates(gray: &Gray, x: &Xform) -> Vec<f64> {
 
 fn decode_candidate(gray: &Gray, field: &EdgeField, cand: Candidate) -> Option<String> {
     let base = estimate_xform(field, cand);
+    let (edge, quiet) = xform_energies(field, &base);
+    if quiet > MAX_QUIET_RATIO * edge {
+        return None;
+    }
     let avg = (base.sx + base.sy) * 0.5;
     let variants = [
         base,
@@ -912,6 +954,10 @@ fn decode_attempts(samples: &[PositionSample]) -> Vec<Vec<bool>> {
         let visible: Vec<bool> = contrasts.iter().map(|&c| c < threshold).collect();
         let visible_count = visible.iter().filter(|&&v| v).count();
         if visible_count < MIN_VISIBLE_POSITIONS || visible_count > samples.len() - 8 {
+            continue;
+        }
+        let template = contrasts_template_mismatch(&visible);
+        if template > MAX_TEMPLATE_MISMATCH {
             continue;
         }
         let colors: Vec<f64> = samples
@@ -1010,6 +1056,13 @@ fn classify_two(colors: &[f64]) -> Vec<Vec<bool>> {
     }
     let flipped: Vec<bool> = labels.iter().map(|&l| !l).collect();
     vec![labels, flipped]
+}
+
+/// [`template_mismatch`] from the gap/arc visibility alone (the template lives in the
+/// gap bits, so it can veto a threshold before any color hypothesis is built).
+fn contrasts_template_mismatch(visible: &[bool]) -> u8 {
+    let gaps: Vec<bool> = visible.iter().map(|&v| !v).collect();
+    template_mismatch(&gaps)
 }
 
 /// Hamming distance of the assembled bit vector's template byte from `0x2A`.

@@ -266,12 +266,25 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     Ok(runs)
 }
 
-/// Recover a digit from a 5-element width pattern (wide = width > 1).
+/// Widest run, in modules, still read as a wide element: ISO/IEC 16390 allows a
+/// wide:narrow ratio of 2:1 to 3:1. Anything wider is a gap or a blob, not an element.
+#[cfg(feature = "decode")]
+const MAX_WIDE: u32 = 3;
+
+/// Whether a run is a wide element (`2..=MAX_WIDE` modules).
+#[cfg(feature = "decode")]
+fn is_wide(width: u32) -> bool {
+    (2..=MAX_WIDE).contains(&width)
+}
+
+/// Recover a digit from a 5-element width pattern.
 #[cfg(feature = "decode")]
 fn digit_from_widths(w: &[u32]) -> Result<u8> {
-    for (d, pat) in DIGIT_WIDTHS.iter().enumerate() {
-        if w.iter().zip(pat).all(|(&a, &b)| (a > 1) == (b > 1)) {
-            return Ok(d as u8);
+    if w.iter().all(|&a| a <= MAX_WIDE) {
+        for (d, pat) in DIGIT_WIDTHS.iter().enumerate() {
+            if w.iter().zip(pat).all(|(&a, &b)| is_wide(a) == (b > 1)) {
+                return Ok(d as u8);
+            }
         }
     }
     Err(Error::undecodable("invalid ITF digit pattern"))
@@ -297,7 +310,7 @@ impl Decode for ItfDecoder {
         }
         // Stop: wide bar, narrow space, narrow bar.
         let stop = &runs[runs.len() - 3..];
-        if stop[0] <= 1 || stop[1] > 1 || stop[2] > 1 {
+        if !is_wide(stop[0]) || stop[1] > 1 || stop[2] > 1 {
             return Err(Error::undecodable("bad ITF stop pattern"));
         }
 

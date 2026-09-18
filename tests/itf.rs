@@ -76,3 +76,47 @@ fn encode_into_matches_encode() {
         assert_eq!(buf.len(), 0);
     }
 }
+
+/// Re-draw a module row, replacing the run at index `run` with one `width` modules wide.
+fn with_run_width(modules: &[bool], run: usize, width: usize) -> Vec<bool> {
+    let mut out = Vec::new();
+    let (mut i, mut k) = (0, 0);
+    while i < modules.len() {
+        let mut j = i;
+        while j < modules.len() && modules[j] == modules[i] {
+            j += 1;
+        }
+        let w = if k == run { width } else { j - i };
+        out.extend(std::iter::repeat_n(modules[i], w));
+        (i, k) = (j, k + 1);
+    }
+    out
+}
+
+/// ITF has two element widths, wide being 2-3 narrow modules. A bar or space many
+/// modules wide is a gap or a blob, not a wide element, and ITF has no mandatory
+/// check digit to catch the phantom read.
+#[test]
+fn oversized_elements_are_not_wide() {
+    use anyd::output::{Encoding, LinearPattern};
+    let enc = ItfEncoder::new();
+    let Encoding::Linear(clean) = enc.encode(&enc.build(b"1234", false).unwrap()).unwrap() else {
+        panic!("ITF encodes to a linear pattern");
+    };
+    let decode = |modules: Vec<bool>| {
+        let mut p = LinearPattern::new();
+        p.modules = modules;
+        ItfDecoder::new().decode(&Encoding::Linear(p))
+    };
+    // Run 4 is the first data bar (the wide first bar of "1").
+    assert!(decode(with_run_width(&clean.modules, 4, 2)).is_ok());
+    assert!(decode(with_run_width(&clean.modules, 4, 3)).is_ok());
+    for width in [5, 12, 40] {
+        assert!(
+            decode(with_run_width(&clean.modules, 4, width)).is_err(),
+            "{width}-module bar accepted as wide"
+        );
+        // The stop pattern's wide bar, too (start 4 runs + two pairs of 10).
+        assert!(decode(with_run_width(&clean.modules, 24, width)).is_err());
+    }
+}

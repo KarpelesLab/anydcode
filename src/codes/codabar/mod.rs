@@ -245,11 +245,19 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     Ok(runs)
 }
 
-/// Recover a character from its seven element widths (wide = width > 1).
+/// Widest run, in modules, still read as a wide element: Codabar is printed with a
+/// wide:narrow ratio of at most 3:1. Anything wider is a gap or a blob, not an element.
+#[cfg(feature = "decode")]
+const MAX_WIDE: u32 = 3;
+
+/// Recover a character from its seven element widths (wide = `2..=MAX_WIDE` modules).
 #[cfg(feature = "decode")]
 fn char_from_widths(w: &[u32]) -> Result<u8> {
     let mut value = 0u8;
     for (i, &width) in w.iter().enumerate() {
+        if width > MAX_WIDE {
+            return Err(Error::undecodable("Codabar element too wide"));
+        }
         if width > 1 {
             value |= 1 << (6 - i);
         }

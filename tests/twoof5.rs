@@ -96,3 +96,56 @@ fn encode_into_matches_encode() {
         }
     }
 }
+
+/// Re-draw a module row, replacing the run at index `run` with one `width` modules wide.
+fn with_run_width(modules: &[bool], run: usize, width: usize) -> Vec<bool> {
+    let mut out = Vec::new();
+    let (mut i, mut k) = (0, 0);
+    while i < modules.len() {
+        let mut j = i;
+        while j < modules.len() && modules[j] == modules[i] {
+            j += 1;
+        }
+        let w = if k == run { width } else { j - i };
+        out.extend(std::iter::repeat_n(modules[i], w));
+        (i, k) = (j, k + 1);
+    }
+    out
+}
+
+/// Standard and IATA 2 of 5 carry data in the bars only: every space is narrow. A
+/// wide space (or a wide Matrix inter-character space) is not part of the symbology.
+#[test]
+fn wide_spaces_are_rejected() {
+    use anyd::output::{Encoding, LinearPattern};
+    let enc = TwoOf5Encoder::new();
+    for (sym, start_runs, per_digit) in [
+        (Symbology::Std2of5, 6, 10),
+        (Symbology::Iata2of5, 4, 10),
+        (Symbology::Matrix2of5, 6, 6),
+    ] {
+        let symbol = enc.build(sym, b"1234").unwrap();
+        let Encoding::Linear(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("2 of 5 encodes to a linear pattern");
+        };
+        let decode = |modules: Vec<bool>| {
+            let mut p = LinearPattern::new();
+            p.modules = modules;
+            TwoOf5Decoder::new().decode(&Encoding::Linear(p))
+        };
+        assert!(decode(clean.modules.clone()).is_ok());
+        // The last run of the first digit is its trailing (narrow) space.
+        let gap = start_runs + per_digit - 1;
+        assert!(
+            decode(with_run_width(&clean.modules, gap, 3)).is_err(),
+            "{sym:?}: wide inter-bar space accepted"
+        );
+        // An oversized bar is not a wide bar either (run `start_runs` is the first
+        // data bar, wide for the digit 1).
+        assert!(decode(with_run_width(&clean.modules, start_runs, 3)).is_ok());
+        assert!(
+            decode(with_run_width(&clean.modules, start_runs, 12)).is_err(),
+            "{sym:?}: 12-module bar accepted as wide"
+        );
+    }
+}

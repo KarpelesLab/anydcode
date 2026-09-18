@@ -276,18 +276,34 @@ fn rle(modules: &[bool]) -> Result<Vec<u32>> {
     Ok(runs)
 }
 
-/// Compare a run slice against an expected width pattern by wide/narrow class.
+/// Widest run, in modules, still read as a wide element (the wide:narrow ratio is at
+/// most 3:1). Anything wider is a gap or a blob, not an element.
+#[cfg(feature = "decode")]
+const MAX_WIDE: u32 = 3;
+/// Widest run still read as Matrix 2 of 5's quadruple-width start/stop bar.
+#[cfg(feature = "decode")]
+const MAX_QUAD: u32 = 5;
+
+/// Compare a run slice against an expected width pattern by element class: narrow
+/// (1), wide (`2..=MAX_WIDE`) or, for a pattern width of 4, quadruple (`4..=MAX_QUAD`).
 #[cfg(feature = "decode")]
 fn matches_widths(runs: &[u32], pattern: &[u32]) -> bool {
-    runs.len() == pattern.len() && runs.iter().zip(pattern).all(|(&r, &p)| (r > 1) == (p > 1))
+    runs.len() == pattern.len()
+        && runs.iter().zip(pattern).all(|(&r, &p)| match p {
+            1 => r == 1,
+            4 => (4..=MAX_QUAD).contains(&r),
+            _ => (2..=MAX_WIDE).contains(&r),
+        })
 }
 
-/// Recover a digit from its five bar widths (wide = width > 1).
+/// Recover a digit from its five bar widths (wide = `2..=MAX_WIDE` modules).
 #[cfg(feature = "decode")]
 fn digit_from_bars(bars: &[u32]) -> Result<u8> {
-    for (d, pat) in BAR_WIDTHS.iter().enumerate() {
-        if (0..5).all(|i| (bars[i] > 1) == (pat[i] > 1)) {
-            return Ok(d as u8);
+    if bars.iter().all(|&b| b <= MAX_WIDE) {
+        for (d, pat) in BAR_WIDTHS.iter().enumerate() {
+            if (0..5).all(|i| (bars[i] > 1) == (pat[i] > 1)) {
+                return Ok(d as u8);
+            }
         }
     }
     Err(Error::undecodable("invalid 2-of-5 digit pattern"))
@@ -337,6 +353,18 @@ impl Decode for TwoOf5Decoder {
             let mut digits = Vec::new();
             let mut ok = true;
             for chunk in body.chunks(per_digit) {
+                // Standard/IATA carry data in the bars only, and Matrix closes each
+                // digit with a narrow space: those spaces must all be narrow.
+                let spaces_narrow = match variant {
+                    Variant::Standard | Variant::Iata => {
+                        chunk.iter().skip(1).step_by(2).all(|&s| s == 1)
+                    }
+                    Variant::Matrix => chunk[5] == 1,
+                };
+                if !spaces_narrow {
+                    ok = false;
+                    break;
+                }
                 let bars: Vec<u32> = match variant {
                     Variant::Standard | Variant::Iata => chunk.iter().step_by(2).copied().collect(),
                     Variant::Matrix => chunk[..5].to_vec(),

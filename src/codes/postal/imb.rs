@@ -349,6 +349,10 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(super::PostalVariant, Vec<Seg
         fcs |= 0x400;
         cw[0] -= 659;
     }
+    // The base conversion only ever yields J in 0..=635 and A in 0..=658.
+    if cw_j >= 636 || cw[0] >= 659 {
+        return Err(Error::undecodable("IMb codeword out of range"));
+    }
 
     // Rebuild the 102-bit binary value and re-verify the CRC.
     let mut value = cw[0] as u128;
@@ -360,15 +364,17 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(super::PostalVariant, Vec<Seg
         return Err(Error::undecodable("IMb CRC mismatch"));
     }
 
-    let (tracking, routing) = from_binary(value);
+    let (tracking, routing) =
+        from_binary(value).ok_or_else(|| Error::undecodable("IMb routing code out of range"))?;
     Ok((
         super::PostalVariant::IntelligentMail,
         vec![Segment::numeric(tracking), Segment::numeric(routing)],
     ))
 }
 
-/// Step 1 inverse: recover the ASCII tracking (20 digits) and routing fields.
-fn from_binary(mut value: u128) -> (Vec<u8>, Vec<u8>) {
+/// Step 1 inverse: recover the ASCII tracking (20 digits) and routing fields, or
+/// `None` if the routing value is beyond the largest 11-digit routing code.
+fn from_binary(mut value: u128) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut tracking = [0u8; 20];
     for slot in tracking[2..20].iter_mut().rev() {
         *slot = b'0' + (value % 10) as u8;
@@ -379,22 +385,24 @@ fn from_binary(mut value: u128) -> (Vec<u8>, Vec<u8>) {
     tracking[0] = b'0' + (value % 10) as u8;
     value /= 10;
 
-    let routing = decode_routing(value);
-    (tracking.to_vec(), routing)
+    let routing = decode_routing(value)?;
+    Some((tracking.to_vec(), routing))
 }
 
 /// Recover the routing digits from the routing integer value.
-fn decode_routing(value: u128) -> Vec<u8> {
+fn decode_routing(value: u128) -> Option<Vec<u8>> {
     let (width, zip) = if value == 0 {
         (0, 0)
     } else if value <= 100_000 {
         (5, value - 1)
     } else if value <= 1_000_100_000 {
         (9, value - 100_001)
-    } else {
+    } else if value <= 101_000_100_000 {
         (11, value - 1_000_100_001)
+    } else {
+        return None;
     };
-    fixed_width_digits(zip, width)
+    Some(fixed_width_digits(zip, width))
 }
 
 /// The ASCII decimal representation of `value` in exactly `width` digits.
@@ -407,4 +415,50 @@ fn fixed_width_digits(value: u128, width: usize) -> Vec<u8> {
     let bytes = text.as_bytes();
     out[width - bytes.len()..].copy_from_slice(bytes);
     out
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Bars for an arbitrary binary value, with a correct CRC — what an adversarial
+    /// (or astronomically unlucky) scan can present to the decoder.
+    fn bars_for(value: u128) -> Vec<BarState> {
+        let fcs = crc11(&binary_bytes(value));
+        let cw = to_codewords(value, fcs);
+        to_bars(&to_characters(&cw, fcs))
+    }
+
+    /// The codewords can express binary values no real fields produce: codeword A
+    /// reaches 705 once the CRC bit is folded out (658 is the real limit), and even
+    /// within range the routing code can exceed eleven digits, which used to underflow
+    /// the fixed-width formatter.
+    #[test]
+    fn oversized_binary_value_is_rejected_not_panicking() {
+        let mut tried = 0;
+        for a in 658..=705u128 {
+            let mut value = a;
+            for _ in 0..8 {
+                value = value * 1365 + 1364;
+            }
+            value = value * 636 + 635;
+            // Codeword A only reaches 659 + a when the CRC's top bit is set.
+            if a > 658 && crc11(&binary_bytes(value)) & 0x400 == 0 {
+                continue;
+            }
+            tried += 1;
+            assert!(decode(&bars_for(value)).is_err(), "A = {a} accepted");
+        }
+        assert!(tried > 1);
+    }
+
+    /// The largest encodable fields still round-trip.
+    #[test]
+    fn maximum_fields_roundtrip() {
+        let (tracking, routing) = (b"94999999999999999999", b"99999999999");
+        let bars = encode(tracking, routing).unwrap();
+        let (_, segments) = decode(&bars).unwrap();
+        assert_eq!(segments[0].data, tracking);
+        assert_eq!(segments[1].data, routing);
+    }
 }

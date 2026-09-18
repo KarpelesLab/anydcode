@@ -199,9 +199,47 @@ pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 /// already covers a ±6° band around horizontal.
 const MIN_DEROTATE_ANGLE: f32 = 8.0 * core::f32::consts::PI / 180.0;
 
+/// Scanlines that must independently agree on a `(symbology, text)` reading before it
+/// is reported. One line is not evidence: every decoder is tried on every span of every
+/// scanline in both directions — thousands of attempts per frame — and only Code 128,
+/// Code 93 and EAN/UPC carry a check character at all. A printed code is crossed by
+/// dozens of lines that all read the same thing; noise that slips past a decoder does
+/// so differently on each line.
+const MIN_LINE_VOTES: usize = 2;
+
+/// Light margin (modules) a span must show on *both* sides to be decoded. Specified
+/// quiet zones are 10 modules; a bar pattern butting against print or the crop edge is
+/// a fragment of something, and fragments are where misreads come from.
+const MIN_QUIET_MODULES: usize = 4;
+
+/// Cap on distinct module patterns decoded per sweep, most-voted first: bounds the work
+/// on a crop full of text-like spans.
+const MAX_PATTERNS: usize = 96;
+
+/// Whether a decoded linear symbol is long enough to be believed from a camera frame.
+///
+/// The symbologies without a check character accept any well-formed run sequence, and
+/// short well-formed sequences occur by chance in text, in other symbologies' bars and
+/// — above all — at the *ends of a real symbol*: a scanline that leaves an ITF's bars
+/// early still finds a valid start, some digit pairs and something stop-like. Real
+/// labels in these symbologies are never this short.
+fn plausible_length(sym: &Symbol) -> bool {
+    use crate::symbology::Symbology as S;
+    let len = sym.payload_bytes().len();
+    match sym.symbology {
+        S::Itf => len >= 6,
+        S::Codabar => len >= 3,
+        S::Code39 | S::Code93 => len >= 2,
+        // A lone add-on is never what a camera is pointed at; its parity rule is far
+        // too weak to stand without the main symbol beside it.
+        S::Ean2 | S::Ean5 => false,
+        _ => len >= 1,
+    }
+}
+
 /// One near-horizontal 1D pass: the EAN/UPC edge reader plus the quantized `scan1d`
-/// front-end feeding every checksummed linear decoder, each candidate tried in both
-/// reading directions.
+/// front-end feeding every linear decoder, each candidate tried in both reading
+/// directions, accepted by cross-scanline consensus.
 fn scan_1d_sweep(
     frame: &crate::image::GrayFrame<'_>,
     scan_opts: &crate::scan1d::ScanOptions,
@@ -230,24 +268,87 @@ fn scan_1d_sweep(
     if linear.is_empty() {
         return found;
     }
-    let candidates = crate::scan1d::scan_lines(frame, scan_opts);
-    for cand in &candidates {
-        // A scanline as easily runs against the code's reading direction as with it
-        // (and a 180°-rotated code always does): try the mirrored pattern too. The
-        // decoders are all checksummed, so a mirrored misread cannot false-accept.
+
+    // Group the per-scanline spans by module pattern: identical patterns decode
+    // identically, so each is decoded once and its line count carried as votes.
+    let mut patterns: Vec<(crate::scan1d::LinearCandidate, usize)> = Vec::new();
+    for cand in crate::scan1d::scan_spans(frame, scan_opts) {
+        if cand.pattern.quiet_zone < MIN_QUIET_MODULES {
+            continue;
+        }
+        match patterns
+            .iter_mut()
+            .find(|(c, _)| c.pattern.modules == cand.pattern.modules)
+        {
+            Some((best, votes)) => {
+                *votes += 1;
+                if cand.confidence > best.confidence {
+                    *best = cand;
+                }
+            }
+            None => patterns.push((cand, 1)),
+        }
+    }
+    patterns.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then(b.0.confidence.total_cmp(&a.0.confidence))
+    });
+    patterns.truncate(MAX_PATTERNS);
+
+    // Decode each pattern both ways and tally votes per reading. A scanline as easily
+    // runs against the code's reading direction as with it (and a 180°-rotated code
+    // always does), hence the mirrored attempt.
+    let mut readings: Vec<(Symbol, usize)> = Vec::new();
+    for (cand, votes) in &patterns {
         let mut mirrored = cand.clone();
         mirrored.pattern.modules.reverse();
         mirrored.edges.clear();
         for dec in &linear {
-            if let Some(s) = crate::scan1d::try_decode(cand, dec.as_ref()) {
-                dedup_push(&mut found, s);
-            }
-            if let Some(s) = crate::scan1d::try_decode(&mirrored, dec.as_ref()) {
-                dedup_push(&mut found, s);
+            for c in [cand, &mirrored] {
+                let Some(sym) = crate::scan1d::try_decode(c, dec.as_ref()) else {
+                    continue;
+                };
+                if !plausible_length(&sym) {
+                    continue;
+                }
+                match readings.iter_mut().find(|(s, _)| same_reading(s, &sym)) {
+                    Some((_, n)) => *n += votes,
+                    None => readings.push((sym, *votes)),
+                }
             }
         }
     }
+    readings.retain(|(_, n)| *n >= MIN_LINE_VOTES);
+
+    // A reading contained in a longer reading of the same symbology that is at least
+    // as well supported is that longer symbol seen through a scanline that left its
+    // bars early — not a second code.
+    let partial: Vec<bool> = readings
+        .iter()
+        .map(|(a, an)| {
+            let at = a.payload_bytes();
+            readings.iter().any(|(b, bn)| {
+                let bt = b.payload_bytes();
+                b.symbology == a.symbology
+                    && bt.len() > at.len()
+                    && 2 * bn >= *an
+                    && bt.windows(at.len().max(1)).any(|w| w == at.as_slice())
+            })
+        })
+        .collect();
+    let mut keep = partial.iter();
+    readings.retain(|_| !*keep.next().expect("one flag per reading"));
+
+    readings.sort_by_key(|(_, votes)| core::cmp::Reverse(*votes));
+    for (sym, _) in readings {
+        dedup_push(&mut found, sym);
+    }
     found
+}
+
+/// Whether two symbols are the same reading: same symbology, same payload bytes.
+fn same_reading(a: &Symbol, b: &Symbol) -> bool {
+    a.symbology == b.symbology && a.payload_bytes() == b.payload_bytes()
 }
 
 /// Copy a borrowed frame into an owned [`crate::image::GrayImage`] (for resampling).
@@ -260,18 +361,16 @@ fn to_image(frame: &crate::image::GrayFrame<'_>) -> crate::image::GrayImage {
     crate::image::GrayImage::from_raw(w, h, data)
 }
 
-/// Push `sym` unless an equal `(symbology, text)` is already present.
+/// Push `sym` unless an equal `(symbology, payload)` is already present. Keyed on the
+/// payload bytes, not the text: two different non-UTF-8 payloads have the same (absent)
+/// text and must not collapse into one.
 fn dedup_push(found: &mut Vec<Symbol>, sym: Symbol) {
-    let key = (sym.symbology, sym.text().unwrap_or_default());
-    if !found
-        .iter()
-        .any(|s| (s.symbology, s.text().unwrap_or_default()) == key)
-    {
+    if !found.iter().any(|s| same_reading(s, &sym)) {
         found.push(sym);
     }
 }
 
-/// De-duplicating [`Vec::extend`] by `(symbology, text)`.
+/// De-duplicating [`Vec::extend`] by `(symbology, payload)`.
 fn dedup_extend(found: &mut Vec<Symbol>, more: Vec<Symbol>) {
     for sym in more {
         dedup_push(found, sym);

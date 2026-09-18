@@ -15,20 +15,23 @@
 //!    image binarization. Each scan is a straight line in image space whose slope
 //!    is `tan(angle)`, sampled one column per pixel of width with vertical linear
 //!    interpolation.
-//! 2. **Edge detection & run-lengths** (`extract_runs`). Robust dark/light
-//!    levels are estimated per scanline from luminance percentiles (tolerant of
-//!    noise and a bar-or-two of outliers). Transitions are located by a hysteresis
-//!    state machine, then each edge is re-placed at the sub-pixel crossing of the
-//!    *local* midpoint between the plateau levels of its two adjacent runs. This
-//!    local refinement avoids the bias a single global threshold suffers when wide
-//!    quiet zones saturate the bright level above the interior space peaks, and it
-//!    keeps edge positions stable under blur. The result is a run sequence in
-//!    pixels bracketed by light quiet zones at both ends.
-//! 3. **Module quantization** (`quantize`). The narrow-module pixel width is
-//!    estimated from the run-width distribution (seeded by the smallest run, then
-//!    refined by least-squares against the assigned integer counts). Each run is
-//!    expanded into that many equal `bool`s, yielding a [`LinearPattern`] plus a
-//!    quiet-zone module count.
+//! 2. **Edge detection & run-lengths** (`extract_runs`). Dark/light is decided
+//!    against a *sliding* local threshold — the midpoint of the luminance range in a
+//!    window around each sample — so an illumination falloff along the line, or a
+//!    dark surface beyond the label, does not shift the split. Transitions are
+//!    located by a hysteresis state machine, then each edge is re-placed at the
+//!    sub-pixel crossing of the *local* midpoint between the plateau levels of its
+//!    two adjacent runs, which keeps edge positions stable under blur.
+//! 3. **Span segmentation** (`split_spans`). A scanline through a real scene crosses
+//!    more than the barcode: the label's edge, the surface it sits on, print beside
+//!    it. The run sequence is cut at every run too wide to be a symbol element — the
+//!    quiet zones and background — and each remaining stretch of bars becomes its own
+//!    candidate, carrying the light margins measured on either side of it.
+//! 4. **Module quantization** (`quantize`). Per span, the narrow-module pixel width
+//!    and the bar/space width bias (ink spread, blur and threshold offset fatten bars
+//!    at the expense of spaces, or the reverse) are fitted by least squares against
+//!    the assigned integer counts. Each run is expanded into that many equal `bool`s,
+//!    yielding a [`LinearPattern`] plus a quiet-zone module count.
 //!
 //! # Robustness envelope
 //!
@@ -43,8 +46,9 @@
 //!   trying every candidate pattern mirrored (180°) and — when the sweep finds
 //!   nothing — measuring the crop's dominant texture orientation and derotating the
 //!   whole crop before rescanning (any other angle).
-//! - **Framing.** The barcode need not span the full frame width, but a light
-//!   quiet zone must be present on both sides of the scan line.
+//! - **Framing.** The barcode need not span the frame, and the scan line may start
+//!   or end on anything — dark background, other print, a second barcode. Each symbol
+//!   only needs its own light quiet zone on both sides.
 //!
 //! Vertical extent is *not* measured (a single scan line has no height); the
 //! reported [`Location`] outline is a thin band centered on the scan line.
@@ -129,6 +133,17 @@ pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandid
     found
 }
 
+/// Scan `frame` and return **every** per-scanline span candidate, without the dedup and
+/// truncation [`scan_lines`] applies.
+///
+/// This is what a consensus decoder wants: the same physical code is crossed by many
+/// scanlines, and *how many* of them agree on a reading is the strongest evidence
+/// available that the reading is real (see [`crate::pipeline::scan_1d`]). Ordered by
+/// scan position, then angle, then left to right along the line.
+pub fn scan_spans(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
+    scan_all(frame, opts)
+}
+
 /// Prominence thresholds (as a fraction of the scanline amplitude) used by the fine
 /// peak-based extractor behind [`scan_edges`]. A low value resolves the shallow dips
 /// that heavy blur leaves at thin (~1 module) features; a higher one rejects noise on
@@ -211,9 +226,7 @@ fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
         for &deg in &opts.angles_deg {
             let tan = (deg.to_radians()).tan();
             let profile = sample_profile(frame, cy, tan, opts.smooth_radius);
-            if let Some(cand) = analyze_profile(&profile, cy, tan, deg, w, opts.min_runs) {
-                found.push(cand);
-            }
+            found.extend(analyze_profile(&profile, cy, tan, deg, w, opts.min_runs));
         }
     }
     found
@@ -286,7 +299,9 @@ fn smooth(profile: &[f32], radius: usize) -> Vec<f32> {
 /// dark/light levels used.
 #[derive(Debug)]
 struct Runs {
-    /// Sub-pixel positions (fractional column index) of every transition.
+    /// Sub-pixel positions (fractional column index) of every transition, from the
+    /// leading edge of the first bar to the trailing edge of the last: an even count,
+    /// consecutive pairs bounding alternating bar/space runs.
     edges: Vec<f32>,
     /// Peak-to-peak amplitude (light minus dark level).
     amplitude: f32,
@@ -319,9 +334,75 @@ fn crossing(i: usize, a: f32, b: f32, thr: f32) -> f32 {
     }
 }
 
-/// Extract transitions from a profile using hysteresis around the mid-level, placing
-/// each confirmed edge at its sub-pixel midpoint crossing. Returns `None` for flat
-/// profiles or ones that do not begin and end in a light quiet zone.
+/// Per-sample local threshold and hysteresis half-band for a profile.
+///
+/// Each sample is compared against the midpoint of the luminance range within
+/// `radius` samples of it. Where that range is too small to hold a bar edge — inside a
+/// quiet zone, a wide bar, a flat dark background — the nearest *informative* threshold
+/// is carried over, so flat stretches are classified by the contrast next to them
+/// rather than by noise. Returns `None` for a profile that is flat throughout.
+fn local_thresholds(profile: &[f32], radius: usize) -> Option<Vec<(f32, f32)>> {
+    let n = profile.len();
+    // Sliding-window min and max via monotonic deques: O(n).
+    let mut lo = vec![0.0f32; n];
+    let mut hi = vec![0.0f32; n];
+    let mut min_q: alloc::collections::VecDeque<usize> = alloc::collections::VecDeque::new();
+    let mut max_q: alloc::collections::VecDeque<usize> = alloc::collections::VecDeque::new();
+    let mut next = 0usize;
+    for i in 0..n {
+        let right = (i + radius).min(n - 1);
+        while next <= right {
+            while min_q.back().is_some_and(|&b| profile[b] >= profile[next]) {
+                min_q.pop_back();
+            }
+            min_q.push_back(next);
+            while max_q.back().is_some_and(|&b| profile[b] <= profile[next]) {
+                max_q.pop_back();
+            }
+            max_q.push_back(next);
+            next += 1;
+        }
+        let left = i.saturating_sub(radius);
+        while min_q.front().is_some_and(|&f| f < left) {
+            min_q.pop_front();
+        }
+        while max_q.front().is_some_and(|&f| f < left) {
+            max_q.pop_front();
+        }
+        lo[i] = profile[*min_q.front().expect("window is never empty")];
+        hi[i] = profile[*max_q.front().expect("window is never empty")];
+    }
+
+    let mut out: Vec<Option<(f32, f32)>> = (0..n)
+        .map(|i| {
+            let amp = hi[i] - lo[i];
+            (amp >= MIN_AMPLITUDE).then(|| ((lo[i] + hi[i]) / 2.0, amp * 0.12))
+        })
+        .collect();
+    // Carry informative thresholds across flat stretches: forward, then back-fill the
+    // leading stretch from the first informative sample.
+    let first = out.iter().position(|t| t.is_some())?;
+    let mut last = out[first];
+    for t in out.iter_mut().skip(first) {
+        match t {
+            Some(_) => last = *t,
+            None => *t = last,
+        }
+    }
+    let lead = out[first];
+    for t in out.iter_mut().take(first) {
+        *t = lead;
+    }
+    Some(out.into_iter().map(|t| t.expect("filled above")).collect())
+}
+
+/// Extract transitions from a profile using hysteresis around a sliding local
+/// mid-level, placing each confirmed edge at its sub-pixel midpoint crossing. Returns
+/// `None` for flat profiles or ones holding no complete bar.
+///
+/// The scan line may begin or end on anything (a dark background, a clipped bar): the
+/// returned edges run from the first light→dark transition to the last dark→light one,
+/// with the light margins outside them reported as the lead/trail widths.
 fn extract_runs(profile: &[f32]) -> Option<Runs> {
     let n = profile.len();
     if n < 4 {
@@ -332,64 +413,82 @@ fn extract_runs(profile: &[f32]) -> Option<Runs> {
     if amplitude < MIN_AMPLITUDE {
         return None;
     }
-    let thr = (low + high) / 2.0;
-    let hyst = amplitude * 0.12;
-    let hi = thr + hyst;
-    let lo = thr - hyst;
+    // Wide enough to see past the widest symbol element at any plausible module size,
+    // narrow enough to track an illumination falloff along the line.
+    let radius = (n / 24).clamp(8, 48);
+    let thresholds = local_thresholds(profile, radius)?;
 
-    // The scan must start in a light margin (quiet zone), else we clipped a bar.
-    let start_light = profile[0] >= thr;
-    if !start_light {
-        return None;
-    }
-
+    let start_dark = profile[0] < thresholds[0].0;
     let mut edges: Vec<f32> = Vec::new();
-    let mut dark = false; // start light
+    let mut dark = start_dark;
     let mut cand: Option<f32> = None;
 
     for i in 1..n {
         let a = profile[i - 1];
         let b = profile[i];
+        let (thr, hyst) = thresholds[i];
         if dark {
-            // Seeking a rising edge, confirmed once the signal passes `hi`.
+            // Seeking a rising edge, confirmed once the signal passes `thr + hyst`.
             if a < thr && b >= thr {
                 cand = Some(crossing(i, a, b, thr));
             } else if b < thr {
                 cand = None;
             }
-            if b >= hi {
+            if b >= thr + hyst {
                 edges.push(cand.take().unwrap_or((i as f32) - 0.5));
                 dark = false;
             }
         } else {
-            // Seeking a falling edge, confirmed once the signal drops below `lo`.
+            // Seeking a falling edge, confirmed once the signal drops below `thr - hyst`.
             if a > thr && b <= thr {
                 cand = Some(crossing(i, a, b, thr));
             } else if b > thr {
                 cand = None;
             }
-            if b <= lo {
+            if b <= thr - hyst {
                 edges.push(cand.take().unwrap_or((i as f32) - 0.5));
                 dark = true;
             }
         }
     }
-
-    // Must end in a light quiet zone: an even number of transitions.
-    if dark || edges.len() < 2 || !edges.len().is_multiple_of(2) {
+    if edges.is_empty() {
         return None;
     }
 
-    // Refine edge positions against *local* levels. A single global threshold is
-    // biased when wide quiet zones saturate the bright level above the interior
-    // space peaks, which would widen bars and shrink spaces. Each edge is instead
-    // placed at the midpoint between the plateau levels of its two adjacent runs.
-    let refined = refine_edges(profile, &edges);
+    // Refine edge positions against *local* levels: each edge is placed at the midpoint
+    // between the plateau levels of its two adjacent runs, which is stable under blur
+    // where a threshold crossing is biased toward the wider neighbour.
+    let refined = refine_edges(profile, &edges, start_dark);
+    bar_bounded(refined, start_dark, n, amplitude)
+}
 
-    let lead_px = refined[0];
-    let trail_px = ((n - 1) as f32) - refined[refined.len() - 1];
+/// Trim an alternating edge list so it starts on a light→dark edge and ends on a
+/// dark→light one, measuring the light margins outside. `start_dark` says whether the
+/// profile began inside a dark run (so the first edge is a dark→light one).
+fn bar_bounded(mut edges: Vec<f32>, start_dark: bool, n: usize, amplitude: f32) -> Option<Runs> {
+    // A leading dark run is clipped by the frame (or is background): its far side is
+    // unknown, so it cannot be a bar. The light run after it is the lead margin.
+    let lead_from = if start_dark {
+        if edges.is_empty() {
+            return None;
+        }
+        edges.remove(0)
+    } else {
+        0.0
+    };
+    // Likewise an odd count now means the profile ended inside a dark run.
+    let trail_to = if edges.len() % 2 == 1 {
+        edges.pop().expect("odd count is non-empty")
+    } else {
+        (n - 1) as f32
+    };
+    if edges.len() < 2 {
+        return None;
+    }
+    let lead_px = edges[0] - lead_from;
+    let trail_px = trail_to - edges[edges.len() - 1];
     Some(Runs {
-        edges: refined,
+        edges,
         amplitude,
         lead_px,
         trail_px,
@@ -398,10 +497,10 @@ fn extract_runs(profile: &[f32]) -> Option<Runs> {
 
 /// Re-place each approximate edge at the crossing of the local midpoint between the
 /// plateau (min for dark, max for light) of the two runs it separates.
-fn refine_edges(profile: &[f32], approx: &[f32]) -> Vec<f32> {
+fn refine_edges(profile: &[f32], approx: &[f32], start_dark: bool) -> Vec<f32> {
     let n = profile.len();
-    // Run boundaries: 0, each edge, n-1. Run k spans bounds[k]..bounds[k+1];
-    // run 0 is the leading light quiet zone, so even runs are light, odd are dark.
+    // Run boundaries: 0, each edge, n-1. Run k spans bounds[k]..bounds[k+1]; runs
+    // alternate from the polarity the profile starts in.
     let mut bounds = Vec::with_capacity(approx.len() + 2);
     bounds.push(0.0f32);
     bounds.extend_from_slice(approx);
@@ -412,7 +511,7 @@ fn refine_edges(profile: &[f32], approx: &[f32]) -> Vec<f32> {
     for k in 0..bounds.len() - 1 {
         let lo = (bounds[k].ceil() as usize).min(n - 1);
         let hi = (bounds[k + 1].floor() as usize).min(n - 1);
-        let dark_run = k % 2 == 1;
+        let dark_run = (k % 2 == 1) != start_dark;
         let (a, b) = if lo <= hi {
             (lo, hi)
         } else {
@@ -492,17 +591,16 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
     if amplitude < MIN_AMPLITUDE {
         return None;
     }
-    let thr = (low + high) / 2.0;
-    // Must begin and end in a light quiet zone.
-    if profile[0] < thr || profile[n - 1] < thr {
-        return None;
-    }
+    // The line may begin or end on anything; judge each end against its own
+    // neighbourhood (a global split misreads the dim end of an unevenly lit line).
+    let thresholds = local_thresholds(profile, (n / 24).clamp(8, 48))?;
+    let end_kind = |i: usize| if profile[i] < thresholds[i].0 { -1 } else { 1 };
 
     // Collect extrema (position, value, kind: +1 max / -1 min) from trend reversals,
-    // bracketed by virtual light peaks at both ends so the flat quiet zones (which carry
-    // no detected peak of their own) still bound the first and last edge.
+    // bracketed by a virtual extremum at each end so a flat margin (which carries no
+    // detected peak of its own) still bounds the first and last edge.
     let sm = smooth3(profile);
-    let mut ext: Vec<(usize, f32, i8)> = vec![(0, profile[0], 1)];
+    let mut ext: Vec<(usize, f32, i8)> = vec![(0, profile[0], end_kind(0))];
     let mut dir: i8 = 0;
     for i in 1..n {
         let dv = sm[i] - sm[i - 1];
@@ -518,7 +616,7 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
         }
         dir = nd;
     }
-    ext.push((n - 1, profile[n - 1], 1));
+    ext.push((n - 1, profile[n - 1], end_kind(n - 1)));
 
     // Bail on texture before the superlinear prune: a barcode line never has this many
     // swings, but a cluttered full-frame profile does, and pruning them one at a time
@@ -586,18 +684,86 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
         }
         edges.push(pos);
     }
-    if edges.len() < 2 || !edges.len().is_multiple_of(2) {
-        return None;
-    }
+    let start_dark = ext[0].2 < 0;
+    bar_bounded(edges, start_dark, n, amplitude)
+}
 
-    let lead_px = edges[0];
-    let trail_px = ((n - 1) as f32) - edges[edges.len() - 1];
-    Some(Runs {
-        edges,
-        amplitude,
-        lead_px,
-        trail_px,
-    })
+// --- Span segmentation -------------------------------------------------------
+
+/// Widest a genuine symbol element may be, in units of the span's narrow run width,
+/// before the run is taken for a quiet zone or background instead. The widest element
+/// of any linear symbology read here is 4 modules (Code 128, Code 93, EAN/UPC); blur
+/// shrinks narrow runs and swells wide ones, hence the slack. Specified quiet zones are
+/// 10 modules, and ~7 in practice.
+const MAX_ELEMENT_NARROWS: f32 = 5.75;
+
+/// Narrow-run width of a run-width list: its lower-quartile value. Every symbology read
+/// here has at least a quarter of its elements one module wide, and the quartile shrugs
+/// off the odd noise sliver that the minimum would latch onto.
+fn narrow_width(widths: &[f32]) -> f32 {
+    let mut sorted = widths.to_vec();
+    sorted.sort_by(f32::total_cmp);
+    sorted[sorted.len() / 4]
+}
+
+/// Cut a scanline's runs into barcode-shaped spans: maximal stretches that start and
+/// end on a bar and contain no run wider than a symbol element can be.
+///
+/// A scanline through a scene crosses the label edge, the surface behind it, text and
+/// possibly several codes; treating it all as one pattern makes the module estimate and
+/// every decoder fail. The over-wide runs *are* the quiet zones and background, so they
+/// are exactly where to cut. "Too wide" is relative to the local narrow-run width, which
+/// itself is only meaningful once unrelated content has been cut away — so the split
+/// recurses, re-measuring each piece, until every span is self-consistent.
+fn split_spans(runs: &Runs, min_runs: usize) -> Vec<Runs> {
+    let widths: Vec<f32> = runs.edges.windows(2).map(|w| w[1] - w[0]).collect();
+    let mut out = Vec::new();
+    // Work list of inclusive run-index ranges, each starting and ending on a bar (even
+    // index: run 0 is a bar).
+    let mut work: Vec<(usize, usize)> = vec![(0, widths.len() - 1)];
+    while let Some((lo, hi)) = work.pop() {
+        if hi < lo || hi - lo + 1 < min_runs.max(1) {
+            continue;
+        }
+        let limit = MAX_ELEMENT_NARROWS * narrow_width(&widths[lo..=hi]);
+        // Cut at the widest offending run first; the pieces are re-measured.
+        let cut = (lo..=hi)
+            .filter(|&k| widths[k] > limit)
+            .max_by(|&a, &b| widths[a].total_cmp(&widths[b]));
+        let Some(k) = cut else {
+            let lead_px = if lo == 0 {
+                runs.lead_px
+            } else {
+                widths[lo - 1]
+            };
+            let trail_px = if hi + 1 == widths.len() {
+                runs.trail_px
+            } else {
+                widths[hi + 1]
+            };
+            out.push(Runs {
+                edges: runs.edges[lo..=hi + 1].to_vec(),
+                amplitude: runs.amplitude,
+                lead_px,
+                trail_px,
+            });
+            continue;
+        };
+        // A light run is dropped on its own; an over-wide *dark* run is background or
+        // a solid graphic, and takes its neighbouring spaces with it.
+        let (left_hi, right_lo) = if k % 2 == 1 {
+            (k - 1, k + 1)
+        } else {
+            (k.wrapping_sub(2), k + 2)
+        };
+        if k >= 2 || k % 2 == 1 {
+            work.push((lo, left_hi));
+        }
+        work.push((right_lo, hi));
+    }
+    // Left-to-right order, for determinism.
+    out.sort_by(|a, b| a.edges[0].total_cmp(&b.edges[0]));
+    out
 }
 
 // --- Module quantization ---------------------------------------------------
@@ -611,44 +777,89 @@ struct Quantized {
     fit: f32,
 }
 
-/// Estimate the narrow-module width from the inner run widths and expand each run
-/// into its integer module count. Runs alternate bar/space starting with a bar.
+/// Mean distance of `widths / module` from the nearest positive integer, with bars
+/// narrowed and spaces widened by `bias` pixels first.
+fn quantization_error(widths: &[f32], module: f32, bias: f32) -> f32 {
+    let mut err = 0.0f32;
+    for (idx, &w) in widths.iter().enumerate() {
+        let w = if idx % 2 == 0 { w - bias } else { w + bias };
+        let exact = w / module;
+        err += (exact - exact.round().max(1.0)).abs();
+    }
+    err / widths.len() as f32
+}
+
+/// Fit the module width and bar/space bias of one span and expand each run into its
+/// integer module count. Runs alternate bar/space starting with a bar.
+///
+/// Printing and imaging do not treat bars and spaces alike: ink spread, defocus and any
+/// threshold offset move *both* edges of a bar outward (or inward) by the same amount,
+/// so every bar reads `bias` pixels wide and every space `bias` narrow, whatever its
+/// nominal width. At two or three pixels per module that is the difference between
+/// rounding a run to one module or two, so the fit solves for it jointly with the module
+/// width: minimise `Σ (wᵢ − nᵢ·m ∓ b)²` over `m, b`, alternating with re-assigning the
+/// integer counts `nᵢ`.
 fn quantize(runs: &Runs, min_runs: usize) -> Option<Quantized> {
     let edges = &runs.edges;
     // Inner runs are the gaps between consecutive edges.
     let inner: Vec<f32> = edges.windows(2).map(|w| w[1] - w[0]).collect();
-    if inner.len() < min_runs {
+    if inner.len() < min_runs.max(1) {
         return None;
     }
 
-    // Seed the module estimate with the smallest run, then refine by least squares
-    // against the assigned integer counts.
-    let mut module = inner
-        .iter()
-        .cloned()
-        .fold(f32::INFINITY, f32::min)
-        .max(1e-3);
+    // Seed: the candidate around the narrow-run width that quantizes most cleanly. A
+    // plain minimum latches onto a single noise sliver and halves every count; a clean
+    // fit also exists at every integer fraction of the true module, so the search is
+    // confined to the neighbourhood of the observed narrow runs and prefers the larger
+    // of near-equal fits.
+    let narrow = narrow_width(&inner).max(0.5);
+    let mut module = narrow;
+    let mut best = f32::INFINITY;
+    let mut m = narrow * 1.45;
+    while m >= narrow * 0.65 {
+        let e = quantization_error(&inner, m, 0.0);
+        if e < best * 0.92 {
+            best = e;
+            module = m;
+        }
+        m *= 0.97;
+    }
+
+    // Joint least-squares refinement of module width and bar/space bias.
+    let mut bias = 0.0f32;
     for _ in 0..6 {
-        let mut sum_w = 0.0f32;
-        let mut sum_n = 0.0f32;
-        for &wpx in &inner {
-            let n = (wpx / module).round().max(1.0);
-            sum_w += wpx;
-            sum_n += n;
+        let (mut snn, mut sns, mut snw, mut ssw) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for (idx, &w) in inner.iter().enumerate() {
+            let sign = if idx % 2 == 0 { 1.0 } else { -1.0 };
+            let n = ((w - sign * bias) / module).round().max(1.0);
+            snn += n * n;
+            sns += n * sign;
+            snw += n * w;
+            ssw += sign * w;
         }
-        if sum_n > 0.0 {
-            module = sum_w / sum_n;
+        let count = inner.len() as f32;
+        let det = snn * count - sns * sns;
+        if det.abs() < 1e-6 {
+            break;
         }
+        let new_module = (snw * count - sns * ssw) / det;
+        let new_bias = (snn * ssw - sns * snw) / det;
+        if !(new_module.is_finite() && new_module > 0.0) {
+            break;
+        }
+        module = new_module;
+        // A bias beyond half a module means the fit has slipped a whole count.
+        bias = new_bias.clamp(-0.45 * module, 0.45 * module);
     }
 
     // Expand runs into modules and accumulate quantization error for the fit score.
     let mut modules: Vec<bool> = Vec::new();
     let mut err_sum = 0.0f32;
     for (idx, &wpx) in inner.iter().enumerate() {
-        let exact = wpx / module;
+        let is_bar = idx % 2 == 0;
+        let exact = (if is_bar { wpx - bias } else { wpx + bias }) / module;
         let n = exact.round().max(1.0);
         err_sum += (exact - n).abs();
-        let is_bar = idx % 2 == 0;
         for _ in 0..(n as usize) {
             modules.push(is_bar);
         }
@@ -672,7 +883,8 @@ fn quantize(runs: &Runs, min_runs: usize) -> Option<Quantized> {
 
 // --- Candidate assembly ----------------------------------------------------
 
-/// Run the full extract -> quantize -> locate pipeline on one profile.
+/// Run the full extract -> segment -> quantize -> locate pipeline on one profile,
+/// yielding one candidate per barcode-shaped span found along it.
 fn analyze_profile(
     profile: &[f32],
     cy: f32,
@@ -680,22 +892,27 @@ fn analyze_profile(
     deg: f32,
     width: usize,
     min_runs: usize,
-) -> Option<LinearCandidate> {
-    let runs = extract_runs(profile)?;
-    let q = quantize(&runs, min_runs)?;
-
-    let amp_factor = (runs.amplitude / 128.0).clamp(0.0, 1.0);
-    let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
-
-    let location = build_location(&runs, cy, tan, deg, width, q.module_px);
-    Some(LinearCandidate {
-        pattern: q.pattern,
-        edges: runs.edges,
-        lead_px: runs.lead_px,
-        trail_px: runs.trail_px,
-        location,
-        confidence,
-    })
+) -> Vec<LinearCandidate> {
+    let Some(runs) = extract_runs(profile) else {
+        return Vec::new();
+    };
+    split_spans(&runs, min_runs)
+        .into_iter()
+        .filter_map(|span| {
+            let q = quantize(&span, min_runs)?;
+            let amp_factor = (span.amplitude / 128.0).clamp(0.0, 1.0);
+            let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
+            let location = build_location(&span, cy, tan, deg, width, q.module_px);
+            Some(LinearCandidate {
+                pattern: q.pattern,
+                edges: span.edges,
+                lead_px: span.lead_px,
+                trail_px: span.trail_px,
+                location,
+                confidence,
+            })
+        })
+        .collect()
 }
 
 /// Like [`analyze_profile`] but using the fine peak-based [`extract_runs_fine`] at the

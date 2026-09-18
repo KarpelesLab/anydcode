@@ -285,7 +285,7 @@ runs (`cargo run --release --example liveeval`):
 
 | | read rate | wrong values | decode time / frame |
 |---|---:|---:|---:|
-| 1D (EAN-13, Code 128, Code 39, ITF) | 97.5% | 0 | ~50 ms crop batch |
+| 1D (EAN-13, Code 128, Code 39, ITF) | 100% (240/240) | 0 | ~50 ms crop batch |
 | 2D (QR, Aztec, PDF417, Data Matrix) | 83% | 0 | ~120 ms whole-frame pass |
 
 Data Matrix is the weak one (its sampler needs a clean surround); QR and Aztec are at

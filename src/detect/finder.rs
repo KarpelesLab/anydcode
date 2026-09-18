@@ -173,17 +173,32 @@ pub(crate) fn find(grid: &DownGrid) -> Vec<FinderHit> {
                 continue;
             }
             let cy = center(vc, vend);
-            // Diagonal cross-check through the refined centre. The rings are squares, so
-            // along the diagonal each run is √2 longer — the ratio is what matters.
+            // Diagonal cross-checks through the refined centre — *both* diagonals. The
+            // rings are squares, so along a diagonal each run is √2 longer and the ratio
+            // is unchanged. One diagonal is not enough: the bars of a 1D code lying at
+            // 45° satisfy the ratio along rows, columns and the diagonal across them,
+            // and only fail along the diagonal that runs *with* the bars.
             let (dx0, dy0) = (cx as i32, (cy.round() as i32).clamp(0, h as i32 - 1));
-            // Walk index i along the top-left→bottom-right diagonal, with the centre at
-            // i = off and i = 0 on the frame's top or left edge.
-            let off = dx0.min(dy0);
-            let len = off + (w as i32 - dx0).min(h as i32 - dy0);
-            let diagonal = walk(len, off, |i| {
-                grid.dark((dx0 - off + i) as usize, (dy0 - off + i) as usize)
+            let both = [1i32, -1].into_iter().all(|dir| {
+                // Walk index i along the diagonal (dx = +1, dy = dir), centre at i = off.
+                let off = if dir > 0 {
+                    dx0.min(dy0)
+                } else {
+                    dx0.min(h as i32 - 1 - dy0)
+                };
+                let len = off
+                    + if dir > 0 {
+                        (w as i32 - dx0).min(h as i32 - dy0)
+                    } else {
+                        (w as i32 - dx0).min(dy0 + 1)
+                    };
+                walk(len, off, |i| {
+                    grid.dark((dx0 - off + i) as usize, (dy0 + dir * (i - off)) as usize)
+                })
+                .and_then(|(dc, _)| ratio_module(dc))
+                .is_some()
             });
-            if diagonal.and_then(|(dc, _)| ratio_module(dc)).is_none() {
+            if !both {
                 continue;
             }
             merge(&mut centers, cx as f32, cy, module);

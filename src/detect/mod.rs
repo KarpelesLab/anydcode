@@ -333,11 +333,15 @@ pub fn locate(frame: &GrayFrame<'_>, opts: &LocateOptions) -> Vec<Candidate> {
         // Suppress duplicates: fragments of an object already reported. A bar field is
         // not a fragment of a *finderless* matrix box, though — a barcode printed amid
         // text sits inside the text's texture blob, and is the one thing in it worth
-        // reading. Inside a finder-backed box it is: a QR's finder rings and timing
-        // tracks are coherent stripes too.
+        // reading. Inside a finder-backed box a *small* one is: a QR's finder rings and
+        // timing tracks are coherent stripes too, but they are slivers of the symbol,
+        // whereas a bar field as big as the "QR" around it is the real object and the
+        // finder hit the mistake.
+        let area = |b: [usize; 4]| (b[2] - b[0]) * (b[3] - b[1]);
         if accepted.iter().any(|&(a, family, finder)| {
-            !(s.family == Family::Linear && family == Family::Matrix && !finder)
-                && overlap_min_frac(a, core) > SUPPRESS_OVERLAP
+            let linear_in_matrix = s.family == Family::Linear && family == Family::Matrix;
+            let sliver = finder && 2 * area(core) <= area(a);
+            (!linear_in_matrix || sliver) && overlap_min_frac(a, core) > SUPPRESS_OVERLAP
         }) {
             continue;
         }

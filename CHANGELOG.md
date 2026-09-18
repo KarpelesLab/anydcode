@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Live detection.** On camera-like scenes the locate → crop → decode loop read about
   half the codes it was shown and reported dozens of values that were not there, at
-  ~1 s per decode pass. It now reads 97.5% of 1D and 83% of 2D codes on the same scenes
+  ~1 s per decode pass. It now reads all of the 1D and 83% of the 2D codes on the same scenes
   with no wrong values, in tens of milliseconds (`examples/liveeval.rs`,
   `tests/live_pipeline.rs`):
   - `scan1d` treated a whole scan line as one barcode and required both crop edges to

@@ -56,15 +56,6 @@ pub(super) fn render_rune(value: u8) -> BitMatrix {
     let mut m = BitMatrix::new(layout.size, layout.size, QUIET_ZONE);
     layout.draw_fixed(&mut m);
 
-    // `draw_fixed` uses the shared compact-Aztec orientation marks, but an Aztec Rune's
-    // reference pattern (ISO/IEC 24778 Annex A) differs on the outer ring's corner
-    // modules. Correct those four cells to the documented Rune pattern (cross-checked
-    // against zint's `AztecCompactMap`). None of these cells is a ring data position.
-    m.set(1, 0, true);
-    m.set(10, 1, true);
-    m.set(10, 9, true);
-    m.set(0, 10, false);
-
     // Serialize the 7 words to 28 bits, word[0] first, most-significant bit first,
     // then lay them onto the compact mode-message ring positions.
     let words = rune_codewords(value);

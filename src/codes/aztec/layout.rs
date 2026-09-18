@@ -97,16 +97,21 @@ impl Layout {
     }
 
     /// Draw the orientation marks at the corners of the mode-message ring. The
-    /// asymmetric pattern (top-left carries an extra module, bottom-right is empty)
-    /// fixes the reading orientation per ISO/IEC 24778.
+    /// asymmetric pattern fixes the reading orientation per ISO/IEC 24778: three dark
+    /// modules at the top-left corner, two at the top-right, one at the bottom-right
+    /// and none at the bottom-left.
     fn draw_orientation(&self, m: &mut BitMatrix) {
         let c = self.center;
         let r = if self.compact { 5 } else { 7 };
-        // Top-left: two modules; top-right and bottom-left: one; bottom-right: none.
+        // Top-left: the corner plus its neighbour along each side.
         m.set(c - r, c - r, true);
+        m.set(c - r + 1, c - r, true);
         m.set(c - r, c - r + 1, true);
+        // Top-right: the corner and the module below it.
         m.set(c + r, c - r, true);
-        m.set(c - r, c + r, true);
+        m.set(c + r, c - r + 1, true);
+        // Bottom-right: only the module above the (light) corner.
+        m.set(c + r, c + r - 1, true);
     }
 
     /// Coordinates of the mode-message ring, indexed by mode-message bit.

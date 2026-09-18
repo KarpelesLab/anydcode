@@ -128,3 +128,147 @@ fn text_convenience_roundtrip() {
     );
     assert_eq!(enc.encode(&decoded).unwrap(), encoding);
 }
+
+// ---- Third-party reference vectors -------------------------------------------
+//
+// Module matrices produced by zint 2.16 (`zint -b AZTEC --dump`), one string per row,
+// '1' = dark. They pin everything a self round-trip cannot: the orientation marks,
+// the reference grid, the mode message and the spiral data path.
+
+/// Parse a row-string vector into a matrix with the Aztec quiet zone.
+fn matrix_from_rows(rows: &[&str]) -> anyd::output::BitMatrix {
+    let mut m = anyd::output::BitMatrix::new(rows[0].len(), rows.len(), 0);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x, y, c == b'1');
+        }
+    }
+    m
+}
+
+/// `zint -b AZTEC --vers=1 -d HELLO`: a compact 1-layer symbol.
+#[rustfmt::skip]
+const ZINT_HELLO_COMPACT: &[&str] = &[
+    "001100100101001",
+    "010111011010000",
+    "001100000100101",
+    "101111111111111",
+    "010100000001010",
+    "100101111101101",
+    "011101000101010",
+    "100101010101110",
+    "100101000101010",
+    "110101111101011",
+    "010100000001011",
+    "100111111111110",
+    "000011101110010",
+    "111110110011110",
+    "011010101010111",
+];
+
+/// `zint -b AZTEC --vers=9 -d "AZTEC FULL RANGE SYMBOL WITH REFERENCE GRID"`: a
+/// full-range 5-layer symbol, the smallest with off-centre reference-grid lines.
+#[rustfmt::skip]
+const ZINT_FULL_5_LAYERS: &[&str] = &[
+    "0010001100110001101101101101110101110",
+    "0101110100011111000110111000001000000",
+    "1010101010101010101010101010101010101",
+    "0100111111110001010110000110101001000",
+    "1011011001100111011101100011110001101",
+    "1101010110010110010110111100000101010",
+    "1011011110100010111111110000101011100",
+    "1000000111000100100011101100101101001",
+    "1010010101000010111001101011111001100",
+    "0100001010100111010100000110000000011",
+    "1010110011100000011001111111011111111",
+    "0000110011011001000000000101000011000",
+    "1011000100111111111111111101110110111",
+    "0000101111001000000000001011001110000",
+    "0010110100011011111111101110111000111",
+    "0100011101111010000000101110011111000",
+    "0011111111101010111110101010110100110",
+    "1101110100101010100010101101011000011",
+    "1010101010101010101010101010101010101",
+    "1100101000111010100010101011001011000",
+    "0110010101001010111110101011100010111",
+    "1001111101111010000000101110011010010",
+    "0111001000111011111111101101110101100",
+    "1001001011111000000000001010110101011",
+    "1010001011101111111111111110001010100",
+    "1101010110000000100110010000111010011",
+    "0110001100111001001100100001100110100",
+    "0000101000110001110001110101110011011",
+    "0011101000001011001010000011100011100",
+    "1100010000101000100111111110100000000",
+    "0011101101111111111001000000101001110",
+    "1100110110101101010001101101001110001",
+    "0011111101000000011111110010100000101",
+    "0100010011111111000111101110000101001",
+    "1010101010101010101010101010101010101",
+    "0101100100011011010001100100011000001",
+    "0111000010010010011100100011001001101",
+];
+
+/// A third-party symbol must decode, and re-encoding the decoded symbol must
+/// reproduce the third-party matrix module for module.
+fn assert_matches_reference(rows: &[&str], payload: &[u8], compact: bool, layers: u8) {
+    let reference = Encoding::Matrix(matrix_from_rows(rows));
+    let decoded = AztecDecoder::new().decode(&reference).unwrap();
+    assert_eq!(decoded.payload_bytes(), payload);
+    let SymbolMeta::Aztec(meta) = &decoded.meta else {
+        panic!("expected AztecMeta");
+    };
+    assert_eq!((meta.compact, meta.layers), (compact, layers));
+    assert_eq!(AztecEncoder::new().encode(&decoded).unwrap(), reference);
+}
+
+#[test]
+fn matches_zint_compact_symbol() {
+    assert_matches_reference(ZINT_HELLO_COMPACT, b"HELLO", true, 1);
+}
+
+#[test]
+fn matches_zint_full_symbol_with_reference_grid() {
+    assert_matches_reference(
+        ZINT_FULL_5_LAYERS,
+        b"AZTEC FULL RANGE SYMBOL WITH REFERENCE GRID",
+        false,
+        5,
+    );
+}
+
+#[test]
+fn orientation_marks_follow_iso_24778() {
+    // Three dark modules at the top-left corner of the mode-message ring, two at the
+    // top-right, one at the bottom-right, none at the bottom-left.
+    let enc = AztecEncoder::new();
+    for payload in [&b"A"[..], &[b'x'; 300][..]] {
+        let symbol = enc.build(vec![Segment::byte(payload.to_vec())]).unwrap();
+        let SymbolMeta::Aztec(meta) = &symbol.meta else {
+            panic!("expected AztecMeta");
+        };
+        let r = if meta.compact { 5 } else { 7 };
+        let Encoding::Matrix(m) = enc.encode(&symbol).unwrap() else {
+            panic!("expected a matrix");
+        };
+        let c = m.width() / 2;
+        let (lo, hi) = (c - r, c + r);
+        let marks = [
+            (lo, lo, true),
+            (lo + 1, lo, true),
+            (lo, lo + 1, true),
+            (hi, lo, true),
+            (hi, lo + 1, true),
+            (hi - 1, lo, false),
+            (hi, hi, false),
+            (hi, hi - 1, true),
+            (hi - 1, hi, false),
+            (lo, hi, false),
+            (lo + 1, hi, false),
+            (lo, hi - 1, false),
+        ];
+        for (x, y, dark) in marks {
+            assert_eq!(m.get(x, y), dark, "orientation module ({x},{y})");
+        }
+    }
+}

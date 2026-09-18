@@ -33,6 +33,16 @@ impl SquareSpec {
         self.ec_cw / self.blocks
     }
 
+    /// Position of `block`'s codewords within each round of the interleaved EC
+    /// stream. Interleaving deals codewords to the blocks in turn and simply carries
+    /// on from the data into the EC codewords, so the EC rounds start with whichever
+    /// block follows the last data codeword. That is block 0 for every size except
+    /// 144×144, whose 1558 data codewords leave blocks 8 and 9 one short: there the
+    /// EC codewords run 8, 9, 0, 1, … 7.
+    pub const fn ec_slot(&self, block: usize) -> usize {
+        (block + self.blocks - self.data_cw % self.blocks) % self.blocks
+    }
+
     /// Side length of the full (multi-region) mapping matrix, i.e. the data area
     /// excluding every region's finder/timing border.
     pub const fn mapping_size(&self) -> usize {

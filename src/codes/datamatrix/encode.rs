@@ -453,7 +453,7 @@ fn add_error_correction(full: &mut [u8], spec: &SquareSpec) {
     for b in 0..bc {
         gf::encode_into(data.iter().skip(b).step_by(bc).copied(), &mut ecc[..epb]);
         for (e, &val) in ecc[..epb].iter().enumerate() {
-            ec_stream[b + e * bc] = val;
+            ec_stream[spec.ec_slot(b) + e * bc] = val;
         }
     }
 }

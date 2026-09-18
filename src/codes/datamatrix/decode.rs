@@ -85,7 +85,9 @@ fn deinterleave_and_correct(full: &[u8], spec: &SquareSpec) -> Result<Vec<u8>> {
 
     for b in 0..bc {
         let block_data: Vec<u8> = data_part.iter().skip(b).step_by(bc).copied().collect();
-        let block_ec: Vec<u8> = (0..epb).map(|e| ec_part[b + e * bc]).collect();
+        let block_ec: Vec<u8> = (0..epb)
+            .map(|e| ec_part[spec.ec_slot(b) + e * bc])
+            .collect();
         let mut block = block_data.clone();
         block.extend_from_slice(&block_ec);
         let fixed = super::gf::decode(&block, epb).ok_or(Error::ErrorCorrectionFailed)?;
@@ -185,4 +187,96 @@ fn unrandomize_255(value: u8, position: usize) -> u8 {
 
 fn trunc() -> Error {
     Error::undecodable("truncated Data Matrix codeword stream")
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+    use crate::codes::datamatrix::DataMatrixEncoder;
+    use crate::codes::datamatrix::tables::all_squares;
+    use crate::traits::Encode;
+
+    /// Flip one module of each listed codeword in `m`.
+    fn corrupt(m: &mut BitMatrix, spec: &SquareSpec, codewords: &[usize]) {
+        let ms = spec.mapping_size();
+        let mut occupied = vec![0u8; occupancy_bytes(ms, ms)];
+        let mut cells = Vec::new();
+        place(ms, ms, &mut occupied, |c, bit, r, col| {
+            if bit == c % 8 && codewords.contains(&c) {
+                cells.push(mapping_to_symbol(spec, r, col));
+            }
+        });
+        assert_eq!(cells.len(), codewords.len());
+        for (x, y) in cells {
+            let dark = m.get(x, y);
+            m.set(x, y, !dark);
+        }
+    }
+
+    /// `count` distinct codeword indices of RS block `b`, spread evenly over its data
+    /// and EC codewords.
+    fn block_codewords(spec: &SquareSpec, b: usize, count: usize) -> Vec<usize> {
+        let bc = spec.blocks;
+        let mut all: Vec<usize> = (b..spec.data_cw).step_by(bc).collect();
+        all.extend((0..spec.ec_per_block()).map(|e| spec.data_cw + spec.ec_slot(b) + e * bc));
+        (0..count).map(|k| all[k * all.len() / count]).collect()
+    }
+
+    /// In every size, every block corrects `ec/2` codeword errors simultaneously, and
+    /// one error more in any single block is reported rather than mis-decoded.
+    #[test]
+    fn corrects_up_to_capacity_in_every_block() {
+        let enc = DataMatrixEncoder::new();
+        for spec in all_squares() {
+            let payload: Vec<u8> = (0..spec.data_cw / 2)
+                .map(|i| b'A' + (i % 26) as u8)
+                .collect();
+            let symbol = enc.build_sized(&payload, spec.symbol_size).unwrap();
+            let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+                panic!("expected a matrix");
+            };
+            let t = spec.ec_per_block() / 2;
+
+            let mut m = clean.clone();
+            for b in 0..spec.blocks {
+                corrupt(&mut m, spec, &block_codewords(spec, b, t));
+            }
+            let decoded = DataMatrixDecoder::new().decode_matrix(&m).unwrap();
+            assert_eq!(decoded, symbol, "size {}", spec.symbol_size);
+
+            for b in 0..spec.blocks {
+                let mut m = clean.clone();
+                corrupt(&mut m, spec, &block_codewords(spec, b, t + 1));
+                assert!(
+                    DataMatrixDecoder::new().decode_matrix(&m).is_err(),
+                    "size {} block {b}",
+                    spec.symbol_size
+                );
+            }
+        }
+    }
+
+    /// Arbitrary codeword streams (what a mis-corrected or hostile symbol yields) must
+    /// parse or fail cleanly.
+    #[test]
+    fn garbage_codeword_streams_never_panic() {
+        let mut seed = 0xDA7A_0A7E_1C5E_ED01u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..4000 {
+            let len = (next() % 40) as usize + usize::from(round % 7 == 0) * 1500;
+            let data: Vec<u8> = (0..len)
+                .map(|_| match next() % 4 {
+                    // Bias towards the control codewords.
+                    0 => [PAD, BASE256_LATCH, UPPER_SHIFT, 230, 0, 255][(next() % 6) as usize],
+                    _ => next() as u8,
+                })
+                .collect();
+            let _ = parse_codewords(&data);
+        }
+    }
 }

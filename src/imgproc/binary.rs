@@ -17,16 +17,20 @@ pub struct BinaryImage {
 }
 
 impl BinaryImage {
-    /// A new all-light (`false`) image. Panics if either dimension is zero.
+    /// A new all-light (`false`) image. Panics if either dimension is zero or
+    /// `width * height` overflows `usize`.
     pub fn new(width: usize, height: usize) -> Self {
         assert!(
             width > 0 && height > 0,
             "BinaryImage dimensions must be > 0"
         );
+        let pixels = width
+            .checked_mul(height)
+            .expect("BinaryImage dimensions overflow usize");
         BinaryImage {
             width,
             height,
-            bits: vec![false; width * height],
+            bits: vec![false; pixels],
         }
     }
 
@@ -34,12 +38,12 @@ impl BinaryImage {
     ///
     /// # Errors
     /// Returns [`Error::InvalidParameter`] if a dimension is zero or `bits.len()`
-    /// does not equal `width * height`.
+    /// does not equal `width * height` (including when that product overflows).
     pub fn from_bits(width: usize, height: usize, bits: Vec<bool>) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(Error::invalid_parameter("zero-sized binary image"));
         }
-        if bits.len() != width * height {
+        if width.checked_mul(height) != Some(bits.len()) {
             return Err(Error::invalid_parameter(format!(
                 "bits length {} does not match {width}x{height}",
                 bits.len()
@@ -120,6 +124,14 @@ mod tests {
         let img = BinaryImage::new(2, 2);
         assert!(!img.get(5, 5));
         assert!(!img.get(0, 100));
+    }
+
+    #[test]
+    fn from_bits_rejects_overflowing_dimensions() {
+        // `width * height` wraps to 0 here; an empty buffer must not pass for it.
+        let side = 1usize << (usize::BITS / 2);
+        assert!(BinaryImage::from_bits(side, side, vec![]).is_err());
+        assert!(BinaryImage::from_bits(usize::MAX, 2, vec![false; 2]).is_err());
     }
 
     #[test]

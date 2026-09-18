@@ -88,12 +88,14 @@ impl IntegralImage {
     /// clamped to the image. The count reflects clamping so a border window is
     /// averaged over its real (smaller) area.
     pub fn window_sum_count(&self, cx: usize, cy: usize, radius: usize) -> (u64, usize) {
+        // Saturating throughout: `radius` is caller-supplied (any `usize`), and a centre
+        // outside the image leaves an empty window (`x1 < x0`), not a negative one.
         let x0 = cx.saturating_sub(radius);
         let y0 = cy.saturating_sub(radius);
-        let x1 = (cx + radius + 1).min(self.width);
-        let y1 = (cy + radius + 1).min(self.height);
+        let x1 = cx.saturating_add(radius).saturating_add(1).min(self.width);
+        let y1 = cy.saturating_add(radius).saturating_add(1).min(self.height);
         let sum = self.rect_sum(x0, y0, x1, y1);
-        let count = (x1 - x0) * (y1 - y0);
+        let count = x1.saturating_sub(x0) * y1.saturating_sub(y0);
         (sum, count)
     }
 }
@@ -157,6 +159,30 @@ mod tests {
         // Centre window of radius 1 covers the whole 3x3.
         let (s, c) = ii.window_sum_count(1, 1, 1);
         assert_eq!((s, c), (9, 9));
+    }
+
+    #[test]
+    fn window_survives_absurd_centres_and_radii() {
+        let data = [7u8; 6];
+        let f = frame(&data, 3, 2);
+        let ii = IntegralImage::from_frame(&f);
+        // A radius larger than the image (or than `usize` can add) is the whole image.
+        assert_eq!(ii.window_sum_count(1, 1, 1000), (42, 6));
+        assert_eq!(ii.window_sum_count(2, 1, usize::MAX), (42, 6));
+        assert_eq!(
+            ii.window_sum_count(usize::MAX, usize::MAX, usize::MAX),
+            (42, 6)
+        );
+        // A centre outside the image whose window misses it entirely is empty, not a
+        // subtraction overflow.
+        assert_eq!(ii.window_sum_count(10, 0, 1), (0, 0));
+        assert_eq!(ii.window_sum_count(0, 10, 1), (0, 0));
+        // 1×1 image.
+        let one = [9u8];
+        let f = frame(&one, 1, 1);
+        let ii = IntegralImage::from_frame(&f);
+        assert_eq!(ii.window_sum_count(0, 0, 0), (9, 1));
+        assert_eq!(ii.window_sum_count(0, 0, 50), (9, 1));
     }
 
     #[test]

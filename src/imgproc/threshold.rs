@@ -162,6 +162,33 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_frames_and_radii_binarize() {
+        // 1×1, a single row, a single column; flat and saturated content; a radius of
+        // zero and one far larger than the image (or than `usize` arithmetic allows).
+        for (w, h) in [(1usize, 1usize), (1, 7), (7, 1), (3, 2)] {
+            for fill in [0u8, 128, 255] {
+                let data = vec![fill; w * h];
+                let f = GrayFrame::new(&data, w, h).unwrap();
+                let _ = otsu_threshold(&f);
+                assert_eq!(otsu_binarize(&f).width(), w);
+                for radius in [0usize, 1, 100, usize::MAX] {
+                    let b = adaptive_binarize_bradley(&f, radius, 0.15);
+                    assert_eq!(b.count_dark(), 0, "flat {w}x{h} r={radius} is all light");
+                    let s = adaptive_binarize_sauvola(&f, radius, 0.3, 128.0);
+                    assert_eq!((s.width(), s.height()), (w, h));
+                }
+            }
+        }
+        // Hostile parameters: NaN / infinite sensitivity never panics.
+        let data = [10u8, 200, 30, 250];
+        let f = GrayFrame::new(&data, 2, 2).unwrap();
+        for t in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let _ = adaptive_binarize_bradley(&f, 1, t);
+            let _ = adaptive_binarize_sauvola(&f, 1, t, t);
+        }
+    }
+
+    #[test]
     fn otsu_binarize_separates_regions() {
         let w = 16;
         let h = 16;

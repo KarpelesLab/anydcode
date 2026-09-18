@@ -67,7 +67,11 @@ impl Homography {
             b[r1] = dy;
         }
 
+        // A NaN/infinite coordinate sails through the pivot test (`NaN < eps` is false),
+        // and a barely-regular system can overflow in the elimination; either way the
+        // "solution" is not a map, and a NaN pixel coordinate casts to pixel 0.
         let h = solve8(&mut a, &mut b)
+            .filter(|h| h.iter().all(|v| v.is_finite()))
             .ok_or_else(|| Error::invalid_parameter("degenerate homography correspondences"))?;
 
         Ok(Homography {
@@ -123,7 +127,8 @@ impl Homography {
         let c01 = m[5] * m[6] - m[3] * m[8];
         let c02 = m[3] * m[7] - m[4] * m[6];
         let det = m[0] * c00 + m[1] * c01 + m[2] * c02;
-        if det.abs() < 1e-12 {
+        // Written so that a NaN determinant (non-finite matrix) is rejected too.
+        if !(det.abs() >= 1e-12 && det.is_finite()) {
             return Err(Error::invalid_parameter("singular homography"));
         }
         let inv_det = 1.0 / det;
@@ -281,6 +286,47 @@ mod tests {
             Point::new(0.0, 1.0),
         ];
         assert!(Homography::from_correspondences(src, dst).is_err());
+    }
+
+    #[test]
+    fn coincident_and_non_finite_correspondences_error() {
+        let unit = [
+            Point::new(0.0, 0.0),
+            Point::new(1.0, 0.0),
+            Point::new(1.0, 1.0),
+            Point::new(0.0, 1.0),
+        ];
+        // All four destination points coincide / are collinear: a collapsed quad is
+        // solvable as a rank-deficient map, but it must not come back with NaNs.
+        let p = Point::new(5.0, 5.0);
+        if let Ok(h) = Homography::from_correspondences(unit, [p; 4]) {
+            assert!(h.matrix().iter().all(|v| v.is_finite()));
+        }
+        // All four source points coincide: no map exists.
+        assert!(Homography::from_correspondences([p; 4], unit).is_err());
+        // NaN / infinite coordinates must be an error, never an `Ok` full of NaNs whose
+        // mapped points then index pixel (0, 0).
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut dst = unit;
+            dst[2] = Point::new(bad, 1.0);
+            assert!(Homography::from_correspondences(unit, dst).is_err());
+            let mut src = unit;
+            src[1] = Point::new(1.0, bad);
+            assert!(Homography::from_correspondences(src, unit).is_err());
+        }
+        // Coordinates so large the elimination overflows to infinity.
+        let huge = unit.map(|q| Point::new(q.x * f32::MAX, q.y * f32::MAX));
+        if let Ok(h) = Homography::from_correspondences(huge, unit) {
+            assert!(h.matrix().iter().all(|v| v.is_finite()));
+        }
+    }
+
+    #[test]
+    fn non_finite_matrix_inverse_errors() {
+        let h = Homography::from_matrix([f64::NAN, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(h.inverse().is_err());
+        let h = Homography::from_matrix([f64::INFINITY, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(h.inverse().is_err());
     }
 
     #[test]

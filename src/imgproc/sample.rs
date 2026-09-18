@@ -137,6 +137,36 @@ mod tests {
     }
 
     #[test]
+    fn one_pixel_frame_and_non_finite_coordinates() {
+        let data = [77u8];
+        let f = GrayFrame::new(&data, 1, 1).unwrap();
+        for (x, y) in [(0.0, 0.0), (0.7, 0.2), (-3.0, 9.0), (1e300, -1e300)] {
+            assert!((sample_bilinear(&f, x, y) - 77.0).abs() < 1e-9);
+        }
+        assert!((sample_bilinear(&f, f64::INFINITY, f64::NEG_INFINITY) - 77.0).abs() < 1e-9);
+        // NaN coordinates (a degenerate homography) read as NaN — never dark, never a
+        // panic.
+        assert!(sample_bilinear(&f, f64::NAN, 0.0).is_nan());
+
+        // A grid sampled through a singular / NaN map is simply all light.
+        let zero = Homography::from_matrix([0.0; 9]);
+        let nan = Homography::from_matrix([f64::NAN; 9]);
+        for h in [zero, nan] {
+            let m = sample_grid(&f, &h, 5, 128, 0);
+            assert!((0..25).all(|i| !m.get(i % 5, i / 5)));
+            let mut bin = BinaryImage::new(1, 1);
+            bin.set(0, 0, true);
+            let _ = sample_grid_binary(&bin, &h, 5, 0);
+        }
+        // Huge coordinates saturate instead of wrapping into the image.
+        let far = Homography::from_matrix([1e300, 0.0, 1e300, 0.0, 1e300, 1e300, 0.0, 0.0, 1.0]);
+        let mut bin = BinaryImage::new(1, 1);
+        bin.set(0, 0, true);
+        let m = sample_grid_binary(&bin, &far, 3, 0);
+        assert!((0..9).all(|i| !m.get(i % 3, i / 3)));
+    }
+
+    #[test]
     fn bilinear_clamps_out_of_bounds() {
         let data = [10u8, 20, 30, 40];
         let f = GrayFrame::new(&data, 2, 2).unwrap();

@@ -196,6 +196,32 @@ mod tests {
     }
 
     #[test]
+    fn degenerate_systems_and_anchor_sets_are_none() {
+        assert!(solve_linear_system(vec![], vec![]).is_none());
+        // Ragged matrix / mismatched right-hand side.
+        assert!(solve_linear_system(vec![vec![1.0, 2.0], vec![3.0]], vec![vec![1.0]; 2]).is_none());
+        assert!(solve_linear_system(vec![vec![1.0]], vec![vec![1.0], vec![2.0]]).is_none());
+        assert!(
+            solve_linear_system(
+                vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+                vec![vec![1.0], vec![]]
+            )
+            .is_none()
+        );
+        // No right-hand sides at all is a valid (empty) solve.
+        let x = solve_linear_system(vec![vec![2.0]], vec![vec![]]).unwrap();
+        assert_eq!(x, vec![Vec::<f64>::new()]);
+
+        // Too few, mismatched, coincident and collinear anchors.
+        let p = (1.0, 1.0);
+        assert!(ThinPlateSpline::fit(&[p, (2.0, 2.0)], &[p, (2.0, 2.0)]).is_none());
+        assert!(ThinPlateSpline::fit(&[p; 3], &[p; 2]).is_none());
+        assert!(ThinPlateSpline::fit(&[p; 4], &[p; 4]).is_none());
+        let line = [(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0)];
+        assert!(ThinPlateSpline::fit(&line, &line).is_none());
+    }
+
+    #[test]
     fn interpolates_through_every_anchor() {
         // An arbitrary curved mapping sampled at scattered points; the spline must
         // reproduce it exactly at those points.

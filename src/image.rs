@@ -121,14 +121,17 @@ impl GrayImage {
     /// A new image with every pixel set to `fill`.
     ///
     /// # Panics
-    /// Panics if either dimension is zero.
+    /// Panics if either dimension is zero or `width * height` overflows `usize`.
     pub fn filled(width: usize, height: usize, fill: u8) -> Self {
         assert!(
             width > 0 && height > 0,
             "GrayImage dimensions must be nonzero"
         );
+        let pixels = width
+            .checked_mul(height)
+            .expect("GrayImage dimensions overflow usize");
         GrayImage {
-            data: vec![fill; width * height],
+            data: vec![fill; pixels],
             width,
             height,
         }
@@ -145,13 +148,17 @@ impl GrayImage {
     /// Wrap an existing tightly-packed `width * height` buffer.
     ///
     /// # Panics
-    /// Panics if `data.len() != width * height` or a dimension is zero.
+    /// Panics if `data.len() != width * height` (or that product overflows `usize`) or a
+    /// dimension is zero.
     pub fn from_raw(width: usize, height: usize, data: Vec<u8>) -> Self {
         assert!(
             width > 0 && height > 0,
             "GrayImage dimensions must be nonzero"
         );
-        assert_eq!(data.len(), width * height, "buffer size mismatch");
+        let pixels = width
+            .checked_mul(height)
+            .expect("GrayImage dimensions overflow usize");
+        assert_eq!(data.len(), pixels, "buffer size mismatch");
         GrayImage {
             data,
             width,
@@ -228,5 +235,85 @@ impl GrayImage {
         let top = p00 + (p10 - p00) * fx;
         let bot = p01 + (p11 - p01) * fx;
         Some(top + (bot - top) * fy)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_validates_dimensions_and_buffer() {
+        let data = [0u8; 12];
+        assert!(GrayFrame::new(&data, 4, 3).is_ok());
+        assert!(GrayFrame::new(&data, 0, 3).is_err());
+        assert!(GrayFrame::new(&data, 4, 0).is_err());
+        assert!(GrayFrame::new(&data, 4, 4).is_err(), "buffer too short");
+        assert!(
+            GrayFrame::with_stride(&data, 4, 3, 3).is_err(),
+            "stride < width"
+        );
+        // The last row needs only `width` bytes: 2 full strides of 5 plus 2.
+        assert!(GrayFrame::with_stride(&data, 2, 3, 5).is_ok());
+        assert!(GrayFrame::with_stride(&data, 3, 3, 5).is_err());
+        // Products that overflow `usize` are an error, not a wrapped-around "fits".
+        assert!(GrayFrame::new(&data, usize::MAX, 2).is_err());
+        assert!(GrayFrame::new(&data, 2, usize::MAX).is_err());
+        assert!(GrayFrame::with_stride(&data, 1, usize::MAX, usize::MAX).is_err());
+        let side = 1usize << (usize::BITS / 2);
+        assert!(GrayFrame::new(&[], side, side).is_err());
+    }
+
+    #[test]
+    fn frame_accessors_respect_stride_and_bounds() {
+        // 3×2 image inside a stride-4 buffer; the padding byte is 99.
+        let data = [1u8, 2, 3, 99, 4, 5, 6];
+        let f = GrayFrame::with_stride(&data, 3, 2, 4).unwrap();
+        assert_eq!(f.get(2, 1), Some(6));
+        assert_eq!(f.get(3, 0), None, "padding is not part of the image");
+        assert_eq!(f.get(0, 2), None);
+        assert_eq!(f.get(usize::MAX, usize::MAX), None);
+        assert_eq!(f.row(1), Some(&[4u8, 5, 6][..]));
+        assert_eq!(f.row(2), None);
+        let one = [7u8];
+        let f = GrayFrame::new(&one, 1, 1).unwrap();
+        assert_eq!(
+            (f.get(0, 0), f.get(1, 0), f.row(0)),
+            (Some(7), None, Some(&one[..]))
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "GrayImage dimensions overflow")]
+    fn image_from_raw_rejects_overflowing_dimensions() {
+        // `width * height` wraps to 0: an empty buffer must not pass for a 2³²×2³² image
+        // (2¹⁶×2¹⁶ on wasm32) whose every accessor would then index out of bounds.
+        let side = 1usize << (usize::BITS / 2);
+        let _ = GrayImage::from_raw(side, side, Vec::new());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn image_accessors_at_the_edges() {
+        let img = GrayImage::from_raw(2, 1, vec![10, 20]);
+        assert_eq!((img.get(1, 0), img.get(2, 0), img.get(0, 1)), (20, 0, 0));
+        assert_eq!(img.as_frame().get(1, 0), Some(20));
+        assert_eq!(img.sample_bilinear(0.5, 0.0), Some(15.0));
+        assert_eq!(img.sample_bilinear(1.0, 0.0), Some(20.0));
+        assert_eq!(
+            img.sample_bilinear(1.5, 0.0),
+            Some(20.0),
+            "clamps to the last pixel"
+        );
+        for bad in [f32::NAN, f32::INFINITY, -0.01, 2.0, 1e30] {
+            assert_eq!(img.sample_bilinear(bad, 0.0), None);
+        }
+        for bad in [f32::NAN, f32::INFINITY, -0.01, 1.0, 1e30] {
+            assert_eq!(img.sample_bilinear(0.0, bad), None);
+        }
+        let one = GrayImage::filled(1, 1, 9);
+        assert_eq!(one.sample_bilinear(0.0, 0.0), Some(9.0));
+        assert_eq!(one.sample_bilinear(0.9, 0.9), Some(9.0));
     }
 }

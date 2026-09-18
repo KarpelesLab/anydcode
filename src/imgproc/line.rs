@@ -29,7 +29,8 @@ impl Line {
         let dx = p2.x - p1.x;
         let dy = p2.y - p1.y;
         let len = (dx * dx + dy * dy).sqrt();
-        if len < f32::EPSILON {
+        // (Also `None` for NaN / infinite input: no comparison holds for a NaN length.)
+        if !(len >= f32::EPSILON && len.is_finite()) {
             return None;
         }
         // Normal is perpendicular to the direction (dx, dy).
@@ -75,8 +76,8 @@ pub fn fit_line_least_squares(points: &[Point]) -> Option<Line> {
         sxy += dx * dy;
     }
 
-    if sxx + syy < 1e-12 {
-        return None; // all points coincide
+    if !(sxx + syy >= 1e-12 && (sxx + syy).is_finite()) {
+        return None; // all points coincide (or a coordinate is NaN / infinite)
     }
 
     // The line normal is the eigenvector of the smallest eigenvalue of the 2×2
@@ -218,6 +219,34 @@ mod tests {
         // Normal (a, b); line slope = -a/b should be ~2.
         let slope = -l.a / l.b;
         assert!((slope - 2.0).abs() < 0.05, "slope {slope}");
+    }
+
+    #[test]
+    fn degenerate_point_sets_have_no_line() {
+        let p = Point::new(2.0, 2.0);
+        let nan = Point::new(f32::NAN, 1.0);
+        let inf = Point::new(f32::INFINITY, 1.0);
+        assert!(fit_line_least_squares(&[]).is_none());
+        assert!(fit_line_least_squares(&[p]).is_none());
+        assert!(fit_line_least_squares(&[p; 8]).is_none());
+        // Non-finite input yields no line rather than a NaN one.
+        assert!(fit_line_least_squares(&[p, nan, Point::new(3.0, 3.0)]).is_none());
+        assert!(fit_line_least_squares(&[p, inf, Point::new(3.0, 3.0)]).is_none());
+        assert!(Line::from_points(p, nan).is_none());
+        assert!(Line::from_points(p, inf).is_none());
+
+        let mut rng = Prng::new(1);
+        assert!(ransac_line(&[], 10, 1.0, &mut rng).is_none());
+        assert!(ransac_line(&[p], 10, 1.0, &mut rng).is_none());
+        // Every sampled pair coincides: no model, no panic (and `iterations == 0` still
+        // runs one round).
+        assert!(ransac_line(&[p; 5], 0, 1.0, &mut rng).is_none());
+        assert!(ransac_line(&[p; 5], 50, f32::NAN, &mut rng).is_none());
+        assert!(ransac_line(&[nan; 5], 50, 1.0, &mut rng).is_none());
+        // Two distinct points are a line with both as inliers.
+        let (line, inliers) = ransac_line(&[p, Point::new(4.0, 2.0)], 5, 0.5, &mut rng).unwrap();
+        assert_eq!(inliers, [0, 1]);
+        assert!(line.distance(Point::new(9.0, 2.0)).abs() < 1e-4);
     }
 
     #[test]

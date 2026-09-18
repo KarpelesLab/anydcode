@@ -639,6 +639,11 @@ fn decode_binary(bits: &[bool]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let start = if bits[1] {
         // Method 1: "1" header, then compressed (01)+GTIN14 field.
+        if size < 48 {
+            return Err(Error::undecodable(
+                "DataBar Expanded: truncated compressed GTIN field",
+            ));
+        }
         let indicator = read_bits(bits, 4, 4);
         if indicator > 9 {
             return Err(Error::undecodable("DataBar Expanded: bad indicator digit"));
@@ -903,4 +908,68 @@ fn is_switch_latch(bits: &[bool], pos: usize, size: usize) -> bool {
         }
     }
     true
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Lay out arbitrary 12-bit data-character values as a linear element sequence
+    /// with a valid check character (the layout half of [`expanded_elements`]).
+    fn elements_for(values: &[i32]) -> Vec<i32> {
+        let char_ws: Vec<[i32; 8]> = values.iter().map(|&v| char_widths(v)).collect();
+        let symbol_chars = values.len() + 1;
+        let check = 211 * (symbol_chars as i32 - 4) + checksum(&char_ws) % 211;
+        let codeblocks = symbol_chars.div_ceil(2);
+        let mut el = vec![0i32; codeblocks * 5 + symbol_chars * 8 + 4];
+        let p = (symbol_chars - 1) / 2 - 1;
+        for i in 0..codeblocks {
+            let k = EXP_FINDER_SEQUENCE[p][i] as usize - 1;
+            for j in 0..5 {
+                el[21 * i + j + 10] = EXP_FINDER[k][j] as i32;
+            }
+        }
+        el[2..10].copy_from_slice(&char_widths(check));
+        for (i, w) in char_ws.iter().enumerate() {
+            if i % 2 == 1 {
+                let k = ((i - 1) / 2) * 21 + 23;
+                el[k..k + 8].copy_from_slice(w);
+            } else {
+                let k = (i / 2) * 21 + 15;
+                for j in 0..8 {
+                    el[k + j] = w[7 - j];
+                }
+            }
+        }
+        let n = el.len();
+        (el[0], el[1], el[n - 2], el[n - 1]) = (1, 1, 1, 1);
+        el
+    }
+
+    /// A minimal (three data character, 36-bit) symbol whose header selects method 1
+    /// is truncated: the compressed GTIN field alone needs 48 bits. It must be
+    /// rejected, not read out of bounds.
+    #[test]
+    fn truncated_method1_header_is_rejected() {
+        let el = elements_for(&[0x400, 0, 0]);
+        assert!(decode(&el).is_err());
+    }
+
+    /// Structurally valid symbols (correct finders and check character) carrying
+    /// arbitrary data-character values must decode or fail cleanly, never panic.
+    #[test]
+    fn arbitrary_data_characters_never_panic() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let n = 3 + (next() % 19) as usize;
+            let values: Vec<i32> = (0..n).map(|_| (next() % 4096) as i32).collect();
+            let _ = decode(&elements_for(&values));
+        }
+    }
 }

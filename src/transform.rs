@@ -220,8 +220,10 @@ pub fn scale(img: &GrayImage, factor: f32) -> GrayImage {
     let mut out = GrayImage::new(nw, nh);
     for oy in 0..nh {
         for ox in 0..nw {
-            let sx = (ox as f32 + 0.5) / factor - 0.5;
-            let sy = (oy as f32 + 0.5) / factor - 0.5;
+            // Output pixel centers near the border map up to half a source pixel
+            // outside the image; clamp so they resample the edge pixel.
+            let sx = ((ox as f32 + 0.5) / factor - 0.5).clamp(0.0, (img.width() - 1) as f32);
+            let sy = ((oy as f32 + 0.5) / factor - 0.5).clamp(0.0, (img.height() - 1) as f32);
             let v = img.sample_bilinear(sx, sy).unwrap_or(BACKGROUND);
             out.set(ox, oy, v.round() as u8);
         }
@@ -627,6 +629,20 @@ mod tests {
         let cx = out.width() / 2;
         let cy = out.height() / 2;
         assert!(out.get(cx, cy) < 128);
+    }
+
+    #[test]
+    fn scale_keeps_border_pixels() {
+        // Upscaling maps the first output pixels to source coordinates just below 0;
+        // they must resample the edge, not fall back to light background.
+        let img = GrayImage::filled(10, 6, 0);
+        for factor in [2.0, 3.0, 1.5, 0.5] {
+            let out = scale(&img, factor);
+            assert!(
+                out.pixels().iter().all(|&p| p == 0),
+                "factor {factor} lightened the border"
+            );
+        }
     }
 
     /// A checkerboard-ish test pattern with distinct dark features to track.

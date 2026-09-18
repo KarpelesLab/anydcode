@@ -201,7 +201,7 @@ fn kanji_bytes(v: u32) -> (u8, u8) {
 }
 
 /// Parse the corrected content bits into segments, stopping at the terminator (a
-/// zero character-count) or when the remaining bits are exhausted.
+/// zero numeric character-count) or when the remaining bits are exhausted.
 fn parse_segments(content: &[bool], version: MicroVersion) -> Result<Vec<Segment>> {
     let mut r = BitReader::new(content);
     let mut segments = Vec::new();
@@ -226,23 +226,35 @@ fn parse_segments(content: &[bool], version: MicroVersion) -> Result<Vec<Segment
             break;
         };
         let count = count as usize;
-        if count == 0 {
-            break; // terminator / padding
+        if count == 0 && mode == Mode::Numeric {
+            // The terminator is all zeros: the numeric mode indicator with a zero
+            // count. A zero count in any other mode is an (empty) segment.
+            break;
         }
         match mode {
             Mode::Numeric => {
                 let mut out = Vec::with_capacity(count);
                 let mut remaining = count;
+                let bad = || Error::undecodable("bad numeric value");
                 while remaining >= 3 {
                     let v = r.read(10).ok_or_else(trunc)?;
+                    if v >= 1000 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:03}").as_bytes());
                     remaining -= 3;
                 }
                 if remaining == 2 {
                     let v = r.read(7).ok_or_else(trunc)?;
+                    if v >= 100 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:02}").as_bytes());
                 } else if remaining == 1 {
                     let v = r.read(4).ok_or_else(trunc)?;
+                    if v >= 10 {
+                        return Err(bad());
+                    }
                     out.push(b'0' + v as u8);
                 }
                 segments.push(Segment::numeric(out));
@@ -287,4 +299,28 @@ fn parse_segments(content: &[bool], version: MicroVersion) -> Result<Vec<Segment
 
 fn trunc() -> Error {
     Error::undecodable("truncated Micro QR data stream")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(s: &str) -> Vec<bool> {
+        s.bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| b == b'1')
+            .collect()
+    }
+
+    /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127
+    /// and 10..=15 are malformed, not extra digits.
+    #[test]
+    fn numeric_group_out_of_range_is_rejected() {
+        let m2 = MicroVersion::M2;
+        assert!(parse_segments(&bits("0 0011 1111101000 00000"), m2).is_err());
+        assert!(parse_segments(&bits("0 0010 1100100 00000"), m2).is_err());
+        assert!(parse_segments(&bits("0 0001 1010 00000"), m2).is_err());
+        let segs = parse_segments(&bits("0 0001 0111 00000"), m2).unwrap();
+        assert_eq!(segs, [Segment::numeric(b"7".to_vec())]);
+    }
 }

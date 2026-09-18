@@ -202,6 +202,26 @@ fn builder_roundtrips() {
     );
 }
 
+/// Only a zero *numeric* count is the terminator; an empty segment in another mode
+/// (what `build_text("")` makes) is content and must survive the round trip, as
+/// must whatever follows it.
+#[test]
+fn empty_segments_roundtrip() {
+    roundtrip(vec![Segment::byte(Vec::new())], MicroEcLevel::L);
+    roundtrip(
+        vec![
+            Segment::alphanumeric(Vec::new()),
+            Segment::numeric(b"123".to_vec()),
+        ],
+        MicroEcLevel::M,
+    );
+    let enc = MicroQrEncoder::new();
+    let sym = enc.build_text("", MicroEcLevel::L).unwrap();
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = MicroQrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded, sym);
+}
+
 #[test]
 fn survives_correctable_error_m4() {
     // M4-Q corrects up to ~25%. Flip a single data module and still recover.

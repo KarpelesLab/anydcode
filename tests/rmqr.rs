@@ -287,6 +287,27 @@ fn build_text_picks_dense_modes() {
     assert_eq!(RmqrEncoder::new().encode(&decoded).unwrap(), encoding);
 }
 
+/// The rMQR terminator is the `000` mode indicator, so a zero character count is an
+/// ordinary (empty) segment — what `build_text("")` makes — and must survive the
+/// round trip together with whatever follows it.
+#[test]
+fn empty_segments_roundtrip() {
+    let enc = RmqrEncoder::new();
+    for sym in [
+        enc.build_text("", RmqrEcLevel::M).unwrap(),
+        enc.build(
+            vec![Segment::byte(Vec::new()), Segment::numeric(b"123".to_vec())],
+            RmqrEcLevel::H,
+        )
+        .unwrap(),
+    ] {
+        let encoding = enc.encode(&sym).unwrap();
+        let decoded = RmqrDecoder::new().decode(&encoding).unwrap();
+        assert_eq!(decoded, sym);
+        assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+    }
+}
+
 #[test]
 fn build_text_utf8_roundtrips() {
     let enc = RmqrEncoder::new();

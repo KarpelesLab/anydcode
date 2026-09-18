@@ -202,24 +202,32 @@ fn parse_segments(content: &[bool], size: RmqrSize) -> Result<Vec<Segment>> {
         };
         let ccb = char_count_bits(size, &mode).unwrap();
         let Some(count) = r.read(ccb) else { break };
+        // A zero count is an (empty) segment: only the `000` indicator terminates.
         let count = count as usize;
-        if count == 0 {
-            break;
-        }
         match mode {
             Mode::Numeric => {
                 let mut out = Vec::with_capacity(count);
                 let mut remaining = count;
+                let bad = || Error::undecodable("bad numeric value");
                 while remaining >= 3 {
                     let v = r.read(10).ok_or_else(trunc)?;
+                    if v >= 1000 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:03}").as_bytes());
                     remaining -= 3;
                 }
                 if remaining == 2 {
                     let v = r.read(7).ok_or_else(trunc)?;
+                    if v >= 100 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:02}").as_bytes());
                 } else if remaining == 1 {
                     let v = r.read(4).ok_or_else(trunc)?;
+                    if v >= 10 {
+                        return Err(bad());
+                    }
                     out.push(b'0' + v as u8);
                 }
                 segments.push(Segment::numeric(out));
@@ -264,4 +272,29 @@ fn parse_segments(content: &[bool], size: RmqrSize) -> Result<Vec<Segment>> {
 
 fn trunc() -> Error {
     Error::undecodable("truncated rMQR data stream")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bits(s: &str) -> Vec<bool> {
+        s.bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| b == b'1')
+            .collect()
+    }
+
+    /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127
+    /// and 10..=15 are malformed, not extra digits.
+    #[test]
+    fn numeric_group_out_of_range_is_rejected() {
+        // R7x43: 4-bit numeric character count.
+        let size = RmqrSize::from_dimensions(43, 7).unwrap();
+        assert!(parse_segments(&bits("001 0011 1111101000 000"), size).is_err());
+        assert!(parse_segments(&bits("001 0010 1100100 000"), size).is_err());
+        assert!(parse_segments(&bits("001 0001 1010 000"), size).is_err());
+        let segs = parse_segments(&bits("001 0001 0111 000"), size).unwrap();
+        assert_eq!(segs, [Segment::numeric(b"7".to_vec())]);
+    }
 }

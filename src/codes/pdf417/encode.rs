@@ -20,8 +20,9 @@ use alloc::{vec, vec::Vec};
 /// Required light-module quiet zone around the symbol.
 const QUIET_ZONE: usize = 2;
 
-/// Maximum total codewords (data + EC + symbol-length descriptor).
-const MAX_CODEWORDS: usize = 929;
+/// Maximum total codewords (data + EC + symbol-length descriptor): ISO/IEC 15438
+/// caps a symbol at 928, the longest block Reed–Solomon over GF(929) can protect.
+const MAX_CODEWORDS: usize = 928;
 
 /// PDF417 encoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -103,7 +104,7 @@ pub(super) fn build_codewords(segments: &[Segment], meta: &Pdf417Meta) -> Result
         ));
     }
     if n + k > MAX_CODEWORDS {
-        return Err(Error::capacity("PDF417 message exceeds 929 codewords"));
+        return Err(Error::capacity("PDF417 message exceeds 928 codewords"));
     }
 
     let mut data = Vec::with_capacity(n);
@@ -206,8 +207,11 @@ fn choose_dimensions(
             return None;
         }
         let total = cols * rows;
+        if total > MAX_CODEWORDS {
+            return None;
+        }
         let n = total - k;
-        if n < source + 1 || n > 928 {
+        if n < source + 1 {
             return None;
         }
         Some(rows)

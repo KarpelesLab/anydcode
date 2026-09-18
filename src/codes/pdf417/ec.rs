@@ -320,6 +320,60 @@ mod tests {
         assert_eq!(decode(&block, 16).as_deref(), Some(clean.as_slice()));
     }
 
+    /// Every error-correction size in use (the PDF417 levels and MicroPDF417's odd
+    /// counts) corrects exactly `k / 2` random errors anywhere in the block, and one
+    /// error more is never silently "corrected" into a different block that still
+    /// claims to be the original.
+    #[test]
+    fn rs_corrects_up_to_capacity_for_every_size() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        for k in [2usize, 4, 7, 8, 9, 13, 16, 21, 32, 50, 64, 128, 512] {
+            for _ in 0..4 {
+                let data_len = (1 + next(60)).min(928 - k);
+                let data: Vec<u32> = (0..data_len).map(|_| next(929) as u32).collect();
+                let mut clean = data.clone();
+                clean.extend_from_slice(&encode(&data, k));
+
+                let mut inject = |count: usize| {
+                    let mut block = clean.clone();
+                    let mut hit = vec![false; block.len()];
+                    let mut done = 0;
+                    while done < count {
+                        let pos = next(block.len());
+                        if !hit[pos] {
+                            hit[pos] = true;
+                            block[pos] = (block[pos] + 1 + next(928) as u32) % MOD;
+                            done += 1;
+                        }
+                    }
+                    block
+                };
+
+                let t = k / 2;
+                let block = inject(t);
+                assert_eq!(
+                    decode(&block, k).as_deref(),
+                    Some(clean.as_slice()),
+                    "k={k}"
+                );
+                if t < clean.len() {
+                    let block = inject(t + 1);
+                    if let Some(out) = decode(&block, k) {
+                        // Beyond capacity a decode may land on another valid codeword,
+                        // but it must be a genuine one.
+                        assert!(syndromes_vanish(&out, k), "k={k}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn rs_detects_uncorrectable() {
         let data = [1u32, 2, 3, 4];

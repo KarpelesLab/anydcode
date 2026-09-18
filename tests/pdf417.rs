@@ -244,3 +244,25 @@ fn decodes_zint_symbol_with_byte_shift() {
         ]
     );
 }
+
+/// A symbol holds at most 928 codewords in total (data + error correction). `build`
+/// must not hand back a geometry the encoder then refuses: either it fits, or the
+/// capacity error surfaces at build time.
+#[test]
+fn build_respects_the_928_codeword_limit() {
+    let enc = Pdf417Encoder::new();
+    for ec in [6u8, 7, 8] {
+        for len in [60usize, 300, 490, 498, 504, 600, 900, 1100] {
+            match enc.build(vec![Segment::byte(vec![0xAB; len])], level(ec)) {
+                Ok(symbol) => {
+                    let encoding = enc.encode(&symbol).unwrap_or_else(|e| {
+                        panic!("built a {len}-byte level-{ec} symbol that cannot encode: {e:?}")
+                    });
+                    let decoded = Pdf417Decoder::new().decode(&encoding).unwrap();
+                    assert_eq!(decoded.segments, symbol.segments);
+                }
+                Err(e) => assert!(matches!(e, anyd::error::Error::Capacity { .. }), "{e:?}"),
+            }
+        }
+    }
+}

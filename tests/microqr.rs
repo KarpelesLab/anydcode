@@ -403,3 +403,15 @@ fn encode_into_matches_encode() {
     assert_eq!(decoded.text().as_deref(), Some("HELLO"));
     assert_eq!(decoded.meta, SymbolMeta::MicroQr(meta));
 }
+
+/// Kanji mode round-trips, and a Shift-JIS trail byte below 0x40 (which would alias
+/// another character's 13-bit value) is rejected rather than silently re-mapped.
+#[test]
+fn kanji_roundtrips_and_rejects_bad_trail_byte() {
+    roundtrip(
+        vec![Segment::kanji(vec![0x93, 0x5F, 0xE4, 0xAA])],
+        MicroEcLevel::L,
+    );
+    let bad = vec![Segment::kanji(vec![0x82, 0x00])];
+    assert!(MicroQrEncoder::new().build(bad, MicroEcLevel::L).is_err());
+}

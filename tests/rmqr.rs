@@ -318,3 +318,19 @@ fn build_text_utf8_roundtrips() {
     let decoded = RmqrDecoder::new().decode(&encoding).unwrap();
     assert_eq!(decoded.segments, sym.segments);
 }
+
+/// Kanji mode round-trips, and a Shift-JIS trail byte below 0x40 (which would alias
+/// another character's 13-bit value) is rejected rather than silently re-mapped.
+#[test]
+fn kanji_roundtrips_and_rejects_bad_trail_byte() {
+    let enc = RmqrEncoder::new();
+    let segments = vec![Segment::kanji(vec![0x93, 0x5F, 0xE4, 0xAA])];
+    let sym = enc.build(segments, RmqrEcLevel::M).unwrap();
+    let encoding = enc.encode(&sym).unwrap();
+    let decoded = RmqrDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded, sym);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+
+    let bad = enc.build(vec![Segment::kanji(vec![0x82, 0x00])], RmqrEcLevel::M);
+    assert!(bad.is_err());
+}

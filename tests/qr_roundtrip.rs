@@ -2,7 +2,7 @@
 //! across modes, EC levels and versions, and must survive correctable errors.
 #![cfg(all(feature = "decode", feature = "encode", feature = "qr"))]
 
-use anyd::codes::qr::{EcLevel, QrDecoder, QrEncoder};
+use anyd::codes::qr::{EcLevel, Mask, QrDecoder, QrEncoder, Version};
 use anyd::output::Encoding;
 use anyd::segment::Segment;
 use anyd::traits::{Decode, Encode};
@@ -274,4 +274,47 @@ fn encode_into_matches_encode() {
     assert_eq!(decoded.text().as_deref(), Some("0123456789"));
     assert_eq!(decoded.meta, SymbolMeta::Qr(meta));
     assert_eq!(decoded.modes(), vec![anyd::Mode::Numeric]);
+}
+
+/// Kanji mode: every Shift-JIS double byte the encoder accepts must decode back to
+/// the same two bytes. Trail bytes below 0x40 used to be accepted and aliased onto
+/// another character (e.g. 0x8200 encoded as 0x8240).
+#[test]
+fn kanji_is_injective_over_all_byte_pairs() {
+    use anyd::segment::SegmentView;
+    let enc = QrEncoder::new();
+    let (version, mask) = (Version::new(1), Mask::new(0));
+    let mut scratch = [0u8; QrEncoder::MAX_BUFFER_LEN];
+    let mut storage = [0u8; QrEncoder::MAX_BUFFER_LEN];
+    let mut accepted = 0;
+    for hi in 0..=255u8 {
+        for lo in 0..=255u8 {
+            let pair = [hi, lo];
+            let views = [SegmentView {
+                mode: anyd::Mode::Kanji,
+                data: &pair,
+            }];
+            let Ok((grid, _)) = enc.encode_into(
+                &views,
+                EcLevel::L,
+                version,
+                mask,
+                &mut scratch,
+                &mut storage,
+            ) else {
+                continue;
+            };
+            accepted += 1;
+            let decoded = QrDecoder::new()
+                .decode(&Encoding::Matrix(anyd::output::BitMatrix::from(&grid)))
+                .unwrap();
+            assert_eq!(decoded.segments, [Segment::kanji(pair.to_vec())]);
+        }
+    }
+    // Every 13-bit value is reachable, so any decoded Kanji segment re-encodes.
+    assert_eq!(accepted, 1 << 13);
+    assert_lossless(
+        vec![Segment::kanji(vec![0x93, 0x5F, 0xE4, 0xAA])],
+        EcLevel::M,
+    );
 }

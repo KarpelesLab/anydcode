@@ -180,13 +180,19 @@ fn alnum_value(b: u8) -> Option<u32> {
 
 fn kanji_value(hi: u8, lo: u8) -> Option<u32> {
     let code = ((hi as u32) << 8) | lo as u32;
-    let base = if (0x8140..=0x9FFC).contains(&code) {
+    // ISO/IEC 18004 stops the first range at 0x9FFC; the three codes above it are
+    // kept so that every 13-bit value a decoder can meet re-encodes.
+    let base = if (0x8140..=0x9FFF).contains(&code) {
         code - 0x8140
     } else if (0xE040..=0xEBBF).contains(&code) {
         code - 0xC140
     } else {
         return None;
     };
+    // A trail byte below 0x40 would alias another character's value.
+    if base & 0xFF >= 0xC0 {
+        return None;
+    }
     Some((base >> 8) * 0xC0 + (base & 0xFF))
 }
 

@@ -456,22 +456,7 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         .first()
         .ok_or("usage: anyd decode <image.png>")?;
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).map_err(|e| format!("decoding PNG: {e}"))?;
-    let (w, h) = (rgba.width as usize, rgba.height as usize);
-    // ITU-R BT.601 luma from RGBA.
-    let luma: Vec<u8> = rgba
-        .data
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|p| ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8)
-        .collect();
-    let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;
-
-    // One shared decode entry point (see `anyd::pipeline::scan_all`) drives every
-    // front-end, so the CLI and the WebAssembly demo can never disagree on what decodes.
-    let found = anyd::pipeline::scan_all(&frame);
+    let found = decode_png_bytes(&bytes)?;
 
     if found.is_empty() {
         return Err("no barcode found in image".into());
@@ -484,6 +469,33 @@ fn cmd_decode(args: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Decode every symbol found in a PNG file's bytes.
+fn decode_png_bytes(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
+    let rgba = oxideav_png::decode_png_to_rgba(bytes).map_err(|e| format!("decoding PNG: {e}"))?;
+    let (w, h) = (rgba.width as usize, rgba.height as usize);
+    let luma = rgba_to_luma(&rgba.data);
+    let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;
+
+    // One shared decode entry point (see `anyd::pipeline::scan_all`) drives every
+    // front-end, so the CLI and the WebAssembly demo can never disagree on what decodes.
+    Ok(anyd::pipeline::scan_all(&frame))
+}
+
+/// ITU-R BT.601 luma from RGBA, composited over a white page: transparent pixels
+/// usually carry black RGB, and a code exported on a transparent background must
+/// not read as solid black.
+fn rgba_to_luma(rgba: &[u8]) -> Vec<u8> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| {
+            let y = (p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000;
+            let a = p[3] as u32;
+            ((y * a + 255 * (255 - a)) / 255) as u8
+        })
+        .collect()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -587,6 +599,36 @@ mod tests {
         assert!(render_png(&enc, 0).is_ok());
         assert!(render_png(&bars, 3).is_ok());
         assert!(render_svg(&enc, 8).unwrap().contains("<svg"));
+    }
+
+    #[test]
+    fn transparent_pixels_read_as_light_background() {
+        assert_eq!(rgba_to_luma(&[0, 0, 0, 0]), [255]);
+        assert_eq!(rgba_to_luma(&[0, 0, 0, 255]), [0]);
+        assert_eq!(rgba_to_luma(&[255, 255, 255, 255]), [255]);
+        assert_eq!(rgba_to_luma(&[0, 0, 0, 128]), [127]);
+
+        // A code exported with a transparent background: black modules over
+        // fully transparent (0,0,0,0) pixels.
+        let enc = build_encoding("qr", "TRANSPARENT", None).unwrap();
+        let img = render(&enc, 6);
+        let data: Vec<u8> = img
+            .pixels()
+            .iter()
+            .flat_map(|&p| [0, 0, 0, if p < 128 { 255 } else { 0 }])
+            .collect();
+        let png = oxideav_png::PngImage {
+            width: img.width() as u32,
+            height: img.height() as u32,
+            pixel_format: oxideav_png::PngPixelFormat::Rgba,
+            stride: img.width() * 4,
+            data,
+            palette: Vec::new(),
+        };
+        let bytes = oxideav_png::encode_png_image(&png).unwrap();
+        let found = decode_png_bytes(&bytes).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text().as_deref(), Some("TRANSPARENT"));
     }
 
     #[test]

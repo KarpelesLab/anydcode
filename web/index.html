@@ -245,7 +245,7 @@ const SYMS = [
   { id: 'maxicode', label: 'MaxiCode', group: '2D matrix', desc: 'Fixed hexagonal "bullseye" code (UPS). Modes 4/5/6 encode the message directly; structured modes 2/3 want "postcode|country|service|message".', accepts: 'Any text (or structured fields for mode 2/3)', length: '~90 chars', example: 'MAXICODE', validate: nonEmpty, options: [{ id: 'mode', label: 'Mode', values: [['4', '4 · standard EC'], ['5', '5 · enhanced EC'], ['6', '6 · reader prog.'], ['2', '2 · structured (numeric postcode)'], ['3', '3 · structured (alpha postcode)']], def: '4' }] },
   { id: 'hanxin', label: 'Han Xin', group: '2D matrix', desc: 'Chinese-optimized 2D matrix (ISO/IEC 20830). Encodes text incl. GB18030.', accepts: 'Any text', length: 'short–long', example: 'HANXIN 汉信码', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['L1', 'L1 · lowest'], ['L2', 'L2'], ['L3', 'L3'], ['L4', 'L4 · highest']], def: 'L1' }] },
   { id: 'dotcode', label: 'DotCode', group: '2D matrix', desc: 'Sparse dot matrix for high-speed inkjet/laser printing.', accepts: 'Any bytes (or GS1 element string)', length: 'short–medium', example: 'DOTCODE', validate: nonEmpty, options: [{ id: 'mode', label: 'Data mode', values: [['text', 'Plain data'], ['gs1', 'GS1 (reduced)']], def: 'text' }] },
-  { id: 'gridmatrix', label: 'Grid Matrix', group: '2D matrix', desc: 'Chinese 2D matrix symbology, versions 1–13.', accepts: 'Any text', length: 'short–long', example: 'GRIDMATRIX', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['auto', 'Auto'], ['L1', 'L1 · strongest'], ['L2', 'L2'], ['L3', 'L3'], ['L4', 'L4'], ['L5', 'L5 · most data']], def: 'auto' }, { id: 'version', label: 'Version', values: withAuto(range(1, 13).map(v => v[0])), def: 'auto' }] },
+  { id: 'gridmatrix', label: 'Grid Matrix', group: '2D matrix', desc: 'Chinese 2D matrix symbology, versions 1–13.', accepts: 'Any text', length: 'short–long', example: 'GRIDMATRIX', validate: nonEmpty, options: [{ id: 'ec', label: 'Error correction', values: [['auto', 'Auto'], ['L1', 'L1 · most data'], ['L2', 'L2'], ['L3', 'L3'], ['L4', 'L4'], ['L5', 'L5 · strongest']], def: 'auto' }, { id: 'version', label: 'Version', values: withAuto(range(1, 13).map(v => v[0])), def: 'auto' }] },
   { id: 'appclip', label: 'App Clip Code (Apple)', group: '2D matrix', desc: 'Apple’s circular five-ring code that launches an App Clip when scanned with iOS. Encodes one https:// URL through Apple’s trained URL compressor — short hosts and common path shapes fit, long URLs may exceed the 128-bit capacity. Unofficial implementation of a proprietary format.', accepts: 'One https:// URL', length: '≤128 compressed bits', example: 'https://example.com/shop?p=1', validate: s => /^https:\/\/[^/?#]+\.[^/?#]+/i.test(s.trim()) ? '' : 'an https:// URL with a dotted host', options: [
     { id: 'template', label: 'Color template', values: [['1', 'Black on white'], ['0', 'White on black'], ['3', 'Gray on white'], ['2', 'White on gray'], ['5', 'Red on white'], ['4', 'White on red'], ['7', 'Orange on white'], ['6', 'White on orange'], ['9', 'Green on white'], ['8', 'White on green'], ['11', 'Teal on white'], ['10', 'White on teal'], ['13', 'Blue on white'], ['12', 'White on blue'], ['15', 'Indigo on white'], ['14', 'White on indigo'], ['17', 'Purple on white'], ['16', 'White on purple']], def: '1' },
     { id: 'logo', label: 'Center glyph', values: [['cam', 'Camera (scan only)'], ['nfc', 'Phone (NFC tag)']], def: 'cam' },
@@ -482,40 +482,58 @@ let w; const mem = () => new Uint8Array(w.memory.buffer);
 const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
 function wr(b){ const p = w.alloc(b.length); mem().set(b, p); return p; }
 function take(pk){ const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn); const o = mem().slice(ptr, ptr + len); w.dealloc(ptr, len); return o; }
-function decLuma(fn, cw, ch, luma){ const p = wr(luma); const pk = fn(cw, ch, p); w.dealloc(p, luma.length); return JSON.parse(new TextDecoder().decode(take(pk)) || '[]'); }
+function decLuma(fn, cw, ch, luma, ...extra){ const p = wr(luma); let pk; try { pk = fn(cw, ch, p, ...extra); } finally { w.dealloc(p, luma.length); } return JSON.parse(new TextDecoder().decode(take(pk)) || '[]'); }
 self.onmessage = async (e) => {
-  await ready;
-  const { width, height, rgba, crops } = e.data;
-  const data = new Uint8Array(rgba);
-  const seen = new Set(), found = [];
-  const add = (r, box) => { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ symbology: r.symbology, text: r.text, box }); } };
-  // Linear crops first: they decode in ~a millisecond, so a slow matrix crop later in
-  // the batch can never delay the barcode read that motivated the dispatch.
-  const batch = crops.slice(0, 6).sort((a, b) => (a.family === 'linear' ? 0 : 1) - (b.family === 'linear' ? 0 : 1));
-  for (const b of batch) {
-    const x0 = Math.max(0, b.x0 | 0), y0 = Math.max(0, b.y0 | 0), x1 = Math.min(width, Math.ceil(b.x1)), y1 = Math.min(height, Math.ceil(b.y1));
-    const cw = x1 - x0, ch = y1 - y0; if (cw < 12 || ch < 12) continue;
-    const crop = new Uint8Array(cw * ch);
-    for (let y = 0; y < ch; y++) {
-      let s = ((y0 + y) * width + x0) * 4;
-      const d = y * cw;
-      for (let x = 0; x < cw; x++, s += 4) crop[d + x] = (data[s] * 299 + data[s + 1] * 587 + data[s + 2] * 114) / 1000 | 0;
+  // Whatever happens in here — a failed wasm fetch, a trap inside the decoder — the
+  // main thread MUST get its 'done': it dispatches only while the worker is idle, and
+  // an async handler's rejection never reaches worker.onerror, so a swallowed error
+  // would silently switch decoding off for the rest of the session.
+  try {
+    await ready;
+    const { width, height, rgba, crops } = e.data;
+    const data = new Uint8Array(rgba);
+    const seen = new Set();
+    // Linear crops first — they decode in ~a millisecond, so a slow matrix crop can
+    // never delay the barcode read that motivated the dispatch — and only THEN cap the
+    // batch. (Capping first dropped the barcode whenever six bigger text blobs
+    // out-ranked it, which is every busy scene.)
+    const rank = c => c.family === 'linear' ? 0 : 1;
+    const batch = crops.slice().sort((a, b) => rank(a) - rank(b)).slice(0, 8);
+    for (const b of batch) {
+      const x0 = Math.max(0, b.x0 | 0), y0 = Math.max(0, b.y0 | 0), x1 = Math.min(width, Math.ceil(b.x1)), y1 = Math.min(height, Math.ceil(b.y1));
+      const cw = x1 - x0, ch = y1 - y0; if (cw < 12 || ch < 12) continue;
+      const crop = new Uint8Array(cw * ch);
+      for (let y = 0; y < ch; y++) {
+        let s = ((y0 + y) * width + x0) * 4;
+        const d = y * cw;
+        for (let x = 0; x < cw; x++, s += 4) crop[d + x] = (data[s] * 299 + data[s + 1] * 587 + data[s + 2] * 114) / 1000 | 0;
+      }
+      // Route by the locator's family guess: a linear crop skips the 2D samplers, whose
+      // geometry fallbacks dominate scan time on busy crops, and scans straight along
+      // the reading axis the locator measured (NaN = unknown: search for it).
+      let hits;
+      try {
+        hits = b.family === 'linear'
+          ? decLuma(w.decode1d, cw, ch, crop, typeof b.axis === 'number' ? b.axis : NaN)
+          : decLuma(w.decode, cw, ch, crop);
+      } catch (err) { continue; } // one bad crop must not cost the rest of the batch
+      const found = [];
+      for (const r of hits) { const k = r.symbology + '|' + r.text; if (!seen.has(k)) { seen.add(k); found.push({ symbology: r.symbology, text: r.text, box: b.box || b }); } }
+      // Stream each crop's hits immediately: a decoded barcode must not wait on a slow
+      // matrix crop later in the batch.
+      if (found.length) self.postMessage({ results: found });
     }
-    // Route by the locator's family guess: a linear crop skips the 2D samplers, whose
-    // geometry fallbacks dominate scan time on busy crops (1D reads are ~1ms).
-    const fn = b.family === 'linear' ? w.decode1d : w.decode;
-    found.length = 0;
-    for (const r of decLuma(fn, cw, ch, crop)) add(r, b);
-    // Stream each crop's hits immediately: a decoded barcode must not wait on a slow
-    // matrix crop later in the batch (worst case ~600ms each on dense print).
-    if (found.length) self.postMessage({ results: found.slice() });
+  } catch (err) {
+    self.postMessage({ error: String(err) });
+  } finally {
+    self.postMessage({ done: true });
   }
-  self.postMessage({ done: true });
 };
 `;
 const decodeWorker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'text/javascript' })));
 decodeWorker.onmessage = (e) => {
-  const { results, done } = e.data;
+  const { results, done, error } = e.data;
+  if (error) console.warn('decode worker:', error);
   // Streamed per-crop results merge as they arrive; the dispatch slot only frees once
   // the whole batch is done.
   if (results) mergeDecoded(results, performance.now());
@@ -536,17 +554,23 @@ const worker2dSrc = `
 let w; const mem = () => new Uint8Array(w.memory.buffer);
 const ready = fetch(${JSON.stringify(WASM_URL)}).then(r => WebAssembly.instantiateStreaming(r, {})).then(x => { w = x.instance.exports; });
 self.onmessage = async (e) => {
-  await ready;
-  const { width, height, luma, scale } = e.data;
-  const p = w.alloc(luma.length); mem().set(luma, p);
-  const pk = w.decode2d(width, height, p); w.dealloc(p, luma.length);
-  const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn);
-  const bytes = mem().slice(ptr, ptr + len); w.dealloc(ptr, len);
-  const res = JSON.parse(new TextDecoder().decode(bytes) || '[]');
-  self.postMessage(res.map(r => ({
-    symbology: r.symbology, text: r.text,
-    box: r.box ? { x0: r.box.x0 * scale, y0: r.box.y0 * scale, x1: r.box.x1 * scale, y1: r.box.y1 * scale } : null,
-  })));
+  // Always answer, even on failure: the main thread only dispatches while this worker
+  // is idle, and a rejection inside an async handler never reaches worker.onerror.
+  let out = [];
+  try {
+    await ready;
+    const { width, height, luma, scale } = e.data;
+    const p = w.alloc(luma.length); mem().set(luma, p);
+    let pk; try { pk = w.decode2d(width, height, p); } finally { w.dealloc(p, luma.length); }
+    const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn);
+    const bytes = mem().slice(ptr, ptr + len); w.dealloc(ptr, len);
+    const res = JSON.parse(new TextDecoder().decode(bytes) || '[]');
+    out = res.map(r => ({
+      symbology: r.symbology, text: r.text,
+      box: r.box ? { x0: r.box.x0 * scale, y0: r.box.y0 * scale, x1: r.box.x1 * scale, y1: r.box.y1 * scale } : null,
+    }));
+  } catch (err) { /* report nothing this round */ }
+  self.postMessage(out);
 };
 `;
 const worker2d = new Worker(URL.createObjectURL(new Blob([worker2dSrc], { type: 'text/javascript' })));
@@ -713,7 +737,7 @@ document.getElementById('cam-capture').onclick = () => {
     decode: lastDecoded.map(r => ({ symbology: r.symbology, text: r.text, box: r.box ? rbox(r.box) : null })),
     // Raw locator output for reference (pre display-filter; favours recall, so noisy).
     rawLocateCount: liveCands.length,
-    rawLocate: liveCands.map(c => ({ family: c.family, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
+    rawLocate: liveCands.map(c => ({ family: c.family, axis: c.axis, corners: c.corners.map(p => [Math.round(p[0]), Math.round(p[1])]) })),
     userAgent: navigator.userAgent,
   };
   const n = (window.__capN = (window.__capN || 0) + 1);
@@ -751,7 +775,7 @@ function loop(ts) {
     // tracks, crops and the HUD all share one coordinate system. No area filter here:
     // the locator itself caps scene-sized blobs, and — unlike the old JS filter — it
     // knows a finder-backed box is a close-up code, not background.
-    liveCands = locateLuma(lw, lh, luma).map(c => ({ family: c.family, corners: c.corners.map(p => [p[0] * sc, p[1] * sc]) }));
+    liveCands = locateLuma(lw, lh, luma).map(c => ({ family: c.family, axis: c.axis, corners: c.corners.map(p => [p[0] * sc, p[1] * sc]) }));
     lastMs = performance.now() - t0;
     liveScale = [pw, ph];
     updateCandTracks(liveCands, ts);
@@ -792,10 +816,11 @@ function loop(ts) {
       const sctx = scratch.getContext('2d', { willReadFrequently: true });
       sctx.drawImage(video, 0, 0, pw, ph);
       const img = sctx.getImageData(0, 0, pw, ph);
-      const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16, family: c.family }; });
+      const crops = liveCands.map(c => { const b = bbox(c.corners); return { x0: b.x0 - 16, y0: b.y0 - 16, x1: b.x1 + 16, y1: b.y1 + 16, family: c.family, axis: c.axis, box: b }; });
       // No candidate this tick (e.g. motion blur wiped the texture pass) — still try
       // the centre band, where a user aiming at a code will have put it.
-      if (!crops.length) crops.push({ x0: 0, y0: ph * 0.2, x1: pw, y1: ph * 0.8, family: 'any' });
+      // Linear only: the parallel 2D worker already reads the whole frame for matrix codes.
+      if (!crops.length) crops.push({ x0: 0, y0: ph * 0.2, x1: pw, y1: ph * 0.8, family: 'linear' });
       decodeWorker.postMessage({ width: pw, height: ph, rgba: img.data.buffer, crops }, [img.data.buffer]);
     }
   }

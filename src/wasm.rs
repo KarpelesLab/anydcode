@@ -155,10 +155,8 @@ fn opt<'a>(opts: &'a str, key: &str) -> Option<&'a str> {
 /// `luma_ptr` must point to `w*h` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
-    let luma = unsafe { input(luma_ptr, w * h) };
-    let frame = match GrayFrame::new(luma, w, h) {
-        Ok(f) => f,
-        Err(_) => return export(b"[]".to_vec()),
+    let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
+        return export(b"[]".to_vec());
     };
 
     // Same shared decode entry point as the CLI (`crate::pipeline::scan_all`), so the
@@ -174,16 +172,30 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
 /// part of a scan, and on a text-heavy crop they can dominate the whole dispatch while
 /// the 1D read itself takes a millisecond (see [`crate::pipeline::scan_1d`]).
 ///
+/// `axis` is the code's reading axis in radians as reported by `locate` (clockwise
+/// from +x); pass `NaN` when unknown and the crop's orientation is searched instead.
+///
 /// # Safety
 /// `luma_ptr` must point to `w*h` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn decode1d(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
-    let luma = unsafe { input(luma_ptr, w * h) };
-    let frame = match GrayFrame::new(luma, w, h) {
-        Ok(f) => f,
-        Err(_) => return export(b"[]".to_vec()),
+pub unsafe extern "C" fn decode1d(w: usize, h: usize, luma_ptr: *const u8, axis: f32) -> u64 {
+    let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
+        return export(b"[]".to_vec());
     };
-    export(symbols_json(&crate::pipeline::scan_1d(&frame)))
+    export(symbols_json(&crate::pipeline::scan_1d_at(&frame, axis)))
+}
+
+/// Borrow a `w`×`h` luminance frame from wasm memory, or `None` for dimensions that do
+/// not describe a frame (zero-sized, or `w*h` overflowing).
+///
+/// # Safety
+/// `luma_ptr` must point to `w*h` readable bytes.
+unsafe fn frame_input(w: usize, h: usize, luma_ptr: *const u8) -> Option<GrayFrame<'static>> {
+    let len = w.checked_mul(h)?;
+    if len == 0 || luma_ptr.is_null() {
+        return None;
+    }
+    GrayFrame::new(unsafe { input(luma_ptr, len) }, w, h).ok()
 }
 
 /// Serialize decoded symbols as the `[{"symbology":..,"text":..}]` JSON both decode
@@ -217,10 +229,8 @@ fn symbols_json(out: &[crate::Symbol]) -> Vec<u8> {
 /// `luma_ptr` must point to `w*h` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn decode2d(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
-    let luma = unsafe { input(luma_ptr, w * h) };
-    let frame = match GrayFrame::new(luma, w, h) {
-        Ok(f) => f,
-        Err(_) => return export(b"[]".to_vec()),
+    let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
+        return export(b"[]".to_vec());
     };
 
     let out = crate::pipeline::scan_2d(&frame);
@@ -265,16 +275,16 @@ fn symbol_box(sym: &crate::Symbol) -> Option<(f32, f32, f32, f32)> {
 }
 
 /// Locate (position-only, no decode) every candidate code in a `w`×`h` luminance
-/// frame; returns JSON `[{"family":..,"corners":[[x,y],..]}]`.
+/// frame; returns JSON `[{"family":..,"axis":radians|null,"corners":[[x,y],..]}]`.
+/// A linear candidate's corners are a box aligned with the code and `axis` is its
+/// reading axis — hand it to `decode1d` with a crop of the corners' bounds.
 ///
 /// # Safety
 /// `luma_ptr` must point to `w*h` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
-    let luma = unsafe { input(luma_ptr, w * h) };
-    let frame = match GrayFrame::new(luma, w, h) {
-        Ok(f) => f,
-        Err(_) => return export(b"[]".to_vec()),
+    let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
+        return export(b"[]".to_vec());
     };
     // The locator's default downscale=2 is tuned for a full-resolution camera frame.
     // The demo feeds an already GPU-downscaled half-res grab (cheaper to extract on the
@@ -299,7 +309,12 @@ pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         };
         json.push_str("{\"family\":\"");
         json.push_str(family);
-        json.push_str("\",\"corners\":[");
+        json.push_str("\",\"axis\":");
+        match c.location.rotation {
+            Some(a) if a.is_finite() => json.push_str(&a.to_string()),
+            _ => json.push_str("null"),
+        }
+        json.push_str(",\"corners\":[");
         for (j, p) in c.location.outline.corners.iter().enumerate() {
             if j > 0 {
                 json.push(',');
@@ -317,7 +332,9 @@ pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 
 }
 
 fn push_num(s: &mut String, v: f32) {
-    // Integer-ish pixel coordinates; one decimal is plenty for the overlay.
+    // Integer-ish pixel coordinates; one decimal is plenty for the overlay. JSON has
+    // no NaN/Infinity, and one unparseable number would cost the page the whole reply.
+    let v = if v.is_finite() { v } else { 0.0 };
     let r = (v * 10.0).round() / 10.0;
     s.push_str(&r.to_string());
 }

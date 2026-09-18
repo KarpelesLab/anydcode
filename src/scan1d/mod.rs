@@ -114,6 +114,55 @@ impl ScanOptions {
     }
 }
 
+/// Refine an estimate of a code's reading axis (degrees) by image sharpness.
+///
+/// A profile averaged across a band *along the bars* is crisp only when the band really
+/// does run along the bars: a few degrees off and each sample mixes bar with space, so
+/// the profile's edge energy collapses. Trying the angles within ±10° of `deg` on wide
+/// bands through the frame and keeping the crispest recovers the axis to within the
+/// step — which matters because gradient-based axis estimates (the locator's, the
+/// orientation histogram's) are biased by several degrees for bars near the pixel limit,
+/// and a scan line more than a few degrees off leaves a long symbol before its end.
+pub fn refine_axis(frame: &GrayFrame<'_>, deg: f32) -> f32 {
+    let (w, h) = (frame.width(), frame.height());
+    if w < 16 || h < 16 {
+        return deg;
+    }
+    // Three lines through the middle half of the frame, wide bands.
+    let opts = |a: f32| ScanOptions {
+        scan_count: 3,
+        angles_deg: vec![a],
+        ..ScanOptions::default()
+    };
+    let energy = |a: f32| -> f32 {
+        scan_lines_of(w, h, &opts(a))
+            .iter()
+            .map(|line| {
+                let p = sample_band(frame, line, AXIS_BAND_HALF);
+                p.windows(2)
+                    .map(|v| (v[1] - v[0]) * (v[1] - v[0]))
+                    .sum::<f32>()
+                    / p.len().max(1) as f32
+            })
+            .sum()
+    };
+    let mut best = (energy(deg), deg);
+    let mut step = -10.0f32;
+    while step <= 10.0 {
+        if step != 0.0 {
+            let e = energy(deg + step);
+            if e > best.0 {
+                best = (e, deg + step);
+            }
+        }
+        step += 2.0;
+    }
+    best.1
+}
+
+/// Band half-width used by [`refine_axis`]: wide, so a small misalignment smears.
+const AXIS_BAND_HALF: i32 = 8;
+
 /// One recovered linear-barcode candidate: the normalized module pattern, where it
 /// was scanned, and a confidence score.
 #[derive(Debug, Clone)]
@@ -321,6 +370,11 @@ const BAND_HALF: i32 = 2;
 /// phases, and averages sensor noise across the band (bars are constant along their
 /// length, so nothing but noise is lost). Positions are clamped to the frame.
 fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) -> Vec<f32> {
+    smooth(&sample_band(frame, line, BAND_HALF), smooth_radius)
+}
+
+/// The band-averaged profile along `line`, averaging `band_half` pixels either side.
+fn sample_band(frame: &GrayFrame<'_>, line: &ScanLine, band_half: i32) -> Vec<f32> {
     let (w, h) = (frame.width() as i32, frame.height() as i32);
     let n = line.len;
     let mut sum = vec![0.0f32; n];
@@ -329,7 +383,7 @@ fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) 
     let (nx, ny) = (-line.sy, line.sx);
     for i in 0..n {
         let p = line.point(i as f32);
-        for k in -BAND_HALF..=BAND_HALF {
+        for k in -band_half..=band_half {
             let x = ((p.x + k as f32 * nx).round() as i32).clamp(0, w - 1);
             let y = ((p.y + k as f32 * ny).round() as i32).clamp(0, h - 1);
             // Bin by where this pixel's centre falls along the line.
@@ -354,7 +408,7 @@ fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) 
         }
         profile.push(last);
     }
-    smooth(&profile, smooth_radius)
+    profile
 }
 
 /// Separable box smoothing with the given radius (`0` returns a copy).

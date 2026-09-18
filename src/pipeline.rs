@@ -179,6 +179,7 @@ pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
             continue;
         }
         tried.push(deg);
+        let deg = crate::scan1d::refine_axis(frame, deg);
         let found = scan_1d_sweep(frame, &crate::scan1d::ScanOptions::around(deg));
         if !found.is_empty() {
             return found;
@@ -192,7 +193,8 @@ pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 /// the full [`scan_1d`] search if nothing reads along that axis.
 pub fn scan_1d_at(frame: &crate::image::GrayFrame<'_>, angle: f32) -> Vec<Symbol> {
     if angle.is_finite() {
-        let opts = crate::scan1d::ScanOptions::around(angle.to_degrees());
+        let deg = crate::scan1d::refine_axis(frame, angle.to_degrees());
+        let opts = crate::scan1d::ScanOptions::around(deg);
         let found = scan_1d_sweep(frame, &opts);
         if !found.is_empty() {
             return found;

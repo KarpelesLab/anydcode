@@ -7,6 +7,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Live detection.** On camera-like scenes the locate → crop → decode loop read about
+  half the codes it was shown and reported dozens of values that were not there, at
+  ~1 s per decode pass. It now reads 97.5% of 1D and 83% of 2D codes on the same scenes
+  with no wrong values, in tens of milliseconds (`examples/liveeval.rs`,
+  `tests/live_pipeline.rs`):
+  - `scan1d` treated a whole scan line as one barcode and required both crop edges to
+    be light; it now thresholds locally, cuts each line into quiet-zone-delimited spans,
+    fits module width and bar/space bias jointly, and samples band-averaged profiles at
+    any angle.
+  - `pipeline::scan_1d` believed any single decode although half its decoders have no
+    check character; readings now need cross-scanline consensus, quiet zones, a
+    plausible length, and must not be a fragment of a longer reading.
+  - The EAN/UPC width reader ignored quiet zones, reading a UPC-E out of the left half
+    of any EAN-13 and out of other symbologies and text.
+  - `detect::locate` only recognised barcodes within ~15° of the frame axes, was blinded
+    by uneven lighting (global Otsu), let a single false finder hit turn a text blob into
+    a top-ranked "QR" that swallowed the barcode inside it, and gave decoders no
+    orientation. It is now gradient-orientation based with local binarization, and
+    reports each linear region's reading axis and an oriented box.
+  - The App Clip scanner decoded ordinary barcodes and text into fluent-looking URLs
+    (its payload RS is far too weak for thousands of hypotheses per frame); it now
+    requires real ring structure and the template byte. Aztec no longer "decodes" a
+    blank patch (all-zero codewords are a valid RS codeword).
+  - QR and App Clip scanning no longer spend hundreds of milliseconds on code-free
+    frames.
+  - `FrameDetector` matched `Hints` by exact fingerprint equality, which sensor noise
+    and hand shake defeat on every frame; it now matches by position plus a tolerant
+    fingerprint.
+  - Web demo: a wasm trap or failed fetch left a decode worker "busy" forever, silently
+    disabling decoding for the session; the crop batch was truncated before barcodes
+    were prioritised, so busy scenes never decoded theirs.
+- Encoders now conform where they did not (output unreadable by other tools): Aztec
+  orientation marks, Data Matrix 144×144 block interleave, Micro QR M1/M3 padding,
+  Code 16K symbol value 106, one-track Pharmacode gap, Grid Matrix numeral/byte modes,
+  DotCode corner-forced masks.
+- Decoders now read what other encoders produce: DataBar Expanded methods 3–14, PDF417
+  byte shift 913, Code 128 / Code 16K / Codablock F FNC4, Code 49 numeric mode, Code 16K
+  modes 5/6, rMQR ECI, Aztec latched punctuation and FLG(n), DotCode macros and error
+  correction, Code 39 / Code 11 at 3:1 print ratio, Telepen cropped to its last bar.
+- Panics on hostile input: IMb, Mailmark, Han Xin, DataBar Expanded, DotCode and MaxiCode
+  decoders; App Clip URLs with non-ASCII near the scheme; `MatrixBuf::new` overflow; CLI
+  `--scale`, giant PNG headers, closed stdout.
+- Many decoders accepted malformed or non-canonical input (out-of-range numeric groups,
+  aliased Kanji, empty payloads, over-wide elements, unvalidated termination bars, Micro
+  QR M1 "error correction") that either mis-decoded or could not re-encode.
+- CLI: option parsing (flags swallowing data, unknown options ignored, surplus
+  arguments), alpha-channel PNGs decoding as solid black.
+
+### Added
+
+- `pipeline::scan_1d_at`, `scan_stacked_at`, `scan_linear_at`: decode a located linear
+  region along its known reading axis (1D readers, then the PDF417 family).
+- `scan1d::scan_spans`, `scan1d::refine_axis`, `ScanOptions::around`;
+  `imgproc::orient::gradient_angle_peaks`; `codes::ean::decode_edges_within`;
+  `detect::fingerprint_distance`.
+- `Location::rotation` and an oriented `outline` on linear `detect::locate` candidates.
+
+### Changed
+
+- `LocateOptions::anisotropy` is now a rotation-invariant gradient coherence (default
+  `0.7`) and `edge_density` a fraction of edge pixels; `ScanOptions::angles_deg` accepts
+  any angle.
+- One-track Pharmacode renders with the standard two-module gap (`max_modules` 78).
+
 ## [0.1.4](https://github.com/KarpelesLab/anydcode/compare/v0.1.3...v0.1.4) - 2026-09-15
 
 ### Added

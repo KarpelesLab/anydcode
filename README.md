@@ -91,21 +91,28 @@ lighting and cylinder curvature; clean-render envelope in `tests/harness_image.r
 real-capture envelope (bottle and can labels down to ≈4.6 px/module) in
 `tests/real_world.rs`.
 
-² 1D detection is the shared **`scan1d`** luminance front-end (edge detection →
-run-length → normalized `LinearPattern`), feeding each symbology's decoder. The
-end-to-end pixel→symbol path is verified for Code 128, Code 39 and EAN-13 in
-`tests/scan1d_pipeline.rs`; it applies to any standard bar/space linear code.
-Through `pipeline::scan_1d` the read is rotation-complete: mirrored patterns cover
-180°, and any other angle is handled by estimating the crop's dominant texture
-orientation and derotating before the rescan (`tests/rotated1d.rs`). The shared
-`pipeline::scan_1d` / `scan_all` entry points (and so the CLI and the demo) currently
-try the Code 128, EAN/UPC, Code 93, Code 39, ITF and Codabar decoders; the other
-linear decoders are driven by handing `scan1d::scan_lines` candidates to
-`scan1d::try_decode`. DataBar (finder-pattern based) and Pharmacode need dedicated
-samplers.
+² 1D detection is the shared **`scan1d`** luminance front-end. Each scan line is a
+band-averaged profile (real pixels, no interpolation) thresholded against a sliding
+local mid-level, then **cut into spans** at every run too wide to be a symbol element —
+so a label edge, a dark surface beyond the label, print beside the code or a second
+code on the same line do not disturb the read — and each span is quantized on its own
+with a joint module-width / bar-vs-space-bias fit. Scan lines run at any angle, straight
+out of the frame. `pipeline::scan_1d` tries horizontal, then the crop's
+edge-orientation peaks, then vertical; `pipeline::scan_1d_at` takes a known reading
+axis (the locator reports one), refined by profile sharpness. Readings are accepted by
+**consensus**, not on a single decode: at least two scan lines must agree, the span must
+show real quiet zones, the payload must be plausibly long for its symbology (only
+Code 128, Code 93 and EAN/UPC carry a check character), and a reading that is a fragment
+of a longer, equally supported one is dropped. EAN/UPC additionally has a width-ratio
+reader for curved and blurred captures. The shared entry points currently try the
+Code 128, EAN/UPC, Code 93, Code 39, ITF and Codabar decoders; the other linear decoders
+are driven by handing `scan1d::scan_spans` candidates to `scan1d::try_decode`. DataBar
+(finder-pattern based) and Pharmacode need dedicated samplers. End-to-end coverage:
+`tests/live_pipeline.rs`, `tests/scan1d_pipeline.rs`, `tests/rotated1d.rs`.
 
-³ Data Matrix ships an image sampler: Otsu binarization → largest-component isolation
-→ solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid
+³ Data Matrix ships an image sampler: Otsu binarization → the largest few dark
+components tried in turn (so a dark surface or print beside the code does not displace
+it) → solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid
 sampling, with symbol size and grid chirality confirmed by Reed–Solomon. Robust to
 any-angle rotation, scale, blur/noise and (size-graded) tilt; envelope in
 `tests/datamatrix_image.rs`.
@@ -113,7 +120,9 @@ any-angle rotation, scale, blur/noise and (size-graded) tilt; envelope in
 ⁴ PDF417 (finder-less) is located by its start/stop guard columns → RANSAC edge fit →
 affine grid sampling → RS-corrected decode. Handles upright, rotation ≤±10°, scale,
 blur and noise; perspective keystoning is out of scope (no interior anchor). Envelope
-in `tests/pdf417_image.rs`.
+in `tests/pdf417_image.rs`. On the live path the locator reports a PDF417 as a linear
+region with its axis, and `pipeline::scan_linear_at` derotates the crop by it first, so
+located symbols read at any rotation.
 
 ⁶ Aztec, Micro QR and rMQR ship image samplers built on their native fiducials:
 Aztec's bullseye (equal-run cross-section scan → the enclosed light annulus floods
@@ -225,44 +234,70 @@ assert_eq!(encoder.encode(&decoded).unwrap(), encoding);
 
 For a camera feed you rarely want to fully decode every frame. The `detect` module
 provides a fast, symbology-agnostic **locator** that returns the *position* of every
-code (a bounding quad + coarse family guess) in a single downscaled pass, **without
-decoding** — the cheap stage of the two-stage `Detect` → `Analyze` pipeline. It is
-recall-biased but structurally picky: concentric-finder detection backs matrix
-guesses, scene-sized merged blobs, text rows/columns masquerading as barcodes and
-non-code ink densities are gated out, overlapping duplicates of one physical code are
-suppressed, and a close-up code that defeats the texture pass is still reported from
-its finder hits alone:
+code (a quad + coarse family guess) in a single downscaled pass, **without decoding** —
+the cheap stage of the two-stage `Detect` → `Analyze` pipeline.
+
+It box-averages the frame down, thresholds it against its *local* neighbourhood (so a
+lighting falloff, a shadow or a code on a dark product still binarizes), and sums each
+tile's gradients into a structure tensor. A tile whose edges all share one direction is
+a patch of bars — **at any rotation** — and such tiles cluster only with neighbours on
+the same axis, so a barcode separates from the print around it and comes back as a box
+*aligned with the code* plus its **reading axis** (`Location::rotation`). Incoherent
+edge-dense tiles are matrix/texture; concentric-finder hits (cross-checked on both axes
+and a diagonal) vouch for QR/Aztec. It is recall-biased but structurally picky: linear
+regions need a barcode's worth of unbroken bars filling their box, finderless matrix
+guesses need two well-separated tones at code-like ink coverage, scene-sized blobs and
+duplicates are dropped, and a close-up code that defeats the texture pass is still
+reported from its finders alone.
 
 ```rust
 use anyd::detect::{locate, LocateOptions};
+use anyd::pipeline::{scan_all, scan_linear_at};
 
-let candidates = locate(&frame, &LocateOptions::default());
-for c in &candidates {
-    // c.location — where the code is; c.symbology — family guess.
-    // Hand off to the matching sampler/decoder only for new regions.
+for c in locate(&frame, &LocateOptions::default()) {
+    // c.location.outline — where; c.symbology — family guess; for a linear region
+    // c.location.rotation — the axis to scan along. Crop the outline's bounds (plus a
+    // margin) and decode just that:
+    //   linear  → scan_linear_at(&crop, axis)   (1D readers, then PDF417 family)
+    //   matrix  → scan_all(&crop)
 }
 ```
+
+`detect::FrameDetector` wraps this as a `Detect` that also reuses `Hints`: a candidate
+is matched to a previously decoded symbol when it sits where that symbol was *and* looks
+like it (a noise- and shift-tolerant ink fingerprint), so known codes skip re-analysis
+without a swapped-in code inheriting the old value.
 
 Benchmark (`cargo bench --bench detect`, dependency-free, `std::time::Instant`),
 locating **all** codes of all families per frame vs. a full QR decode:
 
 | resolution | locate median | locate FPS | full QR decode | detect speedup |
 |-----------:|--------------:|-----------:|---------------:|---------------:|
-| 640×480    | 0.29 ms | ~3400 | 12.1 ms | ~41× |
-| 1280×720   | 0.70 ms | ~1430 | 14.1 ms | ~20× |
-| 1920×1080  | 1.53 ms | ~650  | 17.4 ms | ~11× |
+| 640×480    | 0.43 ms | ~2300 | 4.5 ms  | ~10× |
+| 1280×720   | 1.24 ms | ~800  | 6.6 ms  | ~5×  |
+| 1920×1080  | 2.75 ms | ~360  | 10.1 ms | ~4×  |
 
-Recall 100% and false-positive rate 0% on the benchmark's planted-code frames.
-Locating is comfortably real-time at every resolution; decoding then runs only on the
-regions the locator hands off (and `Hints` lets already-decoded codes be skipped
-across frames).
+Those frames are pristine renders on white, which any locator finds. The number that
+matters is end-to-end on camera-like scenes — codes planted off-centre in a 720p frame,
+rotated 0–90°, on a page, a dark surface or amid print, under a 2:1 lighting falloff,
+blurred and noisy — replayed through the same locate → crop → decode loop a front-end
+runs (`cargo run --release --example liveeval`):
+
+| | read rate | wrong values | decode time / frame |
+|---|---:|---:|---:|
+| 1D (EAN-13, Code 128, Code 39, ITF) | 97.5% | 0 | ~50 ms crop batch |
+| 2D (QR, Aztec, PDF417, Data Matrix) | 83% | 0 | ~120 ms whole-frame pass |
+
+Data Matrix is the weak one (its sampler needs a clean surround); QR and Aztec are at
+97–100%. `tests/live_pipeline.rs` pins this behaviour in CI, including the things that
+must *not* read: text, half an EAN-13 (structurally a UPC-E), ITF fragments.
 
 The demo page shows the intended live wiring: the main thread runs `locate` on a
-half-resolution grab ~30×/s, a crop worker decodes located regions off-thread —
-routed by family, so linear crops take the fast 1D path (`scan_1d` is
-rotation-complete via mirrored patterns and gradient-orientation derotation) — a
-second worker sweeps the full frame for self-localizing 2D codes, and decoded locks
-are position-tracked across frames so the overlay follows the code between reads.
+half-resolution grab ~30×/s; a crop worker decodes located regions off-thread, linear
+crops first and along their reported axis; a second worker reads self-localizing 2D
+codes off the frame, alternating the half-resolution frame with the central half at
+full resolution; and decoded locks are position-tracked across frames so the overlay
+follows the code between reads.
 
 ## Command-line tool (`anyd`)
 

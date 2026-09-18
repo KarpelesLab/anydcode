@@ -597,55 +597,129 @@ fn box_quad(b: [usize; 4], scale: f32) -> Quad {
     ])
 }
 
-/// A cheap, position-tolerant signature: a coarse `4×4` darkness grid sampled over the
-/// reduced-pixel box, packed with the family tag. Robust enough to re-match a code
-/// across frames.
+/// A cheap signature of a region: which of its `4×4` cells are darker than the region's
+/// mean, plus the family tag in the top bits.
+///
+/// Each bit compares a whole cell's mean with the region's, so sensor noise and a pixel
+/// or two of box jitter rarely flip one — but "rarely" is not "never", which is why
+/// [`FrameDetector`] matches fingerprints by [`fingerprint_distance`] rather than by
+/// equality.
 fn fingerprint(grid: &DownGrid, b: [usize; 4], family: Family) -> Fingerprint {
-    let mut bits: u64 = 0;
+    let b = ink_bounds(grid, b);
     let w = (b[2] - b[0]).max(1);
     let h = (b[3] - b[1]).max(1);
-    // Mean darkness of the region for a per-region threshold.
-    let mut sum = 0u64;
-    let mut n = 0u64;
-    for gy in 0..4 {
-        for gx in 0..4 {
-            let x = b[0] + gx * w / 4 + w / 8;
-            let y = b[1] + gy * h / 4 + h / 8;
-            sum += u64::from(grid.luma(x, y));
-            n += 1;
+    let mut cell = [0u64; 16];
+    let mut count = [0u64; 16];
+    for y in b[1]..b[3].min(grid.height) {
+        let gy = ((y - b[1]) * 4 / h).min(3);
+        for x in b[0]..b[2].min(grid.width) {
+            let gx = ((x - b[0]) * 4 / w).min(3);
+            cell[gy * 4 + gx] += u64::from(grid.luma(x, y));
+            count[gy * 4 + gx] += 1;
         }
     }
-    let mean = (sum / n.max(1)) as u8;
-    let mut i = 0;
-    for gy in 0..4 {
-        for gx in 0..4 {
-            let x = b[0] + gx * w / 4 + w / 8;
-            let y = b[1] + gy * h / 4 + h / 8;
-            if grid.luma(x, y) <= mean {
-                bits |= 1 << i;
-            }
-            i += 1;
+    let total: u64 = cell.iter().sum();
+    let n: u64 = count.iter().sum();
+    let mut bits: u64 = 0;
+    for i in 0..16 {
+        // cell mean <= region mean, cross-multiplied to stay in integers.
+        if count[i] > 0 && cell[i] * n <= total * count[i] {
+            bits |= 1 << i;
         }
     }
     let tag: u64 = match family {
         Family::Matrix => 0x1,
         Family::Linear => 0x2,
     };
-    // Mix the 16 darkness bits with the family tag via a xorshift-style hash.
-    let mut v = bits | (tag << 62);
-    v ^= v >> 33;
-    v = v.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
-    v ^= v >> 33;
-    Fingerprint(v)
+    Fingerprint(bits | (tag << 62))
+}
+
+/// Shrink (or grow, by up to a tile) a tile-snapped box to the extent of the ink in it.
+///
+/// Region boxes snap to the tile grid, so a code that moves three pixels can move its
+/// box by a whole tile — and a darkness grid laid over the *box* then samples different
+/// parts of the code. Anchoring the grid to the ink itself makes the signature follow
+/// the code instead of the tiling.
+fn ink_bounds(grid: &DownGrid, b: [usize; 4]) -> [usize; 4] {
+    const SLACK: usize = 8;
+    let x0 = b[0].saturating_sub(SLACK);
+    let y0 = b[1].saturating_sub(SLACK);
+    let x1 = (b[2] + SLACK).min(grid.width);
+    let y1 = (b[3] + SLACK).min(grid.height);
+    if x1 <= x0 || y1 <= y0 {
+        return b;
+    }
+    let mut cols = alloc::vec![0u32; x1 - x0];
+    let mut rows = alloc::vec![0u32; y1 - y0];
+    for y in y0..y1 {
+        for x in x0..x1 {
+            if grid.dark(x, y) {
+                cols[x - x0] += 1;
+                rows[y - y0] += 1;
+            }
+        }
+    }
+    // A row/column belongs to the code when more than a stray speck of it is dark.
+    let span = |counts: &[u32], across: usize| {
+        let need = (across as u32 / 16).max(2);
+        let first = counts.iter().position(|&n| n >= need)?;
+        let last = counts.iter().rposition(|&n| n >= need)?;
+        Some((first, last + 1))
+    };
+    match (span(&cols, y1 - y0), span(&rows, x1 - x0)) {
+        (Some((cx0, cx1)), Some((ry0, ry1))) => [x0 + cx0, y0 + ry0, x0 + cx1, y0 + ry1],
+        _ => b,
+    }
+}
+
+/// How far apart two [`locate`] fingerprints are: the number of differing darkness
+/// cells, or `None` when they are of different families (never the same code).
+pub fn fingerprint_distance(a: Fingerprint, b: Fingerprint) -> Option<u32> {
+    ((a.0 >> 62) == (b.0 >> 62)).then(|| ((a.0 ^ b.0) & 0xFFFF).count_ones())
 }
 
 /// A ready-to-use [`Detect`] wrapping [`locate`] with fixed options, reusing prior-frame
-/// [`Hints`] to short-circuit re-analysis: any candidate whose fingerprint matches a
-/// known symbol from a previous frame is returned with that symbol attached.
+/// [`Hints`] to short-circuit re-analysis: a candidate that is evidently the same
+/// physical code as a known symbol from a previous frame is returned with that symbol
+/// attached.
+///
+/// "Evidently the same" means **both** that it sits where the known symbol was (their
+/// boxes overlap by [`KNOWN_MIN_IOU`]) **and** that it looks like it (fingerprints within
+/// [`KNOWN_MAX_DISTANCE`] cells). Neither alone will do on a camera stream: an exact
+/// fingerprint match almost never survives sensor noise and hand shake from one frame
+/// to the next, so nothing would ever be reused; position alone would keep reporting
+/// the old value after a different code is slid into the same spot.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameDetector {
     /// Locator options applied to every frame.
     pub options: LocateOptions,
+}
+
+/// Least box overlap (intersection over union) between a candidate and a known symbol's
+/// last location for them to be the same code. Hand-held video moves a code a fraction
+/// of its size per frame.
+pub const KNOWN_MIN_IOU: f32 = 0.4;
+
+/// Most fingerprint cells (of 16) that may differ between a candidate and a known symbol.
+pub const KNOWN_MAX_DISTANCE: u32 = 2;
+
+/// Axis-aligned bounds `[x0, y0, x1, y1]` of a quad.
+fn bounds(q: &Quad) -> [f32; 4] {
+    let cs = q.corners;
+    [
+        cs.iter().map(|p| p.x).fold(f32::MAX, f32::min),
+        cs.iter().map(|p| p.y).fold(f32::MAX, f32::min),
+        cs.iter().map(|p| p.x).fold(f32::MIN, f32::max),
+        cs.iter().map(|p| p.y).fold(f32::MIN, f32::max),
+    ]
+}
+
+/// Intersection over union of two boxes.
+fn iou(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let ix = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+    let iy = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    let union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - ix * iy;
+    if union > 0.0 { ix * iy / union } else { 0.0 }
 }
 
 impl FrameDetector {
@@ -664,9 +738,19 @@ impl Detect for FrameDetector {
     fn detect(&self, frame: &GrayFrame<'_>, hints: &Hints) -> Vec<Candidate> {
         let mut candidates = locate(frame, &self.options);
         for c in &mut candidates {
-            if let Some(fp) = c.fingerprint
-                && let Some(known) = hints.find(fp)
-            {
+            let Some(fp) = c.fingerprint else { continue };
+            let here = bounds(&c.location.outline);
+            let best = hints
+                .previous
+                .iter()
+                .filter_map(|k| {
+                    let distance = fingerprint_distance(fp, k.fingerprint?)?;
+                    let there = bounds(&k.symbol.location.as_ref()?.outline);
+                    (distance <= KNOWN_MAX_DISTANCE && iou(here, there) >= KNOWN_MIN_IOU)
+                        .then_some((distance, k))
+                })
+                .min_by_key(|&(distance, _)| distance);
+            if let Some((_, known)) = best {
                 c.known = Some(known.symbol.clone());
             }
         }

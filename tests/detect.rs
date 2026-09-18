@@ -246,3 +246,56 @@ fn respects_max_candidates() {
         cands.len()
     );
 }
+
+/// Frame-to-frame reuse on a camera stream: the same code, nudged by hand shake and
+/// under fresh sensor noise, must be recognised from the previous frame's hints — an
+/// exact fingerprint never survives that — while a *different* object moved into the
+/// same place must not inherit the old reading.
+#[test]
+fn hints_survive_noise_and_motion_but_not_a_swap() {
+    use anyd::detect::FrameDetector;
+    use anyd::pipeline::{Hints, KnownSymbol};
+    use anyd::traits::Detect;
+    use anyd::transform::{Rng, add_noise};
+
+    let qr = qr_image("HINTS", 6);
+    let frame_with = |sprite: &GrayImage, ox: usize, oy: usize, seed: u64| {
+        let mut canvas = blank(640, 480);
+        place(&mut canvas, sprite, ox, oy);
+        add_noise(&canvas, 6.0, &mut Rng::new(seed))
+    };
+
+    // Frame 1: locate, "decode", remember.
+    let detector = FrameDetector::new();
+    let first = frame_with(&qr, 200, 140, 1);
+    let cands = detector.detect(&first.as_frame(), &Hints::new());
+    let cand = cands.first().expect("QR located");
+    let mut symbol = QrEncoder::new().build_text("HINTS", EcLevel::M).unwrap();
+    symbol.location = Some(cand.location.clone());
+    let hints = Hints {
+        previous: vec![KnownSymbol {
+            symbol,
+            fingerprint: cand.fingerprint,
+        }],
+    };
+
+    // Frame 2: the same code a few pixels over, new noise.
+    let second = frame_with(&qr, 207, 135, 2);
+    let cands = detector.detect(&second.as_frame(), &hints);
+    assert!(
+        cands.iter().any(|c| c
+            .known
+            .as_ref()
+            .is_some_and(|s| s.text().as_deref() == Some("HINTS"))),
+        "the moved, re-noised code was not matched to its hint"
+    );
+
+    // Frame 3: a barcode where the QR was.
+    let third = frame_with(&code128_image("SWAPPED", 2), 200, 180, 3);
+    let cands = detector.detect(&third.as_frame(), &hints);
+    assert!(!cands.is_empty(), "the swapped-in barcode is located");
+    assert!(
+        cands.iter().all(|c| c.known.is_none()),
+        "a different code inherited the previous frame's reading"
+    );
+}

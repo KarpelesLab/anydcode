@@ -331,7 +331,7 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<Segment>)>
     // Customer Information + filler occupies the middle of the data region
     // (after FCC(4 bars) and DPID(16 bars)).
     let mid = &data_region[20..];
-    let custinfo = decode_custinfo(mid);
+    let custinfo = decode_custinfo(mid)?;
 
     let mut segments = vec![Segment::numeric(dpid)];
     match custinfo {
@@ -355,17 +355,19 @@ enum CustInfo {
 
 /// Decode the Customer-Information + filler region, preferring the numeric
 /// (N-table) interpretation. See the module docs on the N/C ambiguity.
-fn decode_custinfo(mid: &[u8]) -> CustInfo {
+fn decode_custinfo(mid: &[u8]) -> Result<CustInfo> {
     if mid.iter().all(|&x| x == 3) {
-        return CustInfo::None;
+        return Ok(CustInfo::None);
     }
     if let Some(digits) = parse_n(mid) {
-        return CustInfo::Numeric(digits);
+        return Ok(CustInfo::Numeric(digits));
     }
     if let Some(bytes) = parse_c(mid) {
-        return CustInfo::Bytes(bytes);
+        return Ok(CustInfo::Bytes(bytes));
     }
-    CustInfo::None
+    Err(Error::undecodable(
+        "Australia Post customer information invalid",
+    ))
 }
 
 /// Parse the region as N-table digit pairs followed by Tracker filler.
@@ -425,4 +427,68 @@ pub(super) fn fields(segments: &[Segment]) -> Result<(Vec<u8>, Vec<u8>)> {
         .ok_or_else(|| Error::invalid_data("Australia Post symbol missing DPID segment"))?;
     let custinfo = segments.get(1).map(|s| s.data.clone()).unwrap_or_default();
     Ok((dpid, custinfo))
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// Bars for an arbitrary FCC/DPID/customer region, with correct Reed–Solomon bars.
+    fn bars_for(region: &[u8]) -> Vec<BarState> {
+        let mut dest = START_STOP.to_vec();
+        dest.extend_from_slice(region);
+        let triples: Vec<u8> = region
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|c| (c[0] << 4) | (c[1] << 2) | c[2])
+            .collect();
+        for &sym in &rs_check(&triples) {
+            dest.extend_from_slice(&[(sym >> 4) & 3, (sym >> 2) & 3, sym & 3]);
+        }
+        dest.extend_from_slice(&START_STOP);
+        dest.iter().map(|&v| value_to_bar(v)).collect()
+    }
+
+    /// A customer field that is neither N-table digits nor C-table characters plus
+    /// filler used to be dropped silently, decoding a 52-bar symbol as a bare DPID
+    /// that re-encodes to 37 bars.
+    #[test]
+    fn unparseable_customer_information_is_rejected() {
+        // FCC 59, DPID 12345678, then sixteen customer bars: `33…30`.
+        let mut region = vec![1, 2, 3, 0];
+        for pair in &N_TABLE[1..=8] {
+            region.extend_from_slice(pair);
+        }
+        region.extend_from_slice(&[3; 15]);
+        region.push(0);
+        assert_eq!(region.len(), 36);
+        assert!(decode(&bars_for(&region)).is_err());
+    }
+
+    /// Any region with valid Reed–Solomon bars either fails to decode or yields
+    /// fields the encoder accepts.
+    #[test]
+    fn arbitrary_valid_regions_decode_to_encodable_fields() {
+        let mut state = 0xD1B5_4A32_D192_ED03u64;
+        let mut accepted = 0;
+        for round in 0..6000 {
+            let len = [21, 36, 51][round % 3];
+            let region: Vec<u8> = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    // Bias towards 0..=2 so N-table fields parse reasonably often.
+                    [0, 1, 2, 0, 1, 2, 3][(state % 7) as usize]
+                })
+                .collect();
+            if let Ok((_, segments)) = decode(&bars_for(&region)) {
+                accepted += 1;
+                let (dpid, custinfo) = fields(&segments).unwrap();
+                assert!(encode(&dpid, &custinfo).is_ok(), "{segments:?}");
+            }
+        }
+        assert!(accepted > 0);
+    }
 }

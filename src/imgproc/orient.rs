@@ -8,6 +8,7 @@
 //! within its scanline sweep instead of blindly re-scanning at every angle.
 
 use crate::image::GrayFrame;
+use alloc::vec::Vec;
 
 /// Histogram bins across the half-circle: 3° per bin.
 const BINS: usize = 60;
@@ -21,11 +22,57 @@ const MIN_MAG2: f32 = 24.0 * 24.0;
 /// codes and scene texture spread their energy and fall below.
 const MIN_COHERENCE: f32 = 0.4;
 
+/// Share of the edge energy a *secondary* orientation peak must hold (within ±2 bins)
+/// to be reported by [`gradient_angle_peaks`]. A barcode sharing its crop with text or
+/// a label border is no longer the majority of the edge energy, but it is still a
+/// sharp peak; the scan that follows is what decides whether it was a code.
+const MIN_PEAK_SHARE: f32 = 0.18;
+
 /// Estimate the dominant edge orientation of `frame` in radians, in `(-π/2, π/2]`,
 /// measured from the +x axis — for a barcode this is the *reading* direction (bars are
 /// perpendicular to it). Returns `None` when the texture has no sufficiently dominant
 /// orientation (nothing bar-like to derotate for).
 pub fn dominant_gradient_angle(frame: &GrayFrame<'_>) -> Option<f32> {
+    let hist = orientation_histogram(frame)?;
+    let total: f32 = hist.iter().sum();
+    let peak = smoothed_peak(&hist, &[])?;
+    if share(&hist, peak) / total < MIN_COHERENCE {
+        return None;
+    }
+    refine_peak(&hist, peak)
+}
+
+/// Up to `max` distinct edge-orientation peaks of `frame`, strongest first, each in
+/// radians in `(-π/2, π/2]` like [`dominant_gradient_angle`] — candidate reading axes
+/// for a linear code that shares the frame with other print.
+///
+/// Where [`dominant_gradient_angle`] demands one orientation own the texture, this
+/// reports every sharp peak holding a meaningful share of the edge energy, at least 20°
+/// apart. It is meant to *propose* scan axes, not to classify: a caller scans along
+/// each and lets the decoders' own validation decide.
+pub fn gradient_angle_peaks(frame: &GrayFrame<'_>, max: usize) -> Vec<f32> {
+    let Some(hist) = orientation_histogram(frame) else {
+        return Vec::new();
+    };
+    let total: f32 = hist.iter().sum();
+    let mut peaks: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    while out.len() < max {
+        let Some(peak) = smoothed_peak(&hist, &peaks) else {
+            break;
+        };
+        if share(&hist, peak) / total < MIN_PEAK_SHARE {
+            break;
+        }
+        peaks.push(peak);
+        out.extend(refine_peak(&hist, peak));
+    }
+    out
+}
+
+/// Histogram of gradient orientation mod π weighted by squared magnitude, or `None` for
+/// a frame too small or too flat to have one.
+fn orientation_histogram(frame: &GrayFrame<'_>) -> Option<[f32; BINS]> {
     let w = frame.width();
     let h = frame.height();
     if w < 8 || h < 8 {
@@ -51,30 +98,37 @@ pub fn dominant_gradient_angle(frame: &GrayFrame<'_>) -> Option<f32> {
             total += mag2;
         }
     }
-    if total <= 0.0 {
-        return None;
-    }
+    (total > 0.0).then_some(hist)
+}
 
-    // Light circular 1-2-1 smoothing so the peak does not split across a bin edge.
-    let mut smooth = [0.0f32; BINS];
-    for i in 0..BINS {
-        let l = hist[(i + BINS - 1) % BINS];
-        let r = hist[(i + 1) % BINS];
-        smooth[i] = 0.25 * l + 0.5 * hist[i] + 0.25 * r;
-    }
-    let peak = (0..BINS)
-        .max_by(|&a, &b| smooth[a].partial_cmp(&smooth[b]).unwrap())
-        .unwrap();
+/// Circular bin distance.
+fn bin_distance(a: usize, b: usize) -> usize {
+    let d = a.abs_diff(b);
+    d.min(BINS - d)
+}
 
-    // Coherence: energy near the peak vs everywhere. Uses the raw histogram so the
-    // smoothing above cannot inflate it.
-    let near: f32 = (-2i32..=2)
+/// The strongest bin of the lightly smoothed histogram that is at least 20° from every
+/// bin in `taken`.
+fn smoothed_peak(hist: &[f32; BINS], taken: &[usize]) -> Option<usize> {
+    // Circular 1-2-1 smoothing so the peak does not split across a bin edge.
+    let smooth =
+        |i: usize| 0.25 * hist[(i + BINS - 1) % BINS] + 0.5 * hist[i] + 0.25 * hist[(i + 1) % BINS];
+    let min_gap = BINS * 20 / 180;
+    (0..BINS)
+        .filter(|&i| taken.iter().all(|&t| bin_distance(i, t) >= min_gap))
+        .max_by(|&a, &b| smooth(a).total_cmp(&smooth(b)))
+}
+
+/// Edge energy within ±2 bins of `peak`. Uses the raw histogram so smoothing cannot
+/// inflate it.
+fn share(hist: &[f32; BINS], peak: usize) -> f32 {
+    (-2i32..=2)
         .map(|d| hist[(peak as i32 + d).rem_euclid(BINS as i32) as usize])
-        .sum();
-    if near / total < MIN_COHERENCE {
-        return None;
-    }
+        .sum()
+}
 
+/// Sub-bin angle of the peak at bin `peak`.
+fn refine_peak(hist: &[f32; BINS], peak: usize) -> Option<f32> {
     // Sub-bin angle: circular mean over the peak neighbourhood in double-angle space
     // (which keeps 0 and π identified, exactly the mod-π symmetry of orientations).
     let (mut sx, mut sy) = (0.0f64, 0.0f64);

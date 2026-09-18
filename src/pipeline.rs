@@ -149,55 +149,67 @@ pub fn scan_2d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
 /// that contains (mostly) just the barcode — feed it a located crop, not a whole cluttered
 /// frame. The EAN/UPC edge reader (width ratios, voted across scanlines) reads curved and
 /// blurred captures the quantized grid cannot; the quantized `scan1d` front-end then feeds
-/// the remaining checksummed linear decoders.
+/// the remaining linear decoders, whose readings are accepted by cross-scanline consensus.
 ///
-/// The scanline sweep itself only covers a few degrees around horizontal, but the code's
-/// orientation in the crop is arbitrary: each candidate pattern is also tried mirrored
-/// (an upside-down code scans in reverse), and when the sweep finds nothing the frame's
-/// dominant texture orientation is measured ([`crate::imgproc::orient`]) and the whole
-/// crop is derotated and rescanned — so a 1D code is read at any rotation, not just the
-/// near-horizontal band.
+/// The code's orientation in the crop is arbitrary. Each scan sweep only covers a few
+/// degrees around its base axis, so: the horizontal sweep runs first (the common case);
+/// if it reads nothing, the crop's edge-orientation peaks
+/// ([`crate::imgproc::orient::gradient_angle_peaks`]) propose further axes — a barcode
+/// is the most orientation-coherent texture there is — and finally the vertical axis is
+/// tried regardless. Every candidate pattern is also tried mirrored (an upside-down
+/// code scans in reverse). Scan lines are sampled directly along each axis; nothing is
+/// resampled. A caller that already knows the reading axis (the locator reports it in
+/// [`Location::rotation`]) should use [`scan_1d_at`] instead.
 pub fn scan_1d(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
-    let scan_opts = crate::scan1d::ScanOptions::default();
-    let found = scan_1d_sweep(frame, &scan_opts);
+    let found = scan_1d_sweep(frame, &crate::scan1d::ScanOptions::default());
     if !found.is_empty() {
         return found;
     }
-
-    // Nothing near horizontal. If the crop's texture has one dominant orientation —
-    // the signature of a rotated barcode — derotate the whole crop and rescan. The
-    // sweep already covers ±6°, so only meaningfully rotated codes are worth the
-    // resample.
-    let Some(angle) = crate::imgproc::orient::dominant_gradient_angle(frame) else {
-        return found;
-    };
-    if angle.abs() < MIN_DEROTATE_ANGLE {
-        return found;
-    }
-    let image = to_image(frame);
-    let rotated = crate::transform::rotate(&image, -angle);
-    let mut found = scan_1d_sweep(&rotated.as_frame(), &scan_opts);
-
-    // Map each symbol's outline from derotated coordinates back into the frame.
-    let (s, c) = (-angle).sin_cos();
-    let (cx, cy) = (frame.width() as f32 / 2.0, frame.height() as f32 / 2.0);
-    let (ncx, ncy) = (rotated.width() as f32 / 2.0, rotated.height() as f32 / 2.0);
-    for sym in &mut found {
-        if let Some(loc) = &mut sym.location {
-            for p in &mut loc.outline.corners {
-                let (dx, dy) = (p.x - ncx, p.y - ncy);
-                p.x = c * dx + s * dy + cx;
-                p.y = -s * dx + c * dy + cy;
-            }
-            loc.rotation = Some(loc.rotation.unwrap_or(0.0) + angle);
+    let mut tried: Vec<f32> = alloc::vec![0.0];
+    let proposals = crate::imgproc::orient::gradient_angle_peaks(frame, 2)
+        .into_iter()
+        .map(f32::to_degrees)
+        .chain([90.0]);
+    for deg in proposals {
+        // Skip an axis a previous sweep (±6° around its base) already covered.
+        if tried
+            .iter()
+            .any(|&t| axis_distance_deg(t, deg) < SWEEP_COVER_DEG)
+        {
+            continue;
+        }
+        tried.push(deg);
+        let found = scan_1d_sweep(frame, &crate::scan1d::ScanOptions::around(deg));
+        if !found.is_empty() {
+            return found;
         }
     }
-    found
+    Vec::new()
 }
 
-/// Smallest texture rotation (radians) worth a derotate-and-rescan; the plain sweep
-/// already covers a ±6° band around horizontal.
-const MIN_DEROTATE_ANGLE: f32 = 8.0 * core::f32::consts::PI / 180.0;
+/// [`scan_1d`] for a code whose reading axis is already known: `angle` in radians,
+/// clockwise from the +x axis (the convention of [`Location::rotation`]). Falls back to
+/// the full [`scan_1d`] search if nothing reads along that axis.
+pub fn scan_1d_at(frame: &crate::image::GrayFrame<'_>, angle: f32) -> Vec<Symbol> {
+    if angle.is_finite() {
+        let opts = crate::scan1d::ScanOptions::around(angle.to_degrees());
+        let found = scan_1d_sweep(frame, &opts);
+        if !found.is_empty() {
+            return found;
+        }
+    }
+    scan_1d(frame)
+}
+
+/// Half-width (degrees) of the band of reading axes one sweep covers: its outermost
+/// scan angle plus the slant a full-height scan line tolerates.
+const SWEEP_COVER_DEG: f32 = 8.0;
+
+/// Distance in degrees between two axes (orientations mod 180°).
+fn axis_distance_deg(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(180.0);
+    d.min(180.0 - d)
+}
 
 /// Scanlines that must independently agree on a `(symbology, text)` reading before it
 /// is reported. One line is not evidence: every decoder is tried on every span of every
@@ -349,16 +361,6 @@ fn scan_1d_sweep(
 /// Whether two symbols are the same reading: same symbology, same payload bytes.
 fn same_reading(a: &Symbol, b: &Symbol) -> bool {
     a.symbology == b.symbology && a.payload_bytes() == b.payload_bytes()
-}
-
-/// Copy a borrowed frame into an owned [`crate::image::GrayImage`] (for resampling).
-fn to_image(frame: &crate::image::GrayFrame<'_>) -> crate::image::GrayImage {
-    let (w, h) = (frame.width(), frame.height());
-    let mut data = Vec::with_capacity(w * h);
-    for y in 0..h {
-        data.extend_from_slice(frame.row(y).expect("row in range"));
-    }
-    crate::image::GrayImage::from_raw(w, h, data)
 }
 
 /// Push `sym` unless an equal `(symbology, payload)` is already present. Keyed on the

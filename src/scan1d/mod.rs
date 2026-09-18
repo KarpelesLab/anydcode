@@ -39,13 +39,14 @@
 //!   2 px/module to large scales.
 //! - **Blur.** Mild defocus (separable box blur up to a few pixels radius) — edges
 //!   are recovered from midpoint crossings which are blur-stable.
-//! - **Rotation.** A few degrees, handled by scanning at several small angles
-//!   (default ±`MAX_ANGLE_DEG`). Full rotation invariance is deliberately **not**
-//!   this module's job: a scan line must cross all bars, so near-perpendicular
-//!   capture is assumed here. [`crate::pipeline::scan_1d`] supplies it instead, by
-//!   trying every candidate pattern mirrored (180°) and — when the sweep finds
-//!   nothing — measuring the crop's dominant texture orientation and derotating the
-//!   whole crop before rescanning (any other angle).
+//! - **Rotation.** Scan lines run at whatever angles [`ScanOptions::angles_deg`] lists
+//!   — any angle, sampled directly out of the frame with no image resampling — but a
+//!   line must still cross every bar, so the angles have to be within a few degrees of
+//!   the code's reading axis. The default sweep covers ±`MAX_ANGLE_DEG` around
+//!   horizontal; finding the axis of an arbitrarily rotated code is the caller's job
+//!   ([`crate::pipeline::scan_1d`] measures the crop's dominant texture orientation,
+//!   [`ScanOptions::around`] builds the sweep), as is trying each pattern mirrored for
+//!   a code read against its direction.
 //! - **Framing.** The barcode need not span the frame, and the scan line may start
 //!   or end on anything — dark background, other print, a second barcode. Each symbol
 //!   only needs its own light quiet zone on both sides.
@@ -72,8 +73,9 @@ const MIN_AMPLITUDE: f32 = 30.0;
 pub struct ScanOptions {
     /// Number of scan positions distributed across the central band of the frame.
     pub scan_count: usize,
-    /// Scan angles in degrees (`0.0` = horizontal). Small magnitudes only; a scan
-    /// line must still cross every bar.
+    /// Scan angles in degrees, measured clockwise from the +x axis (`0.0` =
+    /// horizontal, `90.0` = straight down). Any angle is allowed; a scan line must
+    /// cross every bar, so these should bracket the code's reading axis.
     pub angles_deg: Vec<f32>,
     /// Smoothing radius (box filter) applied to each profile before edge finding.
     /// `0` disables smoothing.
@@ -97,6 +99,18 @@ impl Default for ScanOptions {
             min_runs: 3,
             max_candidates: 8,
         }
+    }
+}
+
+impl ScanOptions {
+    /// Default options with the angle sweep centred on `base_deg` instead of
+    /// horizontal: `base_deg` and `±3°`, `±6°` around it.
+    pub fn around(base_deg: f32) -> Self {
+        let mut opts = ScanOptions::default();
+        for a in &mut opts.angles_deg {
+            *a += base_deg;
+        }
+        opts
     }
 }
 
@@ -175,23 +189,11 @@ pub fn scan_edges(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandid
         return Vec::new();
     }
     let mut found: Vec<LinearCandidate> = Vec::new();
-    let count = opts.scan_count.max(1);
-    for i in 0..count {
-        let frac = if count == 1 {
-            0.5
-        } else {
-            0.1 + 0.8 * (i as f32) / ((count - 1) as f32)
-        };
-        let cy = frac * (h.saturating_sub(1)) as f32;
-        for &deg in &opts.angles_deg {
-            let tan = (deg.to_radians()).tan();
-            let profile = sample_profile(frame, cy, tan, opts.smooth_radius);
-            for &prom in FINE_PROMINENCE {
-                if let Some(cand) =
-                    analyze_profile_fine(&profile, cy, tan, deg, w, opts.min_runs, prom)
-                {
-                    found.push(cand);
-                }
+    for line in scan_lines_of(w, h, opts) {
+        let profile = sample_profile(frame, &line, opts.smooth_radius);
+        for &prom in FINE_PROMINENCE {
+            if let Some(cand) = analyze_profile_fine(&profile, &line, opts.min_runs, prom) {
+                found.push(cand);
             }
         }
     }
@@ -212,22 +214,9 @@ fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
     }
 
     let mut found: Vec<LinearCandidate> = Vec::new();
-
-    // Distribute scan rows across the central 10%..90% band so slightly angled
-    // lines stay inside the frame.
-    let count = opts.scan_count.max(1);
-    for i in 0..count {
-        let frac = if count == 1 {
-            0.5
-        } else {
-            0.1 + 0.8 * (i as f32) / ((count - 1) as f32)
-        };
-        let cy = frac * (h.saturating_sub(1)) as f32;
-        for &deg in &opts.angles_deg {
-            let tan = (deg.to_radians()).tan();
-            let profile = sample_profile(frame, cy, tan, opts.smooth_radius);
-            found.extend(analyze_profile(&profile, cy, tan, deg, w, opts.min_runs));
-        }
+    for line in scan_lines_of(w, h, opts) {
+        let profile = sample_profile(frame, &line, opts.smooth_radius);
+        found.extend(analyze_profile(&profile, &line, opts.min_runs));
     }
     found
 }
@@ -248,28 +237,122 @@ pub fn try_decode(candidate: &LinearCandidate, decoder: &dyn Decode) -> Option<S
 
 // --- Scanline sampling -----------------------------------------------------
 
-/// Sample one column `x` at fractional row `y` with vertical linear interpolation.
-/// `y` is clamped to the valid row range.
-fn sample_column(frame: &GrayFrame<'_>, x: usize, y: f32) -> f32 {
-    let h = frame.height();
-    let yc = y.clamp(0.0, (h - 1) as f32);
-    let y0 = yc.floor() as usize;
-    let y1 = (y0 + 1).min(h - 1);
-    let fy = yc - (y0 as f32);
-    let a = frame.get_unchecked(x, y0) as f32;
-    let b = frame.get_unchecked(x, y1) as f32;
-    a + (b - a) * fy
+/// One scan line through the frame: sample `i` sits at `(ox + i·sx, oy + i·sy)`, with
+/// `(sx, sy)` a unit vector — one sample per pixel of *line* length at every angle, so
+/// a module spans as many samples on a diagonal line as on a horizontal one.
+#[derive(Debug, Clone, Copy)]
+struct ScanLine {
+    ox: f32,
+    oy: f32,
+    sx: f32,
+    sy: f32,
+    /// Number of samples.
+    len: usize,
 }
 
-/// Build the luminance profile for a scan line centered at row `cy` with slope
-/// `tan` (`dy/dx`), one sample per column, then optionally box-smooth it.
-fn sample_profile(frame: &GrayFrame<'_>, cy: f32, tan: f32, smooth_radius: usize) -> Vec<f32> {
-    let w = frame.width();
-    let half_w = (w as f32) / 2.0;
-    let mut profile = Vec::with_capacity(w);
-    for x in 0..w {
-        let y = cy + ((x as f32) - half_w) * tan;
-        profile.push(sample_column(frame, x, y));
+impl ScanLine {
+    /// Frame position of (fractional) sample index `i`.
+    fn point(&self, i: f32) -> Point {
+        Point::new(self.ox + i * self.sx, self.oy + i * self.sy)
+    }
+}
+
+/// The scan lines for a `w`×`h` frame: [`ScanOptions::scan_count`] positions spread
+/// across the central 10%..90% band (so angled lines stay mostly inside the frame),
+/// each at every angle in [`ScanOptions::angles_deg`].
+///
+/// Lines pivot about the frame's centre line *across* their direction — the vertical
+/// centre line for angles within 45° of horizontal, the horizontal one otherwise — and
+/// run from frame edge to frame edge along their major axis.
+fn scan_lines_of(w: usize, h: usize, opts: &ScanOptions) -> Vec<ScanLine> {
+    let count = opts.scan_count.max(1);
+    let mut lines = Vec::with_capacity(count * opts.angles_deg.len());
+    for i in 0..count {
+        let frac = if count == 1 {
+            0.5
+        } else {
+            0.1 + 0.8 * (i as f32) / ((count - 1) as f32)
+        };
+        for &deg in &opts.angles_deg {
+            // An orientation, not a direction: fold into (-90°, 90°].
+            let mut deg = deg.rem_euclid(180.0);
+            if deg > 90.0 {
+                deg -= 180.0;
+            }
+            let (sin, cos) = deg.to_radians().sin_cos();
+            lines.push(if deg.abs() <= 45.0 {
+                // Spans every column: x from 0 to w-1.
+                let cy = frac * (h.saturating_sub(1)) as f32;
+                ScanLine {
+                    ox: 0.0,
+                    oy: cy - (w as f32) / 2.0 * sin / cos,
+                    sx: cos,
+                    sy: sin,
+                    len: ((w as f32) / cos).floor() as usize,
+                }
+            } else {
+                // Spans every row: y from 0 to h-1, reading downward.
+                let (sin, cos) = if sin < 0.0 { (-sin, -cos) } else { (sin, cos) };
+                let cx = frac * (w.saturating_sub(1)) as f32;
+                ScanLine {
+                    ox: cx - (h as f32) / 2.0 * cos / sin,
+                    oy: 0.0,
+                    sx: cos,
+                    sy: sin,
+                    len: ((h as f32) / sin).floor() as usize,
+                }
+            });
+        }
+    }
+    lines
+}
+
+/// Half-width, in pixels, of the band of image rows averaged into each scan line.
+const BAND_HALF: i32 = 2;
+
+/// Build the luminance profile along `line`, one sample per pixel of line length, then
+/// optionally box-smooth it.
+///
+/// Each sample is the mean of the *actual pixels* in a thin band around the line whose
+/// centres project into that sample's unit bin — no interpolation. Interpolating between
+/// pixels is a low-pass filter exactly at the scale of a two-pixel module, which is
+/// where a camera barcode lives; binning real pixels instead keeps an axis-aligned
+/// line as sharp as the image, lets a diagonal line draw on pixels at several sub-pixel
+/// phases, and averages sensor noise across the band (bars are constant along their
+/// length, so nothing but noise is lost). Positions are clamped to the frame.
+fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) -> Vec<f32> {
+    let (w, h) = (frame.width() as i32, frame.height() as i32);
+    let n = line.len;
+    let mut sum = vec![0.0f32; n];
+    let mut count = vec![0u16; n];
+    // Unit normal to the line.
+    let (nx, ny) = (-line.sy, line.sx);
+    for i in 0..n {
+        let p = line.point(i as f32);
+        for k in -BAND_HALF..=BAND_HALF {
+            let x = ((p.x + k as f32 * nx).round() as i32).clamp(0, w - 1);
+            let y = ((p.y + k as f32 * ny).round() as i32).clamp(0, h - 1);
+            // Bin by where this pixel's centre falls along the line.
+            let t = (x as f32 - line.ox) * line.sx + (y as f32 - line.oy) * line.sy;
+            let bin = t.round();
+            if bin >= 0.0 && (bin as usize) < n {
+                sum[bin as usize] += f32::from(frame.get_unchecked(x as usize, y as usize));
+                count[bin as usize] += 1;
+            }
+        }
+    }
+    // A bin no pixel centre fell into (possible on a diagonal) takes its neighbour.
+    let mut profile = Vec::with_capacity(n);
+    let mut last = 0.0f32;
+    for i in 0..n {
+        if count[i] > 0 {
+            last = sum[i] / f32::from(count[i]);
+        } else if let Some(j) = (i + 1..n).find(|&j| count[j] > 0)
+            && i == 0
+        {
+            last = sum[j] / f32::from(count[j]);
+        }
+        profile.push(last);
     }
     smooth(&profile, smooth_radius)
 }
@@ -885,14 +968,7 @@ fn quantize(runs: &Runs, min_runs: usize) -> Option<Quantized> {
 
 /// Run the full extract -> segment -> quantize -> locate pipeline on one profile,
 /// yielding one candidate per barcode-shaped span found along it.
-fn analyze_profile(
-    profile: &[f32],
-    cy: f32,
-    tan: f32,
-    deg: f32,
-    width: usize,
-    min_runs: usize,
-) -> Vec<LinearCandidate> {
+fn analyze_profile(profile: &[f32], line: &ScanLine, min_runs: usize) -> Vec<LinearCandidate> {
     let Some(runs) = extract_runs(profile) else {
         return Vec::new();
     };
@@ -902,7 +978,7 @@ fn analyze_profile(
             let q = quantize(&span, min_runs)?;
             let amp_factor = (span.amplitude / 128.0).clamp(0.0, 1.0);
             let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
-            let location = build_location(&span, cy, tan, deg, width, q.module_px);
+            let location = build_location(&span, line, q.module_px);
             Some(LinearCandidate {
                 pattern: q.pattern,
                 edges: span.edges,
@@ -921,10 +997,7 @@ fn analyze_profile(
 /// same fine edges) so the candidate remains a drop-in for [`try_decode`].
 fn analyze_profile_fine(
     profile: &[f32],
-    cy: f32,
-    tan: f32,
-    deg: f32,
-    width: usize,
+    line: &ScanLine,
     min_runs: usize,
     prom: f32,
 ) -> Option<LinearCandidate> {
@@ -934,7 +1007,7 @@ fn analyze_profile_fine(
     let amp_factor = (runs.amplitude / 128.0).clamp(0.0, 1.0);
     let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
 
-    let location = build_location(&runs, cy, tan, deg, width, q.module_px);
+    let location = build_location(&runs, line, q.module_px);
     Some(LinearCandidate {
         pattern: q.pattern,
         edges: runs.edges,
@@ -946,28 +1019,15 @@ fn analyze_profile_fine(
 }
 
 /// Build a thin-band [`Location`] along the scan line spanning the bar region.
-fn build_location(
-    runs: &Runs,
-    cy: f32,
-    tan: f32,
-    deg: f32,
-    width: usize,
-    module_px: f32,
-) -> Location {
-    let theta = deg.to_radians();
-    let (sin, cos) = theta.sin_cos();
-    let half_w = (width as f32) / 2.0;
+fn build_location(runs: &Runs, line: &ScanLine, module_px: f32) -> Location {
+    let left = line.point(runs.edges[0]);
+    let right = line.point(runs.edges[runs.edges.len() - 1]);
 
-    let x0 = runs.edges[0];
-    let x1 = runs.edges[runs.edges.len() - 1];
-    let point_on = |x: f32| Point::new(x, cy + (x - half_w) * tan);
-    let left = point_on(x0);
-    let right = point_on(x1);
-
-    // Perpendicular to the scan direction (cos, sin); +perp points downward.
+    // Unit perpendicular to the scan direction; +perp points "down" for a horizontal
+    // line.
     let half_h = 2.0f32;
-    let px = -sin * half_h;
-    let py = cos * half_h;
+    let px = -line.sy * half_h;
+    let py = line.sx * half_h;
     let outline = Quad::new([
         Point::new(left.x + px, left.y + py),
         Point::new(right.x + px, right.y + py),
@@ -977,7 +1037,7 @@ fn build_location(
 
     Location {
         outline,
-        rotation: Some(theta),
+        rotation: Some(line.sy.atan2(line.sx)),
         module_size: Some(module_px),
     }
 }

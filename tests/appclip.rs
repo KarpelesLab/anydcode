@@ -172,6 +172,21 @@ fn numeric_components_keep_leading_zeros() {
     }
 }
 
+/// `appclip.` is only a strippable subdomain when a registrable host remains: the
+/// host `appclip.com` itself must still encode (as a plain host).
+#[test]
+fn appclip_second_level_domain_encodes() {
+    for url in [
+        "https://appclip.com",
+        "https://appclip.io/shop",
+        "https://appclip.example.com",
+    ] {
+        let payload =
+            appclip::compress_url(url).unwrap_or_else(|e| panic!("compress {url}: {e:?}"));
+        assert_eq!(appclip::decompress_url(&payload).unwrap(), url);
+    }
+}
+
 /// Characters outside a component's raw-allowed set canonicalize to the same payload
 /// as their pre-escaped form (Apple normalizes both spellings identically).
 #[test]

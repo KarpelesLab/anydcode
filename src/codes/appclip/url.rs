@@ -59,7 +59,11 @@ pub fn compress_url(raw: &str) -> Result<[u8; 16]> {
     let u = parse_url(raw)?;
 
     let mut host = u.host.as_str();
-    let subdomain = host.starts_with("appclip.");
+    // The subdomain flag only applies when a full host (with its own TLD) remains;
+    // `appclip.com` is an ordinary host whose domain label happens to be "appclip".
+    let subdomain = host
+        .strip_prefix("appclip.")
+        .is_some_and(|rest| rest.contains('.'));
     if subdomain {
         host = &host["appclip.".len()..];
     }

@@ -281,16 +281,26 @@ fn parse_segments(data: &[u8], version: Version) -> Result<Vec<Segment>> {
                 let count = r.read(char_count_bits(version, &mode)).ok_or_else(trunc)? as usize;
                 let mut out = Vec::with_capacity(count);
                 let mut remaining = count;
+                let bad = || Error::undecodable("bad numeric value");
                 while remaining >= 3 {
                     let v = r.read(10).ok_or_else(trunc)?;
+                    if v >= 1000 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:03}").as_bytes());
                     remaining -= 3;
                 }
                 if remaining == 2 {
                     let v = r.read(7).ok_or_else(trunc)?;
+                    if v >= 100 {
+                        return Err(bad());
+                    }
                     out.extend_from_slice(format!("{v:02}").as_bytes());
                 } else if remaining == 1 {
                     let v = r.read(4).ok_or_else(trunc)?;
+                    if v >= 10 {
+                        return Err(bad());
+                    }
                     out.push(b'0' + v as u8);
                 }
                 segments.push(Segment::numeric(out));
@@ -362,4 +372,25 @@ fn read_eci_assignment(r: &mut BitReader<'_>) -> Result<u32> {
 
 fn trunc() -> Error {
     Error::undecodable("truncated QR data stream")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A numeric group must be a valid 3/2/1-digit number; 1000..=1023, 100..=127
+    /// and 10..=15 are malformed, not extra digits.
+    #[test]
+    fn numeric_group_out_of_range_is_rejected() {
+        let v1 = Version::new(1).unwrap();
+        // 0001 | count 3 | 1111101000 (1000)
+        assert!(parse_segments(&[0x10, 0x0F, 0xE8, 0x00], v1).is_err());
+        // 0001 | count 2 | 1100100 (100)
+        assert!(parse_segments(&[0x10, 0x0B, 0x20, 0x00], v1).is_err());
+        // 0001 | count 1 | 1010 (10)
+        assert!(parse_segments(&[0x10, 0x06, 0x80, 0x00], v1).is_err());
+        // 0001 | count 1 | 0111 → "7"
+        let segs = parse_segments(&[0x10, 0x05, 0xC0, 0x00], v1).unwrap();
+        assert_eq!(segs, [Segment::numeric(b"7".to_vec())]);
+    }
 }

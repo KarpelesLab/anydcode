@@ -552,7 +552,8 @@ fn print_symbologies() {
         println!("  {name}");
     }
     println!(
-        "\nDecodable from PNG: QR, Data Matrix, PDF417, and 1D (Code 128, EAN/UPC, Code 39/93, ITF, Codabar)."
+        "\nDecodable from PNG: QR, Micro QR, rMQR, Data Matrix, Aztec, PDF417, MicroPDF417, \
+         App Clip Code, and 1D (Code 128, EAN/UPC, Code 39/93, ITF, Codabar)."
     );
 }
 

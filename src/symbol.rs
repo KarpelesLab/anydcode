@@ -156,8 +156,8 @@ impl Symbol {
         String::from_utf8(self.payload_bytes()).ok()
     }
 
-    /// The ordered list of data modes used, ignoring control segments. Handy for tests
-    /// and diagnostics.
+    /// The mode of every segment in symbol order, [`Mode::Eci`] switches included.
+    /// Handy for tests and diagnostics.
     pub fn modes(&self) -> Vec<Mode> {
         self.segments.iter().map(|s| s.mode).collect()
     }

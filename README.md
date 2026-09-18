@@ -97,8 +97,12 @@ end-to-end pixel→symbol path is verified for Code 128, Code 39 and EAN-13 in
 `tests/scan1d_pipeline.rs`; it applies to any standard bar/space linear code.
 Through `pipeline::scan_1d` the read is rotation-complete: mirrored patterns cover
 180°, and any other angle is handled by estimating the crop's dominant texture
-orientation and derotating before the rescan (`tests/rotated1d.rs`). DataBar
-(finder-pattern based) and Pharmacode need dedicated samplers.
+orientation and derotating before the rescan (`tests/rotated1d.rs`). The shared
+`pipeline::scan_1d` / `scan_all` entry points (and so the CLI and the demo) currently
+try the Code 128, EAN/UPC, Code 93, Code 39, ITF and Codabar decoders; the other
+linear decoders are driven by handing `scan1d::scan_lines` candidates to
+`scan1d::try_decode`. DataBar (finder-pattern based) and Pharmacode need dedicated
+samplers.
 
 ³ Data Matrix ships an image sampler: Otsu binarization → largest-component isolation
 → solid-L finder + timing-edge line fitting → perspective corners → `imgproc` grid

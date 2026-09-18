@@ -3,9 +3,9 @@
 //! Bits 0–127 of the encoded vector are *gap* bits, one per ring position (ring
 //! sizes 17/23/26/29/33): `0` draws an arc, `1` leaves a gap. The bits from 128 on
 //! are the *color stream*, assigned in order to the visible positions: `0` paints the
-//! foreground color, `1` the derived third color. Consecutive same-color arcs merge,
-//! each arc extending clockwise across adjacent gap positions until the next visible
-//! one, and every drawn arc is inset by the ring's half-gap angle at both ends.
+//! foreground color, `1` the derived third color. Each visible position draws one
+//! arc, extended clockwise across the gap positions that follow it until the next
+//! visible one, and every drawn arc is inset by the ring's half-gap angle at both ends.
 
 #[cfg(feature = "std")]
 use alloc::vec::Vec;

@@ -481,12 +481,15 @@ fn codewords(
     }
     // Terminator, bounded by remaining capacity (the array is already zeroed).
     let used = w.bits + (cap_bits - w.bits).min(terminator_bits(version));
-    if cap_bits.is_multiple_of(8) {
-        // Pad to a byte boundary, then with the alternating 0xEC / 0x11 codewords.
-        // (M1/M3, whose final codeword is 4 bits, are zero-filled instead.)
-        for (i, byte) in data[used.div_ceil(8)..].iter_mut().enumerate() {
-            *byte = if i % 2 == 0 { 0xEC } else { 0x11 };
-        }
+    // Pad to a byte boundary, then with the alternating 0xEC / 0x11 codewords. The
+    // 4-bit final codeword of M1/M3 is not a pad position: it stays `0000`.
+    let full_cw = cap_bits / 8;
+    for (i, byte) in data[..full_cw]
+        .iter_mut()
+        .skip(used.div_ceil(8))
+        .enumerate()
+    {
+        *byte = if i % 2 == 0 { 0xEC } else { 0x11 };
     }
 
     gf::encode_into(data, &mut ec_bytes[..params.ec_cw]);
@@ -511,5 +514,24 @@ mod tests {
         let expected_ec = [211, 226, 194, 57, 150, 107];
         assert_eq!(cw[..4], expected_data);
         assert_eq!(cw[MAX_DATA_CW..MAX_DATA_CW + 6], expected_ec);
+    }
+
+    /// ISO/IEC 18004 §7.4.10: M1/M3 pad with the alternating 0xEC / 0x11 codewords
+    /// like every other version; only their final 4-bit codeword is `0000`. M3-L
+    /// numeric "1" is mode `00`, count `00001`, digit `0001`, the 7-bit terminator
+    /// and padding bits (3 codewords), then 7 pad codewords and the zero nibble.
+    #[test]
+    fn m3_pad_codewords() {
+        let segments = [SegmentView::numeric(b"1")];
+        let (cw, data_bits, _) = codewords(&segments, MicroVersion::M3, MicroEcLevel::L).unwrap();
+        assert_eq!(data_bits, 84);
+        let expected = [
+            0x02, 0x20, 0x00, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x11, 0xEC, 0x00,
+        ];
+        assert_eq!(cw[..11], expected);
+        // Content running into the final nibble leaves no room for pad codewords.
+        let segments = [SegmentView::numeric(b"12345678901234567890123")];
+        let (cw, _, _) = codewords(&segments, MicroVersion::M3, MicroEcLevel::L).unwrap();
+        assert_eq!(cw[10] & 0x0F, 0);
     }
 }

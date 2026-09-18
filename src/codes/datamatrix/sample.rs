@@ -38,8 +38,11 @@
 //! (~4.5 px/module up to 2×), blurred (σ ≤ ~1.5 px), noisy (σ ≤ ~25 luminance),
 //! brightness/contrast shifted, and under perspective tilt whose tolerance shrinks with
 //! symbol size (≈ 0.20 at dim 10–12, ≈ 0.10 at dim 22, ≈ 0.05 at the multi-region
-//! sizes). Because the background is assumed to contain a single symbol on a clean quiet
-//! zone, every dark pixel is taken to belong to the code.
+//! sizes). The symbol is taken to be one of the largest dark connected components (its
+//! solid L finder spans the symbol's full height and width, so the component's box
+//! covers the symbol); each of the largest few plausibly shaped components is tried in
+//! turn, so a dark background around the label or print beside the code does not
+//! displace it — but dark clutter *inside* the symbol's box still skews the corners.
 //!
 //! Binarization is tried global-Otsu first, then — only if that fails to decode — an
 //! adaptive (Bradley local-mean) fallback, so a symbol under a lighting gradient or glare
@@ -186,28 +189,28 @@ fn solve_with(
     bin: &BinaryImage,
     threshold: u8,
 ) -> Result<(Located, Symbol)> {
-    let geom = extract_geometry(frame, bin, threshold)?;
     let decoder = DataMatrixDecoder::new();
-
-    // Try the nearest valid square sizes, and both grid handednesses, returning the
-    // first that survives Reed–Solomon. RS makes a false accept astronomically
-    // unlikely, so the first success is the true reading.
-    for &dim in &candidate_sizes(geom.n_est) {
-        for swap in [false, true] {
-            let dst = corner_targets(&geom, swap);
-            let src = grid_corners(dim);
-            let Ok(h) = Homography::from_correspondences(src, dst) else {
-                continue;
-            };
-            let matrix =
-                crate::imgproc::sample::sample_grid(frame, &h, dim, geom.threshold, QUIET_ZONE);
-            if let Ok(symbol) = decoder.decode_matrix(&matrix) {
-                let located = Located {
-                    matrix,
-                    corners: dst,
-                    dim,
+    for geom in extract_geometries(frame, bin, threshold)? {
+        // Try the nearest valid square sizes, and both grid handednesses, returning
+        // the first that survives Reed–Solomon. RS makes a false accept astronomically
+        // unlikely, so the first success is the true reading.
+        for &dim in &candidate_sizes(geom.n_est) {
+            for swap in [false, true] {
+                let dst = corner_targets(&geom, swap);
+                let src = grid_corners(dim);
+                let Ok(h) = Homography::from_correspondences(src, dst) else {
+                    continue;
                 };
-                return Ok((located, symbol));
+                let matrix =
+                    crate::imgproc::sample::sample_grid(frame, &h, dim, geom.threshold, QUIET_ZONE);
+                if let Ok(symbol) = decoder.decode_matrix(&matrix) {
+                    let located = Located {
+                        matrix,
+                        corners: dst,
+                        dim,
+                    };
+                    return Ok((located, symbol));
+                }
             }
         }
     }
@@ -235,7 +238,10 @@ fn locate_geometry_with(
     bin: &BinaryImage,
     threshold: u8,
 ) -> Result<Located> {
-    let geom = extract_geometry(frame, bin, threshold)?;
+    let geom = extract_geometries(frame, bin, threshold)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::undecodable("no Data Matrix geometry recovered"))?;
     let dim = candidate_sizes(geom.n_est)[0];
     let dst = corner_targets(&geom, false);
     let src = grid_corners(dim);
@@ -274,25 +280,50 @@ fn corner_targets(geom: &Geometry, swap: bool) -> [Point; 4] {
 
 /// Extract corners, the L orientation, a size estimate and the binarization threshold
 /// from a supplied binarization `bin` (and its global sampling `threshold`).
-fn extract_geometry(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<Geometry> {
+/// Dark components tried as the symbol, largest first.
+const MAX_COMPONENTS: usize = 6;
+
+/// Symbol geometries for the largest plausible dark components, in that order.
+fn extract_geometries(
+    frame: &GrayFrame<'_>,
+    bin: &BinaryImage,
+    threshold: u8,
+) -> Result<Vec<Geometry>> {
     if frame.width() < MIN_FRAME || frame.height() < MIN_FRAME {
         return Err(Error::undecodable(
             "frame too small for a Data Matrix symbol",
         ));
     }
 
-    // The solid L finder forms the largest dark component; its bounding box covers the
-    // whole symbol (the L spans a full column and a full row), so restrict the corner
-    // search to it and drop any stray noise elsewhere.
-    let comps = connected_components(bin, Connectivity::Eight);
-    let symbol = comps
+    // The solid L finder is one dark component whose bounding box covers the whole
+    // symbol (the L spans a full column and a full row). On a clean crop it is the
+    // largest component; in a scene the dark surface behind the label or a block of
+    // print beside it can be larger, so the largest few that could be a symbol — a
+    // box at least ten modules of a pixel each way, not a thin rule — are all tried.
+    let mut comps = connected_components(bin, Connectivity::Eight);
+    comps.sort_by_key(|c| core::cmp::Reverse(c.area));
+    let geoms: Vec<Geometry> = comps
         .iter()
-        .max_by_key(|c| c.area)
-        .ok_or_else(|| Error::undecodable("no dark region found"))?;
-    if symbol.area < 16 {
-        return Err(Error::undecodable("dark region too small for a symbol"));
+        .filter(|c| {
+            let (w, h) = (c.bounds.width(), c.bounds.height());
+            c.area >= 16 && w >= MIN_FRAME && h >= MIN_FRAME && w <= 4 * h && h <= 4 * w
+        })
+        .take(MAX_COMPONENTS)
+        .filter_map(|c| extract_geometry(frame, bin, threshold, &c.bounds).ok())
+        .collect();
+    if geoms.is_empty() {
+        return Err(Error::undecodable("no dark region shaped like a symbol"));
     }
-    let b = symbol.bounds;
+    Ok(geoms)
+}
+
+/// Symbol geometry for the dark component bounded by `b`.
+fn extract_geometry(
+    frame: &GrayFrame<'_>,
+    bin: &BinaryImage,
+    threshold: u8,
+    b: &crate::imgproc::components::BoundingBox,
+) -> Result<Geometry> {
     let pad = 2usize;
     let x0 = b.min_x.saturating_sub(pad);
     let y0 = b.min_y.saturating_sub(pad);

@@ -101,11 +101,9 @@ fn codes() -> Vec<Code> {
             sprite: |s| {
                 let e = Pdf417Encoder::new();
                 let sym = e.build_text("PDF417 LIVE", pdf417::EcLevel::new(2).unwrap());
-                let img = render(&e.encode(&sym.unwrap()).unwrap(), s);
-                // Rows are rendered one module tall; real symbols use ~3 modules per row.
-                stretch_y(&img, 3)
+                render(&e.encode(&sym.unwrap()).unwrap(), s)
             },
-            scales: [2, 3],
+            scales: [3, 5],
         },
         Code {
             name: "ean13",
@@ -162,16 +160,6 @@ fn codes() -> Vec<Code> {
             scales: [2, 4],
         },
     ]
-}
-
-fn stretch_y(img: &GrayImage, k: usize) -> GrayImage {
-    let mut out = GrayImage::filled(img.width(), img.height() * k, 255);
-    for y in 0..out.height() {
-        for x in 0..out.width() {
-            out.set(x, y, img.get(x, y / k));
-        }
-    }
-    out
 }
 
 /// Paste `sprite` rotated by `deg` about the canvas centre `(cx, cy)`; returns the

@@ -469,6 +469,10 @@ impl Decode for Code93Decoder {
             return Err(Error::undecodable("Code 93 missing start/stop"));
         }
         let narrow = runs.iter().map(|&(_, len)| len).min().unwrap();
+        // The termination bar is a single module.
+        if rebuild_bits(&runs[nchars * 6..], narrow) != "1" {
+            return Err(Error::undecodable("Code 93 termination bar invalid"));
+        }
 
         let mut values: Vec<u8> = Vec::new();
         for c in 0..nchars {

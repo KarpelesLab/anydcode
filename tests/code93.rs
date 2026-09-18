@@ -152,3 +152,25 @@ fn encode_into_matches_encode() {
     assert!(enc.encode_into(b"AB\x80", &fa, &mut buf).is_err());
     assert!(buf.is_empty());
 }
+
+/// The symbol closes with a single-module termination bar; a wider final bar is not
+/// a Code 93 stop (and would not survive the re-encode round trip).
+#[test]
+fn termination_bar_must_be_one_module() {
+    let enc = Code93Encoder::new();
+    let Encoding::Linear(mut pattern) = enc.encode(&enc.build(b"TEST93", false).unwrap()).unwrap()
+    else {
+        panic!("Code 93 encodes to a linear pattern");
+    };
+    assert!(
+        Code93Decoder::new()
+            .decode(&Encoding::Linear(pattern.clone()))
+            .is_ok()
+    );
+    pattern.modules.extend([true, true]);
+    assert!(
+        Code93Decoder::new()
+            .decode(&Encoding::Linear(pattern))
+            .is_err()
+    );
+}

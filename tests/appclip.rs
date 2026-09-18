@@ -187,6 +187,24 @@ fn appclip_second_level_domain_encodes() {
     }
 }
 
+/// The arcs block (in the color stream) carries the five leading payload bytes, so a
+/// vector cut short of it must fail — never decode to a made-up URL.
+#[test]
+fn truncated_color_stream_is_an_error() {
+    let payload = appclip::compress_url("https://example.com").unwrap();
+    let bits = appclip::encode_payload(&payload).unwrap();
+    assert_eq!(appclip::decode_payload(&bits).unwrap(), payload);
+    for cut in [0, 127, 128, 129, 150, 184] {
+        assert!(
+            appclip::decode_payload(&bits[..cut]).is_err(),
+            "{cut}-bit vector decoded"
+        );
+        assert!(appclip::decode_bits(&bits[..cut]).is_err());
+    }
+    // The separator, the 56 arc bits: enough (the extra gap bits are redundant).
+    assert_eq!(appclip::decode_payload(&bits[..185]).unwrap(), payload);
+}
+
 /// Characters outside a component's raw-allowed set canonicalize to the same payload
 /// as their pre-escaped form (Apple normalizes both spellings identically).
 #[test]

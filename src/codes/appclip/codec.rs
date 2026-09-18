@@ -111,9 +111,13 @@ pub fn encode_payload(payload: &[u8]) -> Result<Vec<bool>> {
 }
 
 /// Decode a ring bit vector back to the right-aligned 16-byte payload.
+///
+/// Needs the 128 gap bits plus the separator and the 56 arc bits of the color
+/// stream: the arcs block holds the five leading payload bytes, so nothing can be
+/// recovered from the gap bits alone.
 pub fn decode_payload(bits: &[bool]) -> Result<[u8; 16]> {
-    if bits.len() < 128 {
-        return Err(Error::undecodable("App Clip bit vector shorter than 128"));
+    if bits.len() < 128 + 57 {
+        return Err(Error::undecodable("App Clip bit vector shorter than 185"));
     }
 
     // Reverse the LUT permutation.
@@ -150,24 +154,22 @@ pub fn decode_payload(bits: &[bool]) -> Result<[u8; 16]> {
     let gap_syms = rs_decode(&gf256, &gap_cw, fp.gaps_parity)
         .ok_or_else(|| Error::undecodable("App Clip gaps RS failed"))?;
 
-    // Arcs, when the color stream is present.
+    // Arcs: seven GF(256) symbols from the color stream, after the separator.
     let total = fp.gaps_data + fp.arcs_data;
     let mut scrambled = vec![0u8; total];
     for i in 0..fp.gaps_data {
         scrambled[i] = gap_syms[i] as u8;
     }
-    if bits.len() >= 128 + 57 {
-        if bits[128] {
-            return Err(Error::undecodable("invalid App Clip separator bit"));
-        }
-        let arc_cw: Vec<usize> = (0..7)
-            .map(|i| bits_to_symbol(&bits[129 + i * 8..129 + i * 8 + 8]))
-            .collect();
-        let arc_syms = rs_decode(&gf256, &arc_cw, fp.arcs_parity)
-            .ok_or_else(|| Error::undecodable("App Clip arcs RS failed"))?;
-        for i in 0..fp.arcs_data {
-            scrambled[fp.gaps_data + i] = arc_syms[i] as u8;
-        }
+    if bits[128] {
+        return Err(Error::undecodable("invalid App Clip separator bit"));
+    }
+    let arc_cw: Vec<usize> = (0..7)
+        .map(|i| bits_to_symbol(&bits[129 + i * 8..129 + i * 8 + 8]))
+        .collect();
+    let arc_syms = rs_decode(&gf256, &arc_cw, fp.arcs_parity)
+        .ok_or_else(|| Error::undecodable("App Clip arcs RS failed"))?;
+    for i in 0..fp.arcs_data {
+        scrambled[fp.gaps_data + i] = arc_syms[i] as u8;
     }
 
     // Unscramble and right-align into 16 bytes.

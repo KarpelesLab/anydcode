@@ -389,3 +389,76 @@ fn corrects_damaged_dots() {
         }
     }
 }
+
+#[test]
+fn random_payloads_round_trip_at_any_width() {
+    // Payloads drawn from alphabets that stress each code set, the binary latch and
+    // the digit-pair look-ahead, at automatic and forced widths. Every build must
+    // decode back to the same bytes and re-encode identically; a refusal must be a
+    // clean capacity error.
+    let mut seed = 0xD07C_0DE0_B17D_0001u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let alphabets: [&[u8]; 6] = [
+        b"0123456789",
+        b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        b"abcxyz 0189,.-\r\n",
+        b"\x00\x01\x09\x1c\x1d\x1e\x1fAB12",
+        b"\x80\x9f\xa0\xff\xc3\xa9 aZ09",
+        b"17010203101710",
+    ];
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for round in 0..400 {
+        let alphabet = alphabets[round % alphabets.len()];
+        let len = 1 + (next() % 60) as usize;
+        let payload: Vec<u8> = (0..len)
+            .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+            .collect();
+        let built = if round % 3 == 0 {
+            enc.build_bytes_width(&payload, 5 + (next() % 196) as usize)
+        } else {
+            enc.build_bytes(&payload)
+        };
+        let symbol = match built {
+            Ok(symbol) => symbol,
+            Err(anyd::Error::Capacity { .. }) => continue,
+            Err(e) => panic!("unexpected error {e} for {payload:?}"),
+        };
+        let encoding = enc.encode(&symbol).unwrap();
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(decoded.payload_bytes(), payload, "payload {payload:?}");
+        assert_eq!(decoded.meta, symbol.meta, "payload {payload:?}");
+        assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+    }
+}
+
+#[test]
+fn macro_messages_decode_to_the_original_bytes() {
+    // "[)>RS05GS...RSEOT" (and 06, 12, or any other two-digit format with a bare EOT)
+    // is compacted to Latch B plus a macro codeword 97-100; the decoder must expand
+    // the header and trailer again rather than read 97-100 as HT/FS/GS/RS.
+    let enc = DotCodeEncoder::new();
+    for payload in [
+        &b"[)>\x1e05\x1dABC123\x1e\x04"[..],
+        b"[)>\x1e06\x1dABC123\x1e\x04",
+        b"[)>\x1e12\x1dabc\x1e\x04",
+        b"[)>\x1e07ABC\x04",
+        b"[)>\x1e99\x1d12345678\x1e\x04",
+        // Not macros: no EOT, or a leading special that merely looks similar.
+        b"[)>\x1e05\x1dABC",
+        b"\x1dABC",
+        b"\tTAB\x1e\x04",
+    ] {
+        let symbol = enc.build_bytes(payload).unwrap();
+        let decoded = DotCodeDecoder::new()
+            .decode(&enc.encode(&symbol).unwrap())
+            .unwrap();
+        assert_eq!(decoded.payload_bytes(), payload, "payload {payload:?}");
+        assert_roundtrip(&symbol);
+    }
+}

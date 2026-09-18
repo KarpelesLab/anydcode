@@ -975,6 +975,14 @@ pub(crate) fn select_mask(data: &[u8], width: usize, height: usize) -> u8 {
                 best_mask = m;
             }
         }
+        // Forcing is a no-op when the corners are already lit (e.g. they are pad
+        // dots); report the plain mask then, as a decoder would.
+        if best_mask >= 4
+            && render_grid(data, width, height, best_mask)
+                == render_grid(data, width, height, best_mask - 4)
+        {
+            best_mask -= 4;
+        }
     }
     best_mask
 }

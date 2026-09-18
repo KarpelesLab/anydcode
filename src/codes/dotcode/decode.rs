@@ -219,6 +219,24 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
         i += 1;
     }
 
+    // Macro: Latch B followed by 97-100 in the first data position stands for the
+    // "[)>RS05GS" / 06 / 12 header with an "RS EOT" trailer, or (100) for "[)>RS"
+    // ahead of a two-digit format, sent as ordinary Set B characters, with an "EOT"
+    // trailer.
+    let mut trailer: &[u8] = &[];
+    if cw.get(i) == Some(&LATCH_BC)
+        && let Some(&m @ 97..=100) = cw.get(i + 1)
+    {
+        bytes.extend_from_slice(b"[)>\x1e");
+        if m != 100 {
+            bytes.extend_from_slice([&b"05"[..], b"06", b"12"][(m - 97) as usize]);
+            bytes.push(GS);
+        }
+        trailer = if m == 100 { b"\x04" } else { b"\x1e\x04" };
+        mode = b'B';
+        i += 2;
+    }
+
     let flush = |bytes: &mut Vec<u8>, segments: &mut Vec<Segment>| {
         if !bytes.is_empty() {
             segments.push(Segment::byte(core::mem::take(bytes)));
@@ -404,6 +422,7 @@ fn codewords_to_segments(cw: &[u8]) -> Vec<Segment> {
         }
     }
 
+    bytes.extend_from_slice(trailer);
     flush(&mut bytes, &mut segments);
     segments
 }

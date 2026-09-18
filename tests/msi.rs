@@ -48,6 +48,64 @@ fn msi_bad_check_is_rejected() {
     assert!(res.is_err());
 }
 
+/// Build an MSI module row straight from 4-bit values (no digit validation).
+fn msi_row(nibbles: &[u8]) -> anyd::output::Encoding {
+    let mut p = anyd::output::LinearPattern::new();
+    p.modules.extend([true, true, false]);
+    for &v in nibbles {
+        for bit in (0..4).rev() {
+            p.modules.extend([true, (v >> bit) & 1 == 1, false]);
+        }
+    }
+    p.modules.extend([true, false, false, true]);
+    anyd::output::Encoding::Linear(p)
+}
+
+/// MSI digits are BCD: a bit group of 10..=15 is not a digit and must not decode
+/// (it used to come out as `:`..`?` in a "numeric" segment the encoder then refused).
+#[test]
+fn msi_non_bcd_group_is_rejected() {
+    assert!(MsiDecoder::new().decode(&msi_row(&[1, 2, 3])).is_ok());
+    for bad in 10..16 {
+        for scheme in [MsiCheck::None, MsiCheck::Mod10, MsiCheck::Mod1010] {
+            let res = MsiDecoder::with_check(scheme).decode(&msi_row(&[1, bad, 3, 4]));
+            assert!(res.is_err(), "group {bad} accepted under {scheme:?}");
+        }
+    }
+}
+
+/// A row carrying only check digits has no payload; the encoder cannot produce it.
+#[test]
+fn msi_check_only_row_is_rejected() {
+    // Luhn of the empty string is 0.
+    assert!(
+        MsiDecoder::with_check(MsiCheck::Mod10)
+            .decode(&msi_row(&[0]))
+            .is_err()
+    );
+    assert!(
+        MsiDecoder::with_check(MsiCheck::Mod1010)
+            .decode(&msi_row(&[0, 0]))
+            .is_err()
+    );
+}
+
+/// A Plessey row holding nothing but the (all-zero) CRC of an empty payload.
+#[test]
+fn plessey_crc_only_row_is_rejected() {
+    let mut p = anyd::output::LinearPattern::new();
+    let mut bar = true;
+    let start = [3usize, 1, 3, 1, 1, 3, 3, 1];
+    let crc = [1usize, 3].repeat(8);
+    let stop = [3usize, 3, 1, 3, 1, 1, 3, 1, 3];
+    for w in start.iter().chain(&crc).chain(&stop) {
+        p.modules.extend(core::iter::repeat_n(bar, *w));
+        bar = !bar;
+    }
+    let res = MsiDecoder::plessey().decode(&anyd::output::Encoding::Linear(p));
+    assert!(res.is_err(), "empty Plessey payload accepted: {res:?}");
+}
+
 #[test]
 fn plessey_roundtrip() {
     let enc = MsiEncoder::new();

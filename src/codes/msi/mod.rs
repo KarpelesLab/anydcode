@@ -248,12 +248,16 @@ fn msi_decode(modules: &[bool], scheme: MsiCheck) -> Result<Vec<u8>> {
             };
             value = (value << 1) | one;
         }
+        // Digits are BCD: the bit groups 10..=15 are not MSI characters.
+        if value > 9 {
+            return Err(Error::undecodable("MSI bit group is not a digit"));
+        }
         digits.push(b'0' + value);
     }
 
     // Verify and strip check digits.
     let clen = check_len(scheme);
-    if digits.len() < clen {
+    if digits.len() <= clen {
         return Err(Error::undecodable("MSI too short for check scheme"));
     }
     let data_len = digits.len() - clen;
@@ -385,7 +389,8 @@ fn plessey_decode(modules: &[bool]) -> Result<Vec<u8>> {
         };
         bits.push(bit);
     }
-    if bits.len() < 8 || (bits.len() - 8) % 4 != 0 {
+    // At least one 4-bit digit ahead of the 8 CRC bits.
+    if bits.len() < 12 || (bits.len() - 8) % 4 != 0 {
         return Err(Error::undecodable("Plessey bit count invalid"));
     }
     let data_bits = &bits[..bits.len() - 8];

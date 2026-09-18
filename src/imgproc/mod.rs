@@ -31,6 +31,8 @@
 //! [`BitMatrix`]: crate::output::BitMatrix
 
 pub mod binary;
+#[cfg(any(feature = "aztec", feature = "microqr", feature = "rmqr"))]
+pub(crate) mod cluster;
 pub mod components;
 pub mod edges;
 #[cfg(any(feature = "qr", feature = "microqr", feature = "rmqr"))]

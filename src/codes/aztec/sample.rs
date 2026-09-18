@@ -28,13 +28,17 @@ use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
 use crate::imgproc::binary::BinaryImage;
+use crate::imgproc::cluster::CenterIndex;
 use crate::imgproc::components::{extreme_quad, flood_region};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::sample::{sample_bilinear, sample_grid};
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::symbol::Symbol;
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use std::eprintln;
+
+/// Bullseye candidates tried per binarization, best-confirmed first.
+const MAX_EYES: usize = 4;
 
 /// A detected bullseye: centre, module pitch along the scan axes, ring count.
 #[derive(Debug, Clone, Copy)]
@@ -77,7 +81,7 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
     let decoder = AztecDecoder::new();
     let mut last = Error::undecodable("Aztec bullseye did not decode");
 
-    for eye in eyes.iter().take(4) {
+    for eye in eyes.iter().take(MAX_EYES) {
         // The light annulus just inside the outer dark ring anchors the core
         // homography: unlike the dark rings — whose corners touch data-dependent
         // mode-message modules — it is a *closed* fixed pattern, sealed between two
@@ -261,6 +265,7 @@ fn location_from(core: &Homography, eye: &Bullseye) -> Location {
 fn find_bullseyes(bin: &BinaryImage) -> Vec<Bullseye> {
     let (w, h) = (bin.width(), bin.height());
     let mut eyes: Vec<Bullseye> = Vec::new();
+    let mut index = CenterIndex::new(w, h);
 
     for y in 0..h {
         // Run-length encode the row.
@@ -294,11 +299,12 @@ fn find_bullseyes(bin: &BinaryImage) -> Vec<Bullseye> {
                 let cx = mid.1 + mid.2 / 2;
                 // Vertical cross-check: the same equal-run pattern down the centre
                 // column, and its centre must land back on this row.
-                let Some((cy, vmodule)) = vertical_check(bin, cx, y, need) else {
+                let Some((cy, vmodule)) = vertical_check(bin, cx, y, need, module) else {
                     continue;
                 };
                 merge(
                     &mut eyes,
+                    &mut index,
                     Bullseye {
                         cx: cx as f32,
                         cy,
@@ -344,11 +350,22 @@ fn equal_runs_module(window: &[(bool, usize, usize)]) -> Option<f32> {
 
 /// Walk the equal-run pattern vertically through `(cx, y)`; returns the refined
 /// centre-y and vertical module width.
-fn vertical_check(bin: &BinaryImage, cx: usize, y: usize, need: usize) -> Option<(f32, f32)> {
+fn vertical_check(
+    bin: &BinaryImage,
+    cx: usize,
+    y: usize,
+    need: usize,
+    module: f32,
+) -> Option<(f32, f32)> {
     let h = bin.height();
     let half = need / 2;
+    // No run of a bullseye is anywhere near four times the module width its row showed.
+    // Without the cap, every row of a striped texture (equal runs along the row, solid
+    // down the column) walks the full image height for each of its hits.
+    let cap = (module * 4.0) as usize + 2;
     // March up and down collecting run lengths from the centre run outward.
-    let mut lengths = vec![0usize; need];
+    let mut lengths = [0usize; 13];
+    let lengths = &mut lengths[..need];
     let dark_at = |yy: i64| yy >= 0 && (yy as usize) < h && bin.get(cx, yy as usize);
 
     let mut up = y as i64;
@@ -358,20 +375,23 @@ fn vertical_check(bin: &BinaryImage, cx: usize, y: usize, need: usize) -> Option
         return None;
     }
     let mut run = 0usize;
-    while dark_at(up) {
+    while dark_at(up) && run <= cap {
         run += 1;
         up -= 1;
     }
-    while dark_at(down) {
+    while dark_at(down) && run <= cap {
         run += 1;
         down += 1;
+    }
+    if run > cap {
+        return None;
     }
     lengths[half] = run;
     // Alternate outward on both sides.
     let mut expect = false;
     for k in 1..=half {
         let mut run_up = 0usize;
-        while up >= 0 && dark_at(up) == expect && run_up < h {
+        while up >= 0 && dark_at(up) == expect && run_up < cap {
             run_up += 1;
             up -= 1;
             if up < 0 {
@@ -379,11 +399,16 @@ fn vertical_check(bin: &BinaryImage, cx: usize, y: usize, need: usize) -> Option
             }
         }
         let mut run_down = 0usize;
-        while (down as usize) < h && dark_at(down) == expect && run_down < h {
+        while (down as usize) < h && dark_at(down) == expect && run_down < cap {
             run_down += 1;
             down += 1;
         }
         if run_up == 0 || run_down == 0 {
+            return None;
+        }
+        // Only the outermost runs may be cut short by the cap (they are only checked
+        // for a minimum length below); an inner run that long is no ring.
+        if k < half && (run_up == cap || run_down == cap) {
             return None;
         }
         lengths[half - k] = run_up;
@@ -405,20 +430,27 @@ fn vertical_check(bin: &BinaryImage, cx: usize, y: usize, need: usize) -> Option
     Some((y as f32, module))
 }
 
-fn merge(eyes: &mut Vec<Bullseye>, eye: Bullseye) {
-    for e in eyes.iter_mut() {
-        if e.full == eye.full
+fn merge(eyes: &mut Vec<Bullseye>, index: &mut CenterIndex, eye: Bullseye) {
+    // The first eye (in creation order) of the same kind within two modules of the hit
+    // absorbs it. The index narrows the search to the eyes near the hit: a periodic
+    // texture is one equal-run hit every few pixels, tens of thousands of eyes.
+    let near = index.candidates(eye.cx, eye.cy).iter().copied().find(|&i| {
+        let e = &eyes[i as usize];
+        e.full == eye.full
             && (e.cx - eye.cx).abs() <= e.module * 2.0
             && (e.cy - eye.cy).abs() <= e.module * 2.0
-        {
-            let c = e.count as f32;
-            e.cx = (e.cx * c + eye.cx) / (c + 1.0);
-            e.cy = (e.cy * c + eye.cy) / (c + 1.0);
-            e.module = (e.module * c + eye.module) / (c + 1.0);
-            e.count += 1;
-            return;
-        }
+    });
+    if let Some(i) = near {
+        let e = &mut eyes[i as usize];
+        let c = e.count as f32;
+        e.cx = (e.cx * c + eye.cx) / (c + 1.0);
+        e.cy = (e.cy * c + eye.cy) / (c + 1.0);
+        e.module = (e.module * c + eye.module) / (c + 1.0);
+        e.count += 1;
+        index.cover(i, e.cx, e.cy, e.module * 2.0);
+        return;
     }
+    index.cover(eyes.len() as u32, eye.cx, eye.cy, eye.module * 2.0);
     eyes.push(eye);
 }
 
@@ -426,6 +458,11 @@ fn merge(eyes: &mut Vec<Bullseye>, eye: Bullseye) {
 fn dedup_overlapping(eyes: Vec<Bullseye>) -> Vec<Bullseye> {
     let mut out: Vec<Bullseye> = Vec::new();
     for e in eyes {
+        // Only the first few are ever tried; on a texture with thousands of eyes,
+        // filtering them all against each other is quadratic for nothing.
+        if out.len() == MAX_EYES {
+            break;
+        }
         if out
             .iter()
             .any(|k| (k.cx - e.cx).abs() <= k.module * 3.0 && (k.cy - e.cy).abs() <= k.module * 3.0)

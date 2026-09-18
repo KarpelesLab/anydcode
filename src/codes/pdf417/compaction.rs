@@ -657,6 +657,24 @@ mod tests {
         roundtrip(Segment::alphanumeric(b"a".to_vec()));
     }
 
+    /// Every ordered pair of text bytes, entered from each sub-mode, survives: this
+    /// walks all latch / shift transitions and both pad parities.
+    #[test]
+    fn text_roundtrips_every_transition() {
+        let text: Vec<u8> = (0u8..=127).filter(|&c| is_text(c)).collect();
+        for prefix in [&b""[..], b"a", b"1", b"1;;"] {
+            for &a in &text {
+                for &b in &text {
+                    let mut data = prefix.to_vec();
+                    data.extend_from_slice(&[a, b]);
+                    roundtrip(Segment::alphanumeric(data.clone()));
+                    data.push(b'Z');
+                    roundtrip(Segment::alphanumeric(data));
+                }
+            }
+        }
+    }
+
     #[test]
     fn byte_roundtrips_all_remainders() {
         for len in 1..=20usize {

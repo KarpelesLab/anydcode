@@ -12,7 +12,9 @@
 //! encoded and structurally decoded. The payload round-trips losslessly (as a single
 //! byte segment) and re-encodes byte-for-byte identically. Aztec Runes (the fixed
 //! 11×11 single-byte symbol, ISO/IEC 24778 Annex A) are also supported via the same
-//! encoder/decoder. ECI/FLG escapes are not implemented.
+//! encoder/decoder. The decoder follows every high-level construct a third-party
+//! symbol may use (latched Punct mode, `FLG(0)` FNC1 reported as GS, `FLG(n)` ECI
+//! escapes reported as ECI segments); the encoder does not emit FLG escapes.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

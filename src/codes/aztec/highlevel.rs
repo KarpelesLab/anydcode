@@ -11,6 +11,7 @@
 use super::tables::{
     DIGIT, LOWER, MIXED, PUNCT, UPPER, char_for_code, code_for_char, mode_bits, punct_pair_for_code,
 };
+use crate::segment::Segment;
 use alloc::vec::Vec;
 
 /// A grow-able most-significant-first bit buffer.
@@ -206,19 +207,64 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Append the byte(s) produced by a Punct code (single char or two-byte combination).
-fn decode_punct(code: u16, out: &mut Vec<u8>) {
+/// Handle one Punct code (single char, two-byte combination or the `FLG(n)` escape),
+/// returning `false` if the stream is truncated or malformed and decoding must stop.
+fn decode_punct(code: u16, r: &mut Reader<'_>, out: &mut Decoded) -> bool {
+    if code == 0 {
+        return decode_flg(r, out);
+    }
     if let Some(pair) = punct_pair_for_code(code) {
-        out.extend_from_slice(&pair);
+        out.bytes.extend_from_slice(&pair);
     } else if let Some(byte) = char_for_code(PUNCT, code) {
-        out.push(byte);
+        out.bytes.push(byte);
+    }
+    true
+}
+
+/// `FLG(n)`: a 3-bit `n` follows. `FLG(0)` is FNC1, reported as a GS byte (the
+/// convention third-party readers use); `FLG(1..=6)` is an ECI escape whose `n`
+/// decimal digits follow as Digit-mode codes; `FLG(7)` is reserved.
+fn decode_flg(r: &mut Reader<'_>, out: &mut Decoded) -> bool {
+    match r.read(3) {
+        Some(0) => out.bytes.push(0x1D),
+        Some(n @ 1..=6) => {
+            let mut eci = 0u32;
+            for _ in 0..n {
+                match r.read(4) {
+                    Some(d @ 2..=11) => eci = eci * 10 + (d - 2),
+                    _ => return false,
+                }
+            }
+            out.flush();
+            out.segments.push(Segment::eci(eci));
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// Decoder output: completed segments plus the byte run being accumulated.
+#[derive(Default)]
+struct Decoded {
+    segments: Vec<Segment>,
+    bytes: Vec<u8>,
+}
+
+impl Decoded {
+    /// Close the current byte run (if any) as a segment.
+    fn flush(&mut self) {
+        if !self.bytes.is_empty() {
+            self.segments
+                .push(Segment::byte(core::mem::take(&mut self.bytes)));
+        }
     }
 }
 
-/// Decode a high-level bit stream back into payload bytes. Trailing padding (all
-/// ones, shorter than one codeword) is ignored via the "insufficient bits" rule.
-pub fn decode(bits: &[bool]) -> Vec<u8> {
-    let mut out = Vec::new();
+/// Decode a high-level bit stream back into payload segments: a single byte segment,
+/// split only where an ECI escape intervenes. Trailing padding (all ones, shorter
+/// than one codeword) is ignored via the "insufficient bits" rule.
+pub fn decode(bits: &[bool]) -> Vec<Segment> {
+    let mut out = Decoded::default();
     let mut r = Reader::new(bits);
     let mut mode = UPPER;
     loop {
@@ -228,10 +274,22 @@ pub fn decode(bits: &[bool]) -> Vec<u8> {
         }
         let code = r.read(mb).unwrap() as u16;
         match code {
+            // Punct has no shifts: code 0 is FLG(n) and 31 latches back to Upper.
+            _ if mode == PUNCT => {
+                if code == 31 {
+                    mode = UPPER;
+                } else if !decode_punct(code, &mut r, &mut out) {
+                    break;
+                }
+            }
             0 => {
                 // P/S: read one Punct code.
                 match r.read(5) {
-                    Some(pc) => decode_punct(pc as u16, &mut out),
+                    Some(pc) => {
+                        if !decode_punct(pc as u16, &mut r, &mut out) {
+                            break;
+                        }
+                    }
                     None => break,
                 }
             }
@@ -251,7 +309,7 @@ pub fn decode(bits: &[bool]) -> Vec<u8> {
                     break;
                 }
                 for _ in 0..len {
-                    out.push(r.read(8).unwrap() as u8);
+                    out.bytes.push(r.read(8).unwrap() as u8);
                 }
             }
             _ => match mode {
@@ -259,42 +317,47 @@ pub fn decode(bits: &[bool]) -> Vec<u8> {
                     28 => mode = LOWER,
                     29 => mode = MIXED,
                     30 => mode = DIGIT,
-                    _ => push_char(UPPER, code, &mut out),
+                    _ => push_char(UPPER, code, &mut out.bytes),
                 },
                 LOWER => match code {
                     28 => {
                         // U/S: one Upper char.
                         match r.read(5) {
-                            Some(uc) => push_char(UPPER, uc as u16, &mut out),
+                            Some(uc) => push_char(UPPER, uc as u16, &mut out.bytes),
                             None => break,
                         }
                     }
                     29 => mode = MIXED,
                     30 => mode = DIGIT,
-                    _ => push_char(LOWER, code, &mut out),
+                    _ => push_char(LOWER, code, &mut out.bytes),
                 },
                 MIXED => match code {
                     28 => mode = LOWER,
                     29 => mode = UPPER,
                     30 => mode = PUNCT,
-                    _ => push_char(MIXED, code, &mut out),
+                    _ => push_char(MIXED, code, &mut out.bytes),
                 },
                 DIGIT => match code {
                     14 => mode = UPPER,
                     15 => {
                         // U/S: one Upper char.
                         match r.read(5) {
-                            Some(uc) => push_char(UPPER, uc as u16, &mut out),
+                            Some(uc) => push_char(UPPER, uc as u16, &mut out.bytes),
                             None => break,
                         }
                     }
-                    _ => push_char(DIGIT, code, &mut out),
+                    _ => push_char(DIGIT, code, &mut out.bytes),
                 },
                 _ => {}
             },
         }
     }
-    out
+    // A symbol without ECI escapes is always exactly one (possibly empty) byte segment.
+    if !out.bytes.is_empty() || out.segments.is_empty() {
+        let bytes = core::mem::take(&mut out.bytes);
+        out.segments.push(Segment::byte(bytes));
+    }
+    out.segments
 }
 
 /// Push the character for `(mode, code)` if it is a data code.
@@ -360,6 +423,47 @@ pub fn unstuff_bits(bits: &[bool], w: usize) -> Vec<bool> {
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
+    use crate::segment::Mode;
+
+    /// Decode and flatten the byte segments.
+    fn bytes(bits: &[bool]) -> Vec<u8> {
+        decode(bits).into_iter().flat_map(|s| s.data).collect()
+    }
+
+    /// Build a bit stream from `(value, width)` fields.
+    fn stream(fields: &[(u32, usize)]) -> Vec<bool> {
+        let mut v = BitVec::new();
+        for &(value, len) in fields {
+            v.push(value, len);
+        }
+        v.into_bits()
+    }
+
+    // Third-party encoders latch into Punct (M/L then P/L) for punctuation runs; in
+    // that mode code 31 is U/L, not a binary shift, and there is no P/S.
+    #[test]
+    fn decodes_punct_latch() {
+        // M/L=29, P/L=30, '!'=6, ". "=3, '}'=30, U/L=31, 'A'=2
+        let bits = stream(&[(29, 5), (30, 5), (6, 5), (3, 5), (30, 5), (31, 5), (2, 5)]);
+        assert_eq!(bytes(&bits), b"!. }A");
+    }
+
+    // FLG(0) is FNC1 (reported as GS); FLG(n) carries an n-digit ECI number.
+    #[test]
+    fn decodes_flg_escapes() {
+        // 'A', P/S, FLG, n=0, 'B'
+        let bits = stream(&[(2, 5), (0, 5), (0, 5), (0, 3), (3, 5)]);
+        assert_eq!(bytes(&bits), b"A\x1dB");
+        // P/S, FLG, n=2, digits '2' '6' (codes 4, 8), 'A'
+        let bits = stream(&[(0, 5), (0, 5), (2, 3), (4, 4), (8, 4), (2, 5)]);
+        let segs = decode(&bits);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0].mode, Mode::Eci(26));
+        assert_eq!((segs[1].mode, &segs[1].data[..]), (Mode::Byte, &b"A"[..]));
+        // In latched Punct mode code 0 is FLG too: M/L, P/L, FLG(0), '!'
+        let bits = stream(&[(29, 5), (30, 5), (0, 5), (0, 3), (6, 5)]);
+        assert_eq!(bytes(&bits), b"\x1d!");
+    }
 
     // Independently derived from the ISO/IEC 24778 character tables (Upper and Digit
     // sets, with the Upper→Digit D/L latch): "AB12".
@@ -421,8 +525,7 @@ mod tests {
             b"UPPERlower123!@#",
         ] {
             let bits = encode(payload);
-            let decoded = decode(&bits);
-            assert_eq!(decoded, payload, "roundtrip failed for {payload:?}");
+            assert_eq!(bytes(&bits), payload, "roundtrip failed for {payload:?}");
         }
     }
 
@@ -435,7 +538,7 @@ mod tests {
             let unstuffed = unstuff_bits(&stuffed, w);
             // Unstuffed reproduces the raw bits plus trailing 1-pad; decoding both
             // yields the same payload.
-            assert_eq!(decode(&unstuffed), decode(&raw));
+            assert_eq!(bytes(&unstuffed), bytes(&raw));
         }
     }
 }

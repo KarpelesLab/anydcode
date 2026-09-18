@@ -272,3 +272,66 @@ fn orientation_marks_follow_iso_24778() {
         }
     }
 }
+
+/// `zint -b AZTEC -d ". , : \r\n.,:"`: zint latches into Punct (M/L, P/L) and uses the
+/// two-byte Punct codes, which a shift-only decoder cannot follow.
+#[rustfmt::skip]
+const ZINT_PUNCT_LATCH: &[&str] = &[
+    "000101011001000",
+    "110110100001011",
+    "101100000110100",
+    "111111111111111",
+    "111100000001101",
+    "101101111101001",
+    "001101000101100",
+    "010101010101001",
+    "100101000101001",
+    "011101111101111",
+    "001100000001111",
+    "000111111111111",
+    "100011000110000",
+    "000011010011100",
+    "101101001111001",
+];
+
+/// `zint -b AZTEC --eci=26 -d "héllo wörld"` (UTF-8): starts with an FLG(2) ECI escape.
+#[rustfmt::skip]
+const ZINT_ECI_26: &[&str] = &[
+    "0011001001101001101",
+    "0001010110011011011",
+    "0111100100111000110",
+    "0010011101110000000",
+    "0001110101010011101",
+    "0110111111111110110",
+    "0110110000000100010",
+    "0010010111110100100",
+    "1011110100010110111",
+    "0100010101010111111",
+    "0001110100010101110",
+    "0101110111110111100",
+    "1110110000000100111",
+    "0000011111111111010",
+    "0110001111001001010",
+    "0011010011111010000",
+    "1111110000000011100",
+    "1101100111100111000",
+    "1100010010001100111",
+];
+
+#[test]
+fn decodes_third_party_punct_latch() {
+    let reference = Encoding::Matrix(matrix_from_rows(ZINT_PUNCT_LATCH));
+    let decoded = AztecDecoder::new().decode(&reference).unwrap();
+    assert_eq!(decoded.payload_bytes(), b". , : \r\n.,:");
+}
+
+#[test]
+fn decodes_third_party_eci_escape() {
+    let reference = Encoding::Matrix(matrix_from_rows(ZINT_ECI_26));
+    let decoded = AztecDecoder::new().decode(&reference).unwrap();
+    assert_eq!(
+        decoded.modes(),
+        vec![anyd::segment::Mode::Eci(26), anyd::segment::Mode::Byte]
+    );
+    assert_eq!(decoded.payload_bytes(), "héllo wörld".as_bytes());
+}

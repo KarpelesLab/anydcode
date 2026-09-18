@@ -3,8 +3,8 @@
 //! The structural decoder reads the mode message to learn the data-word count,
 //! reverses the spiral placement, Reed–Solomon-corrects the codewords, removes the
 //! bit-stuffing and runs the high-level decoder. The recovered payload is returned as
-//! a single byte segment together with the [`AztecMeta`] needed to re-encode
-//! identically.
+//! a single byte segment (split only by ECI escapes) together with the [`AztecMeta`]
+//! needed to re-encode identically.
 
 use super::highlevel::{self, unstuff_bits};
 use super::layout::Layout;
@@ -13,11 +13,10 @@ use super::{AztecMeta, full_size};
 use crate::codes::aztec::gf::{Gf, rs_decode};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
-use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
 /// Aztec Code structural decoder.
 #[derive(Debug, Default, Clone, Copy)]
@@ -92,7 +91,7 @@ impl AztecDecoder {
             }
         }
         let hl = unstuff_bits(&stuffed, w);
-        let payload = highlevel::decode(&hl);
+        let segments = highlevel::decode(&hl);
 
         let meta = AztecMeta {
             compact,
@@ -101,7 +100,7 @@ impl AztecDecoder {
         };
         Ok(Symbol::new(
             Symbology::Aztec,
-            vec![Segment::byte(payload)],
+            segments,
             SymbolMeta::Aztec(meta),
         ))
     }

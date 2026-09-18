@@ -227,6 +227,10 @@ fn parse_numeric(r: &mut BitReader<'_>) -> Result<Segment> {
     let n = groups.len();
     for (idx, &g) in groups.iter().enumerate() {
         let width = if idx + 1 == n { last_count } else { 3 };
+        // The group must fit its digit count (the 10-bit field reaches 1020).
+        if g >= [1, 10, 100, 1000][width] {
+            return Err(Error::undecodable("Han Xin numeric group out of range"));
+        }
         match width {
             3 => out.extend_from_slice(format!("{g:03}").as_bytes()),
             2 => out.extend_from_slice(format!("{g:02}").as_bytes()),
@@ -271,4 +275,25 @@ fn parse_binary(r: &mut BitReader<'_>) -> Result<Segment> {
 
 fn trunc() -> Error {
     Error::undecodable("truncated Han Xin data stream")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A numeric group must fit the digit count it stands for: the final group's
+    /// width comes from the terminator, so e.g. 1020 as a single digit is malformed
+    /// (and used to overflow `b'0' + value`).
+    #[test]
+    fn numeric_group_out_of_range_is_rejected() {
+        // 0001 | 1111111100 (1020) | 1111111101 (terminator: 1 digit)
+        assert!(parse_segments(&[0x1F, 0xF3, 0xFD, 0x00]).is_err());
+        // 0001 | 0001100100 (100) | 1111111110 (terminator: 2 digits)
+        assert!(parse_segments(&[0x11, 0x93, 0xFE, 0x00]).is_err());
+        // 0001 | 1111101000 (1000) | 1111111111 (terminator: 3 digits)
+        assert!(parse_segments(&[0x1F, 0xA3, 0xFF, 0x00]).is_err());
+        // 0001 | 0000000111 (7) | 1111111101 → "7"
+        let segs = parse_segments(&[0x10, 0x1F, 0xFD, 0x00]).unwrap();
+        assert_eq!(segs, [Segment::numeric(b"7".to_vec())]);
+    }
 }

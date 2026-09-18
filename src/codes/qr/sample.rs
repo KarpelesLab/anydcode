@@ -146,6 +146,13 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                 Ok(sym) => return Ok(sym),
                 Err(e) => {
                     last = e;
+                    // Everything below is the expensive recovery machinery, and it only
+                    // makes sense for a grid that *is* a QR sampled slightly wrongly. A
+                    // false finder triple in text yields a grid whose finder corners and
+                    // timing tracks are noise; spend nothing more on it.
+                    if !plausible_grid(&matrix) {
+                        continue;
+                    }
                     // The single-homography sample failed. If this symbol carries
                     // interior alignment patterns (version ≥ 2), fit a smooth non-planar
                     // (thin-plate-spline) warp through every finder and alignment anchor
@@ -429,6 +436,36 @@ fn cross_check_vertical(bin: &Binary, cx: usize, start: usize) -> Option<f32> {
     Some(run_center(counts, end))
 }
 
+/// Diagonal finder cross-check through `(cx, cy)`: the `1:1:3:1:1` ratio must also hold
+/// along at least one diagonal. A finder is concentric squares, so every line through
+/// its centre sees the ratio; a stroke of text or a run of data modules that happens to
+/// satisfy both axes rarely satisfies a diagonal too. Under perspective one diagonal
+/// can be squeezed past the tolerance, hence "either".
+fn cross_check_diagonal(bin: &Binary, cx: usize, cy: usize) -> bool {
+    let (w, h) = (bin.width() as i32, bin.height() as i32);
+    let (cx, cy) = (cx as i32, cy as i32);
+    [1i32, -1].into_iter().any(|dir| {
+        // Index i walks the diagonal (dx = +1, dy = dir) with the centre at i = off.
+        let off = if dir > 0 {
+            cx.min(cy)
+        } else {
+            cx.min(h - 1 - cy)
+        };
+        let len = off
+            + if dir > 0 {
+                (w - cx).min(h - cy)
+            } else {
+                (w - cx).min(cy + 1)
+            };
+        walk_run(len, off, |i| {
+            let (x, y) = (cx - off + i, cy + dir * (i - off));
+            bin.dark(x as usize, y as usize)
+        })
+        .and_then(|(counts, _)| found_pattern_cross(counts))
+        .is_some()
+    })
+}
+
 /// Horizontal finder cross-check through row `cy`, returning the refined center-`x`.
 fn cross_check_horizontal(bin: &Binary, cy: usize, start: usize) -> Option<f32> {
     let (counts, end) = walk_run(bin.width() as i32, start as i32, |k| {
@@ -485,6 +522,10 @@ fn find_finders(bin: &Binary) -> Vec<Finder> {
                 let Some(cx) = cross_check_horizontal(bin, cy_row, mid) else {
                     return;
                 };
+                let cx_col = cx.round().clamp(0.0, (w - 1) as f32) as usize;
+                if !cross_check_diagonal(bin, cx_col, cy_row) {
+                    return;
+                }
                 let module = found_pattern_cross(counts).unwrap();
                 add_center(&mut centers, cx, cy, module);
             },
@@ -507,6 +548,10 @@ fn find_finders(bin: &Binary) -> Vec<Finder> {
                 let Some(cy) = cross_check_vertical(bin, cx_col, mid) else {
                     return;
                 };
+                let cy_row = cy.round().clamp(0.0, (h - 1) as f32) as usize;
+                if !cross_check_diagonal(bin, cx_col, cy_row) {
+                    return;
+                }
                 let module = found_pattern_cross(counts).unwrap();
                 add_center(&mut centers, cx, cy, module);
             },
@@ -1444,6 +1489,65 @@ fn snap_dimension(estimate: f32) -> Option<usize> {
     let version = (((estimate - 17.0) / 4.0).round() as i32).clamp(1, 40);
     let dim = 17 + 4 * version as usize;
     (dim >= 21).then_some(dim)
+}
+
+/// Least fraction of the three finders' modules (7×7 each, plus their separators) a
+/// sampled grid must reproduce, and of the two timing tracks' modules that must
+/// alternate, for the grid to be worth the non-planar and corner-sweep recovery. The
+/// finders anchor the projection, so even a badly warped or smeared genuine symbol
+/// reproduces most of them (a curved, motion-blurred can label scores ~0.7 / ~0.8); a
+/// grid built on false finders in print scores ~0.5 on both — chance.
+const MIN_FINDER_MATCH: f32 = 0.6;
+const MIN_TIMING_MATCH: f32 = 0.6;
+
+/// Whether a sampled grid has QR fixed patterns where a QR would: finders (with
+/// separators) at three corners and alternating timing tracks between them.
+fn plausible_grid(matrix: &BitMatrix) -> bool {
+    let dim = matrix.width();
+    if dim < 21 || matrix.height() != dim {
+        return false;
+    }
+    let (mut hit, mut total) = (0u32, 0u32);
+    for (ox, oy) in [(0, 0), (dim - 7, 0), (0, dim - 7)] {
+        for j in 0..8 {
+            for i in 0..8 {
+                // Separator: the row/column of light modules on the symbol side.
+                let (fx, fy) = (ox + i, oy + j);
+                let want = if i < 7 && j < 7 {
+                    finder_module_dark(i, j)
+                } else {
+                    false
+                };
+                let (mx, my) = if ox > 0 {
+                    (fx.wrapping_sub(1), fy)
+                } else {
+                    (fx, fy)
+                };
+                let (mx, my) = if oy > 0 {
+                    (mx, my.wrapping_sub(1))
+                } else {
+                    (mx, my)
+                };
+                if mx >= dim || my >= dim {
+                    continue;
+                }
+                total += 1;
+                hit += u32::from(matrix.get(mx, my) == want);
+            }
+        }
+    }
+    let finder = hit as f32 / total as f32;
+    let (mut hit, mut total) = (0u32, 0u32);
+    for k in 8..dim - 8 {
+        let want = k % 2 == 0;
+        total += 2;
+        hit += u32::from(matrix.get(k, 6) == want) + u32::from(matrix.get(6, k) == want);
+    }
+    let timing = hit as f32 / total as f32;
+    if std::env::var("ANYD_QR_DEBUG").is_ok() {
+        eprintln!("  grid dim={dim} finder={finder:.2} timing={timing:.2}");
+    }
+    finder >= MIN_FINDER_MATCH && timing >= MIN_TIMING_MATCH
 }
 
 /// Whether module `(i, j)` of a 7×7 finder pattern is dark: the outer ring plus the

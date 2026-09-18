@@ -57,6 +57,10 @@ const TEMPLATE_BITS: [bool; 8] = [false, true, false, true, false, true, false, 
 /// measure: a real code scores ≈ 0 (≤ 0.2 blurred and tilted), while text, bars, a
 /// checkerboard, and wrong-radius fits over a real code all score 0.5–1.0.
 const MAX_QUIET_RATIO: f64 = 0.40;
+/// The same ratio applied to an *unrefined* accumulator peak on the reduced search
+/// image, before the hill-climb that costs most of a frame. Looser, because the peak
+/// may sit a few pixels off the true centre.
+const COARSE_QUIET_RATIO: f64 = 0.65;
 /// A bit vector whose fixed template byte is wrong in more than this many of its eight
 /// bits is a bad hypothesis, not a damaged code: the template is not error-corrected,
 /// so it is the one part of the payload that can vouch for the sampling.
@@ -254,7 +258,7 @@ impl EdgeField {
 
         let mut edges = Vec::new();
         if !mags.is_empty() {
-            mags.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            mags.sort_by(|a, b| a.total_cmp(b));
             let p90 = mags[(0.90 * (mags.len() - 1) as f64) as usize];
             let threshold = p90.max(mags[mags.len() - 1] * 0.18);
             for y in 1..h.saturating_sub(1) {
@@ -371,9 +375,17 @@ fn locate_candidates(field: &EdgeField) -> Vec<Candidate> {
         outer += step;
     }
 
-    raw.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    raw.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut out: Vec<Candidate> = Vec::new();
     for cand in raw {
+        // Hill-climbing every accumulator peak is the bulk of a frame's cost, and on
+        // a frame with no code every peak is a coincidence of unrelated edges. One
+        // cheap ring-contrast reading at the raw position (the same test the decoder
+        // applies at full resolution, with slack for the unrefined fit) drops them.
+        let (edge, quiet) = ring_energies(field, cand.cx, cand.cy, cand.scale);
+        if quiet > COARSE_QUIET_RATIO * edge {
+            continue;
+        }
         let cand = refine_candidate(field, cand);
         if cand.score <= 0.0 {
             continue;
@@ -389,7 +401,7 @@ fn locate_candidates(field: &EdgeField) -> Vec<Candidate> {
             break;
         }
     }
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
     out
 }
 
@@ -415,7 +427,7 @@ fn top_local_maxima(
             peaks.push((x, y, s));
         }
     }
-    peaks.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    peaks.sort_by(|a, b| b.2.total_cmp(&a.2));
     let mut out: Vec<(usize, usize, f64)> = Vec::new();
     for p in peaks {
         if out
@@ -804,7 +816,7 @@ fn otsu_split(values: &[f64]) -> (f64, f64) {
         return (values.first().copied().unwrap_or(0.0), 0.0);
     }
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
     let mut prefix = vec![0.0f64; n + 1];
     for (i, &v) in sorted.iter().enumerate() {
@@ -842,7 +854,7 @@ fn rotation_candidates(gray: &Gray, x: &Xform) -> Vec<f64> {
         }
         theta += 1.0;
     }
-    coarse.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    coarse.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut refined: Vec<(f64, f64)> = Vec::new();
     let mut seen: Vec<i64> = Vec::new();
@@ -865,7 +877,7 @@ fn rotation_candidates(gray: &Gray, x: &Xform) -> Vec<f64> {
             break;
         }
     }
-    refined.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    refined.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut out: Vec<f64> = Vec::new();
     for &(t, _) in &refined {
@@ -990,14 +1002,14 @@ fn decode_attempts(samples: &[PositionSample]) -> Vec<Vec<bool>> {
             attempts.push((penalty, bits));
         }
     }
-    attempts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    attempts.sort_by(|a, b| a.0.total_cmp(&b.0));
     attempts.into_iter().map(|(_, b)| b).collect()
 }
 
 fn threshold_candidates(contrasts: &[f64]) -> Vec<f64> {
     let (otsu, _) = otsu_split(contrasts);
     let mut sorted = contrasts.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let mut out = vec![otsu];
     for visible in [56usize, 60, 64, 68, 72, 76, 80, 84, 88, 92] {
         if visible == 0 || visible >= sorted.len() {

@@ -121,6 +121,22 @@ fn scan_with(frame: &GrayFrame<'_>, bin: &BinaryImage, threshold: u8) -> Result<
                 continue;
             };
             let thr = f64::from(threshold);
+            // Every row opens with a RAP's leading bar and closes with the stop module,
+            // so under a true hypothesis the first and last module columns are solid
+            // ink. The dark cloud of an arbitrary frame (this runs on every one) almost
+            // never is — skip it before paying for a full grid sample and decode, up to
+            // 4 × 34 of them per binarization.
+            let solid_rows = (0..h)
+                .filter(|&y| {
+                    [0, w - 1].iter().all(|&x| {
+                        let (px, py) = hom.map_f64(x as f64 + 0.5, y as f64 + 0.5);
+                        sample_bilinear(frame, px, py) <= thr
+                    })
+                })
+                .count();
+            if solid_rows * 4 < h * 3 {
+                continue;
+            }
             let mut matrix = BitMatrix::new(w, h, 1);
             for y in 0..h {
                 for x in 0..w {
@@ -154,4 +170,41 @@ fn shoelace(q: &[(f32, f32); 4]) -> f32 {
         sum += x0 * y1 - x1 * y0;
     }
     sum
+}
+
+#[cfg(all(test, feature = "encode"))]
+mod tests {
+    use crate::codes::pdf417::MicroPdf417Encoder;
+    use crate::output::Encoding;
+    use crate::segment::Segment;
+    use crate::traits::Encode;
+    use alloc::vec;
+
+    /// The sampler skips any hypothesis whose edge columns are not solid ink, so every
+    /// symbol the encoder can produce must have them: the RAP's leading bar on the
+    /// left, the stop module on the right, on every module row.
+    #[test]
+    fn every_variant_has_solid_edge_columns() {
+        let enc = MicroPdf417Encoder::new();
+        let mut seen = 0;
+        for columns in 1..=4usize {
+            for len in [1usize, 5, 12, 25, 40, 70, 110, 150] {
+                let data = vec![b'A' + (len % 26) as u8; len];
+                let Ok(sym) = enc.build_sized(vec![Segment::byte(data)], Some(columns)) else {
+                    continue; // over this column count's capacity
+                };
+                let Ok(Encoding::Matrix(m)) = enc.encode(&sym) else {
+                    panic!("MicroPDF417 encodes to a matrix");
+                };
+                for y in 0..m.height() {
+                    assert!(
+                        m.get(0, y) && m.get(m.width() - 1, y),
+                        "{columns} cols, row {y}"
+                    );
+                }
+                seen += 1;
+            }
+        }
+        assert!(seen >= 12, "only {seen} variants exercised");
+    }
 }

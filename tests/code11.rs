@@ -138,3 +138,33 @@ fn encode_into_matches_encode() {
     );
     assert!(buf.is_empty());
 }
+
+/// Code 11 is printed with wide:narrow ratios from 2:1 to 3:1; a 3:1 symbol must
+/// decode like this crate's canonical 2:1 rows.
+#[test]
+fn decodes_three_to_one_ratio_symbols() {
+    let enc = Code11Encoder::new();
+    let symbol = enc.build(b"123-45", 2).unwrap();
+    let narrow = enc.encode(&symbol).unwrap();
+    // Widen every two-module element to three modules.
+    let mut wide = Vec::new();
+    let row = modules(&narrow);
+    let mut i = 0;
+    while i < row.len() {
+        let mut j = i;
+        while j < row.len() && row[j] == row[i] {
+            j += 1;
+        }
+        let width = if j - i == 2 { 3 } else { j - i };
+        wide.extend(std::iter::repeat_n(row[i], width));
+        i = j;
+    }
+    let mut pattern = anyd::output::LinearPattern::new();
+    pattern.modules = wide;
+    let decoded = Code11Decoder::new()
+        .with_check_count(2)
+        .decode(&Encoding::Linear(pattern))
+        .unwrap();
+    assert_eq!(decoded.segments, symbol.segments);
+    assert_eq!(enc.encode(&decoded).unwrap(), narrow);
+}

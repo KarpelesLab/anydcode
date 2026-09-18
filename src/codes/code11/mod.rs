@@ -387,12 +387,19 @@ fn run_lengths(modules: &[bool]) -> Vec<(bool, usize)> {
 }
 
 /// Rebuild the canonical `1`/`0` module string of a character from its runs,
-/// normalising element widths against the narrowest run.
+/// classifying each element against the narrowest run. Symbols are printed with a
+/// wide:narrow ratio from 2:1 to 3:1, so an element of two or three narrow widths is
+/// wide (two modules in the canonical tables); anything wider is not an element of
+/// this symbology and yields a string that matches no character.
 #[cfg(feature = "decode")]
 fn rebuild_bits(runs: &[(bool, usize)], narrow: usize) -> String {
     let mut s = String::new();
     for &(bar, len) in runs {
-        let width = (len + narrow / 2) / narrow;
+        let width = match (len + narrow / 2) / narrow {
+            1 => 1,
+            2 | 3 => 2,
+            _ => return String::new(),
+        };
         let ch = if bar { '1' } else { '0' };
         for _ in 0..width {
             s.push(ch);

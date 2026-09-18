@@ -166,3 +166,44 @@ fn encode_into_matches_encode() {
         }
     }
 }
+
+/// Re-draw a 2:1 module row with every two-module element widened to `wide` modules.
+fn with_wide_ratio(modules: &[bool], wide: usize) -> Vec<bool> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < modules.len() {
+        let mut j = i;
+        while j < modules.len() && modules[j] == modules[i] {
+            j += 1;
+        }
+        let width = if j - i == 2 { wide } else { j - i };
+        out.extend(std::iter::repeat_n(modules[i], width));
+        i = j;
+    }
+    out
+}
+
+/// ISO/IEC 16388 allows a wide:narrow ratio anywhere from 2:1 to 3:1, and most
+/// generators print 3:1. The decoder must read those, not only this crate's 2:1.
+#[test]
+fn decodes_three_to_one_ratio_symbols() {
+    let enc = Code39Encoder::new();
+    for (data, full_ascii, check) in [
+        (&b"CODE-39"[..], false, false),
+        (b"A", false, true),
+        (b"Hello, World!", true, true),
+    ] {
+        let symbol = enc.build(data, full_ascii, check).unwrap();
+        let narrow = enc.encode(&symbol).unwrap();
+        let mut pattern = anyd::output::LinearPattern::new();
+        pattern.modules = with_wide_ratio(modules(&narrow), 3);
+        let decoded = Code39Decoder::new()
+            .with_full_ascii(full_ascii)
+            .with_check_digit(check)
+            .decode(&Encoding::Linear(pattern))
+            .unwrap();
+        assert_eq!(decoded.segments, symbol.segments);
+        // The ratio is not part of the symbol: it re-encodes to the canonical 2:1 row.
+        assert_eq!(enc.encode(&decoded).unwrap(), narrow);
+    }
+}

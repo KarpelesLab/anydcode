@@ -27,28 +27,63 @@ use alloc::{format, string::String, vec, vec::Vec};
 const MAX_DIGIT_SCORE: f32 = 1.4;
 /// Maximum relative deviation of a guard element from the guard's mean element width.
 const GUARD_TOL: f32 = 0.55;
+/// Light margin (in modules) required on *each* side of a symbol, per variant.
+///
+/// The margins are what separate a real symbol from a look-alike window inside a longer
+/// run sequence, so they scale with how little internal structure the variant has to
+/// vouch for itself. EAN-13/UPC-A carry three guards, a parity-encoded digit and a check
+/// digit; EAN-8 drops the parity digit. UPC-E is the weak one: its start guard plus six
+/// L/G digits are *exactly* the left half of an EAN-13 (every EAN-13 parity pattern is
+/// a valid UPC-E one), and its `010101` end guard matches the EAN-13 centre guard plus
+/// one more bar — so without a margin check, any scanline that reads only the left half
+/// of an EAN-13 (a slanted line leaving the bars early) reports a phantom UPC-E one time
+/// in ten. No symbol element is wider than 4 modules, so demanding more than that after
+/// the end guard rejects every such interior window. The specified quiet zones are 7–11
+/// modules, leaving real symbols ample slack.
+const QUIET_EAN13: f32 = 3.5;
+const QUIET_EAN8: f32 = 4.5;
+const QUIET_UPCE: f32 = 5.0;
+/// A digit's total width may deviate this much (relative) from the mean digit width of
+/// its symbol. Curvature and perspective change the pitch smoothly — a few tens of
+/// percent end to end — while a window over text or another symbology's bars produces
+/// "digits" of wildly unequal width that per-digit normalization would otherwise hide.
+const DIGIT_WIDTH_TOL: f32 = 0.45;
 
 /// Decode every EAN/UPC main variant from one scanline's run widths, trying both scan
 /// directions. Returns the assembled [`Symbol`] for the first variant that validates
 /// (guards, parity and check digit), or `None`.
+///
+/// `edges` must span one scanline from quiet zone to quiet zone: the light margins
+/// outside the first and last edge are taken as given (use [`decode_edges_within`] to
+/// have them checked). A symbol found *inside* the sequence must still be bracketed by
+/// light runs wide enough to be its quiet zones.
 pub fn decode_edges(edges: &[f32]) -> Option<Symbol> {
+    decode_edges_within(edges, f32::INFINITY, f32::INFINITY)
+}
+
+/// [`decode_edges`] with the scanline's measured outer light margins, in pixels: `lead`
+/// before the first edge and `trail` after the last. A symbol that starts at the first
+/// edge (or ends at the last) must find its quiet zone in that margin.
+pub fn decode_edges_within(edges: &[f32], lead: f32, trail: f32) -> Option<Symbol> {
     if edges.len() < 3 {
         return None;
     }
     let forward: Vec<f32> = edges.windows(2).map(|w| w[1] - w[0]).collect();
     let mut reversed = forward.clone();
     reversed.reverse();
-    for widths in [&forward, &reversed] {
-        if let Some(sym) = decode_widths(widths) {
+    for (widths, lead, trail) in [(&forward, lead, trail), (&reversed, trail, lead)] {
+        if let Some(sym) = decode_widths(widths, lead, trail) {
             return Some(sym);
         }
     }
     None
 }
 
-/// Try each main variant against a run-width sequence that starts with a bar.
-fn decode_widths(w: &[f32]) -> Option<Symbol> {
-    let (variant, digits) = [try_ean13(w), try_ean8(w), try_upce(w)]
+/// Try each main variant against a run-width sequence that starts with a bar, bounded by
+/// light margins of `lead` / `trail` pixels.
+fn decode_widths(w: &[f32], lead: f32, trail: f32) -> Option<Symbol> {
+    let m = Margins { w, lead, trail };
+    let (variant, digits) = [try_ean13(&m), try_ean8(&m), try_upce(&m)]
         .into_iter()
         .flatten()
         .next()?;
@@ -124,11 +159,22 @@ fn classify(w: &[f32], left: bool) -> Option<(u8, bool, f32)> {
     best.filter(|&(_, _, s)| s <= MAX_DIGIT_SCORE)
 }
 
+/// Whether the `n` four-run digits starting at `r[first]` all have a total width within
+/// [`DIGIT_WIDTH_TOL`] of their common mean.
+fn digits_even(r: &[f32], first: usize, n: usize) -> bool {
+    let width = |i: usize| r[first + i * 4..first + i * 4 + 4].iter().sum::<f32>();
+    let mean = (0..n).map(width).sum::<f32>() / n as f32;
+    mean > 0.0 && (0..n).all(|i| (width(i) - mean).abs() <= DIGIT_WIDTH_TOL * mean)
+}
+
 /// EAN-13 / UPC-A: 59 runs (start `101`, six left digits, centre `01010`, six right
-/// digits, end `101`). Searches a small start offset for the guard.
-fn try_ean13(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
-    at_offsets(w, 59, |r| {
+/// digits, end `101`), 95 modules.
+fn try_ean13(m: &Margins<'_>) -> Option<(EanVariant, Vec<u8>)> {
+    m.windows(59, 95.0, QUIET_EAN13, |r| {
         if !guard_ok(&r[0..3]) || !guard_ok(&r[27..32]) || !guard_ok(&r[56..59]) {
+            return None;
+        }
+        if !digits_even(r, 3, 6) || !digits_even(r, 32, 6) {
             return None;
         }
         let mut left = [0u8; 6];
@@ -160,10 +206,13 @@ fn try_ean13(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
 }
 
 /// EAN-8: 43 runs (start `101`, four left L digits, centre `01010`, four right digits,
-/// end `101`).
-fn try_ean8(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
-    at_offsets(w, 43, |r| {
+/// end `101`), 67 modules.
+fn try_ean8(m: &Margins<'_>) -> Option<(EanVariant, Vec<u8>)> {
+    m.windows(43, 67.0, QUIET_EAN8, |r| {
         if !guard_ok(&r[0..3]) || !guard_ok(&r[19..24]) || !guard_ok(&r[40..43]) {
+            return None;
+        }
+        if !digits_even(r, 3, 4) || !digits_even(r, 24, 4) {
             return None;
         }
         let mut vals = [0u8; 8];
@@ -186,10 +235,13 @@ fn try_ean8(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
 }
 
 /// UPC-E: 33 runs (start `101`, six L/G digits carrying number-system+check parity, end
-/// guard `010101`).
-fn try_upce(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
-    at_offsets(w, 33, |r| {
+/// guard `010101`), 51 modules.
+fn try_upce(m: &Margins<'_>) -> Option<(EanVariant, Vec<u8>)> {
+    m.windows(33, 51.0, QUIET_UPCE, |r| {
         if !guard_ok(&r[0..3]) || !guard_ok(&r[27..33]) {
+            return None;
+        }
+        if !digits_even(r, 3, 6) {
             return None;
         }
         let mut payload = [0u8; 6];
@@ -211,17 +263,44 @@ fn try_upce(w: &[f32]) -> Option<(EanVariant, Vec<u8>)> {
     })
 }
 
-/// Try `f` on `w[o..o+len]` for a few even start offsets (skipping spurious leading
-/// runs) and return its first success.
-fn at_offsets<F>(w: &[f32], len: usize, f: F) -> Option<(EanVariant, Vec<u8>)>
-where
-    F: Fn(&[f32]) -> Option<(EanVariant, Vec<u8>)>,
-{
-    if w.len() < len {
-        return None;
+/// One scanline's run widths (starting with a bar) and its outer light margins.
+struct Margins<'a> {
+    w: &'a [f32],
+    lead: f32,
+    trail: f32,
+}
+
+impl Margins<'_> {
+    /// Try `f` on every `len`-run window that starts on a bar and is bracketed by light
+    /// runs of at least `quiet` modules (the window spans `modules` modules), returning
+    /// the first success. Searching the whole line, not just its start, is what reads a
+    /// symbol with print or a label edge beside it in the crop; the quiet-zone bracket
+    /// is what keeps that search from matching windows *inside* some other pattern.
+    fn windows<F>(
+        &self,
+        len: usize,
+        modules: f32,
+        quiet: f32,
+        f: F,
+    ) -> Option<(EanVariant, Vec<u8>)>
+    where
+        F: Fn(&[f32]) -> Option<(EanVariant, Vec<u8>)>,
+    {
+        let w = self.w;
+        if w.len() < len {
+            return None;
+        }
+        (0..=w.len() - len).step_by(2).find_map(|o| {
+            let r = &w[o..o + len];
+            let need = quiet * r.iter().sum::<f32>() / modules;
+            let before = if o == 0 { self.lead } else { w[o - 1] };
+            let after = w.get(o + len).copied().unwrap_or(self.trail);
+            if before < need || after < need {
+                return None;
+            }
+            f(r)
+        })
     }
-    let max_off = (w.len() - len).min(6);
-    (0..=max_off).step_by(2).find_map(|o| f(&w[o..o + len]))
 }
 
 /// Minimum scanlines that must agree on a value before it is reported. A genuine
@@ -242,7 +321,7 @@ const DOMINANCE: usize = 2;
 pub fn scan(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Option<Symbol> {
     let mut tally: Vec<(String, usize, Symbol)> = Vec::new();
     for cand in scan_edges(frame, opts) {
-        let Some(sym) = decode_edges(&cand.edges) else {
+        let Some(sym) = decode_edges_within(&cand.edges, cand.lead_px, cand.trail_px) else {
             continue;
         };
         let key = format!("{:?}|{}", sym.symbology, sym.text().unwrap_or_default());

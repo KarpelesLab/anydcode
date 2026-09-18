@@ -415,3 +415,42 @@ fn kanji_roundtrips_and_rejects_bad_trail_byte() {
     let bad = vec![Segment::kanji(vec![0x82, 0x00])];
     assert!(MicroQrEncoder::new().build(bad, MicroEcLevel::L).is_err());
 }
+
+/// M1's two EC codewords are error *detection* only (ISO/IEC 18004 Table 9: p = 2,
+/// no correction). Using them to correct turned ~2.6% of two-module damage into a
+/// confidently wrong payload; every one- and two-module error must be detected.
+#[test]
+fn m1_detects_errors_and_never_miscorrects() {
+    let enc = MicroQrEncoder::new();
+    let sym = enc
+        .build(
+            vec![Segment::numeric(b"12345".to_vec())],
+            MicroEcLevel::Detection,
+        )
+        .unwrap();
+    let Encoding::Matrix(clean) = enc.encode(&sym).unwrap() else {
+        panic!("expected matrix");
+    };
+    let data_modules: Vec<(usize, usize)> = (1..11)
+        .flat_map(|y| (1..11).map(move |x| (x, y)))
+        .filter(|&(x, y)| x > 8 || y > 8)
+        .collect();
+    assert_eq!(data_modules.len(), 36);
+    for (i, &a) in data_modules.iter().enumerate() {
+        for &b in &data_modules[i..] {
+            let mut m = clean.clone();
+            for (x, y) in [a, b] {
+                let v = m.get(x, y);
+                m.set(x, y, !v);
+            }
+            if a == b {
+                continue; // flipped twice: the clean symbol
+            }
+            let got = MicroQrDecoder::new().decode(&Encoding::Matrix(m));
+            assert!(got.is_err(), "damage at {a:?}+{b:?} decoded as {got:?}");
+        }
+        let mut m = clean.clone();
+        m.set(a.0, a.1, !clean.get(a.0, a.1));
+        assert!(MicroQrDecoder::new().decode(&Encoding::Matrix(m)).is_err());
+    }
+}

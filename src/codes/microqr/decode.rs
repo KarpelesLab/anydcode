@@ -118,6 +118,12 @@ fn deinterleave_and_correct(
     }
 
     let corrected = gf::decode(&block, params.ec_cw).ok_or(Error::ErrorCorrectionFailed)?;
+    // M1's two EC codewords detect errors but must not correct them (ISO/IEC 18004
+    // Table 9: p = 2): with so little redundancy a "correction" of multi-codeword
+    // damage lands on a wrong codeword a few percent of the time.
+    if ec == MicroEcLevel::Detection && corrected != block {
+        return Err(Error::ErrorCorrectionFailed);
+    }
 
     // Rebuild content bits from the corrected data codewords.
     let mut out = Vec::with_capacity(params.data_cw * 8);

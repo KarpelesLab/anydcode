@@ -234,21 +234,16 @@ fn postcode_to_int(pc: &[u8; 9]) -> Result<u128> {
     Ok(b + offset)
 }
 
-/// Recover the 9-character post-code field from its integer value.
-fn int_to_postcode(value: u128) -> [u8; 9] {
+/// Recover the 9-character post-code field from its integer value, or `None` if
+/// the value lies beyond the last post-code format's span.
+fn int_to_postcode(value: u128) -> Option<[u8; 9]> {
     if value == 0 {
-        return *b"XY11     ";
+        return Some(*b"XY11     ");
     }
-    let mut t = 7;
-    let mut bval = 0u128;
-    for cand in 1..=6 {
+    let (t, mut bval) = (1..=6).find_map(|cand| {
         let (offset, span) = postcode_offset(cand);
-        if value >= offset && value < offset + span {
-            t = cand;
-            bval = value - offset;
-            break;
-        }
-    }
+        (value >= offset && value < offset + span).then(|| (cand, value - offset))
+    })?;
     let pattern = POSTCODE_FORMAT[t - 1];
     let mut pc = [b' '; 9];
     for i in (0..9).rev() {
@@ -268,7 +263,7 @@ fn int_to_postcode(value: u128) -> [u8; 9] {
             _ => pc[i] = b' ',
         }
     }
-    pc
+    Some(pc)
 }
 
 /// Build an "invalid post code" error.
@@ -376,7 +371,11 @@ pub(super) fn encode(source: &[u8]) -> Result<Vec<BarState>> {
     let mut data = to_data_numbers(cdv, kind);
     let check = rs_check(&data, kind);
     data[kind.data_top + 1..].copy_from_slice(&check);
+    Ok(numbers_to_bars(data, kind))
+}
 
+/// Render the data + check numbers as bars.
+fn numbers_to_bars(mut data: Vec<u8>, kind: Kind) -> Vec<BarState> {
     // Numbers → symbols (even table for the base-30 numbers, odd otherwise).
     for slot in data.iter_mut().take(kind.data_step + 1) {
         *slot = SYMBOL_EVEN[*slot as usize];
@@ -407,7 +406,7 @@ pub(super) fn encode(source: &[u8]) -> Result<Vec<BarState>> {
             e <<= 1;
         }
     }
-    Ok(bars)
+    bars
 }
 
 /// Decode a Mailmark bar sequence (66 or 78 bars) into its canonical field
@@ -484,7 +483,8 @@ pub(super) fn decode(bars: &[BarState]) -> Result<(PostalVariant, Vec<u8>)> {
     cdv /= kind.item_mul;
     let item_id = cdv % 100_000_000;
     cdv /= 100_000_000;
-    let postcode = int_to_postcode(cdv);
+    let postcode = int_to_postcode(cdv)
+        .ok_or_else(|| Error::undecodable("Mailmark post code value out of range"))?;
 
     // Rebuild the canonical field string.
     let mut out = Vec::with_capacity(kind.length);
@@ -504,4 +504,54 @@ fn push_fixed(out: &mut Vec<u8>, value: u128, width: usize) {
         out.push(b'0');
     }
     out.extend_from_slice(text.as_bytes());
+}
+
+#[cfg(all(test, feature = "encode", feature = "decode"))]
+mod tests {
+    use super::*;
+
+    /// The data numbers span more Consolidated Data Values than the fields do: the
+    /// top of the range carries a post-code integer past the last format's span,
+    /// which used to index out of `POSTCODE_FORMAT`.
+    #[test]
+    fn oversized_cdv_is_rejected_not_panicking() {
+        for length in [22, 26] {
+            let kind = Kind::from_length(length);
+            let mut data = vec![0u8; kind.data_top + 1 + kind.check_count];
+            data[..=kind.data_step].fill(29);
+            data[kind.data_step + 1..=kind.data_top].fill(31);
+            let check = rs_check(&data, kind);
+            data[kind.data_top + 1..].copy_from_slice(&check);
+            assert!(decode(&numbers_to_bars(data, kind)).is_err());
+        }
+    }
+
+    /// Any data numbers with valid check numbers either fail to decode or decode to
+    /// a field string that renders the very same bars.
+    #[test]
+    fn arbitrary_valid_numbers_decode_losslessly() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n) as u8
+        };
+        let mut accepted = 0;
+        for round in 0..2000 {
+            let kind = Kind::from_length(if round % 2 == 0 { 22 } else { 26 });
+            let mut data = vec![0u8; kind.data_top + 1 + kind.check_count];
+            for (j, slot) in data.iter_mut().take(kind.data_top + 1).enumerate() {
+                *slot = next(if j <= kind.data_step { 30 } else { 32 });
+            }
+            let check = rs_check(&data, kind);
+            data[kind.data_top + 1..].copy_from_slice(&check);
+            let bars = numbers_to_bars(data, kind);
+            if let Ok((_, text)) = decode(&bars) {
+                accepted += 1;
+                assert_eq!(encode(&text).unwrap(), bars);
+            }
+        }
+        assert!(accepted > 0);
+    }
 }

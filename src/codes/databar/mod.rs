@@ -16,8 +16,8 @@
 //! - **GS1 DataBar Expanded** ([`Symbology::DataBarExpanded`], RSS Expanded): a GS1
 //!   element string of Application Identifier data, encoded with the general-purpose
 //!   compaction (§7.2.5) into a variable number of finder patterns and symbol
-//!   characters. Encoding methods 1 and 2 are produced; the weight/date/price
-//!   shortcut methods 3–14 are not (a spec-valid choice; see the `expanded` module).
+//!   characters. All fourteen encodation methods are produced and read, including
+//!   the weight/date/price shortcut methods 3–14 (see the `expanded` module).
 //!
 //! - **GS1 DataBar Stacked** ([`Symbology::DataBarStacked`], RSS-14 Stacked): the
 //!   two-row form of DataBar-14. The left half (elements 0..23 of the linear

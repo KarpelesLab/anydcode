@@ -5,19 +5,19 @@
 //! *general-purpose* encodation of ISO/IEC 24724:2011 §7.2.5, split into 12-bit
 //! symbol characters, and drawn with a variable number of finder patterns.
 //!
-//! ## Scope
-//! Only the two general-purpose encodation methods are produced:
+//! ## Encodation methods
+//! All fourteen encodation methods of §7.2.5.4 are produced and read:
 //! - **Method 1** (`"1"`): data beginning with AI `(01)` + 14-digit GTIN — the
 //!   GTIN is packed into a compressed data field, the remainder into the general
 //!   field.
 //! - **Method 2** (`"00"`): any other data — the whole element string goes into the
 //!   general field.
-//!
-//! The optional application-specific compaction methods 3–14 (variable weight /
-//! price / date shortcuts, §7.2.5.4) are *not* emitted. They are pure size
-//! optimisations for specific AI combinations; omitting them yields a slightly
-//! longer but fully spec-valid symbol, and keeps the encoder ↔ decoder pair exactly
-//! invertible. The stacked variant (`DataBarExpandedStacked`) is out of scope.
+//! - **Methods 3–14** (`"0100"`, `"0101"`, `"01100"`, `"01101"`, `"0111000"` –
+//!   `"0111111"`): the variable-weight / price / date shortcuts for `(01)` GTINs with
+//!   indicator digit 9 followed by `(310x)`, `(320x)`, `(392x)` or `(393x)` (and an
+//!   optional `(11)`/`(13)`/`(15)`/`(17)` date). The method is chosen exactly as the
+//!   standard prescribes (verified bit-for-bit against zint), so a canonical element
+//!   string always maps to the same symbol.
 //!
 //! ## Payload representation
 //! The element string is stored as a single [`Segment::byte`] in *reduced* form:
@@ -266,26 +266,50 @@ fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> 
     let mut bits: Vec<bool> = Vec::new();
     bits.push(false); // linkage flag: standalone (non-composite)
 
-    // Method 1 applies to "(01) + GTIN14 [+ more]"; everything else uses method 2.
-    let method1 = reduced.len() >= 16 && reduced[0] == b'0' && reduced[1] == b'1';
-    let (var_pos, read_posn) = if method1 {
-        push_bits(&mut bits, 4, 3); // "1" + 2 placeholder length bits
-        (2usize, 16usize)
-    } else {
-        push_bits(&mut bits, 0, 4); // "00" + 2 placeholder length bits
-        (3usize, 0usize)
+    let method = select_method(reduced);
+    // Header: the method bits, with two placeholder variable-length bits where the
+    // method has them; `read_posn` is where the general field starts.
+    let (var_pos, read_posn) = match method {
+        Method::General => {
+            push_bits(&mut bits, 0, 4); // "00" + 2 placeholder length bits
+            (Some(3usize), 0usize)
+        }
+        Method::Gtin => {
+            push_bits(&mut bits, 4, 3); // "1" + 2 placeholder length bits
+            (Some(2), 16)
+        }
+        Method::Weight3103 => {
+            push_bits(&mut bits, 0b0100, 4);
+            (None, 26)
+        }
+        Method::Weight320x => {
+            push_bits(&mut bits, 0b0101, 4);
+            (None, 26)
+        }
+        Method::Price => {
+            push_bits(&mut bits, 0b01100, 5);
+            push_bits(&mut bits, 0, 2); // placeholder length bits
+            (Some(6), 20)
+        }
+        Method::PriceCurrency => {
+            push_bits(&mut bits, 0b01101, 5);
+            push_bits(&mut bits, 0, 2); // placeholder length bits
+            (Some(6), 23)
+        }
+        Method::WeightDate(m) => {
+            push_bits(&mut bits, 0b0111, 4);
+            push_bits(&mut bits, (m - 7) as u32, 3);
+            (None, reduced.len())
+        }
     };
 
-    // The compressed-field source must be numeric.
-    for &b in &reduced[..read_posn] {
-        if !b.is_ascii_digit() {
+    if method != Method::General {
+        // The compressed-field source must be numeric.
+        if !reduced[..16].iter().all(u8::is_ascii_digit) {
             return Err(Error::invalid_data(
                 "DataBar Expanded: compressed data field requires digits",
             ));
         }
-    }
-
-    if method1 {
         // Validate the (01) GTIN check digit; the encoder drops it and the decoder
         // recomputes it, so an incorrect one would break the round-trip.
         let check = gtin_check_digit(&reduced[2..15]);
@@ -295,12 +319,48 @@ fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> 
                 check as char, reduced[15] as char
             )));
         }
-        push_bits(&mut bits, (reduced[2] - b'0') as u32, 4); // indicator digit
+        if method == Method::Gtin {
+            push_bits(&mut bits, (reduced[2] - b'0') as u32, 4); // indicator digit
+        }
+        // Methods 3–14 imply indicator digit 9; all pack the 12 body digits.
         let mut k = 3;
         while k < 15 {
             push_bits(&mut bits, parse3(&reduced[k..k + 3]), 10);
             k += 3;
         }
+    }
+
+    match method {
+        Method::Weight3103 => push_bits(&mut bits, parse_digits(&reduced[20..26]), 15),
+        Method::Weight320x => {
+            // (3202) weights 0..=9999 as is; (3203) weights 0..=22767 offset by 10000.
+            let mut weight = parse_digits(&reduced[20..26]);
+            if reduced[19] == b'3' {
+                weight += 10_000;
+            }
+            push_bits(&mut bits, weight, 15);
+        }
+        Method::Price => push_bits(&mut bits, (reduced[19] - b'0') as u32, 2),
+        Method::PriceCurrency => {
+            push_bits(&mut bits, (reduced[19] - b'0') as u32, 2);
+            push_bits(&mut bits, parse3(&reduced[20..23]), 10);
+        }
+        Method::WeightDate(_) => {
+            // 20 bits: the AI's last digit (decimal point position) times 100 000
+            // plus the five-digit weight; 16 bits: the date, or 38400 for none.
+            let weight = (reduced[19] - b'0') as u32 * 100_000 + parse_digits(&reduced[21..26]);
+            push_bits(&mut bits, weight, 20);
+            let date = if reduced.len() == 34 {
+                let yy = parse_digits(&reduced[28..30]);
+                let mm = parse_digits(&reduced[30..32]);
+                let dd = parse_digits(&reduced[32..34]);
+                yy * 384 + (mm - 1) * 32 + dd
+            } else {
+                NO_DATE
+            };
+            push_bits(&mut bits, date, 16);
+        }
+        Method::General | Method::Gtin => {}
     }
 
     let (mode, last_digit) = if read_posn < reduced.len() {
@@ -331,8 +391,10 @@ fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> 
     }
 
     // Patch the variable-length bit field (§7.2.5.5).
-    bits[var_pos] = symbol_characters & 1 != 0;
-    bits[var_pos + 1] = symbol_characters > 14;
+    if let Some(var_pos) = var_pos {
+        bits[var_pos] = symbol_characters & 1 != 0;
+        bits[var_pos + 1] = symbol_characters > 14;
+    }
 
     // Padding (§7.2.5.5.4): a numeric "0000" flag if still numeric, then "00100"s.
     let target = 12 * (symbol_characters - 1);
@@ -370,6 +432,98 @@ fn finalize_sym_chars(bp: usize, characters_per_row: usize) -> usize {
 /// Parse 3 ASCII digits into a value 0..=999.
 fn parse3(d: &[u8]) -> u32 {
     (d[0] - b'0') as u32 * 100 + (d[1] - b'0') as u32 * 10 + (d[2] - b'0') as u32
+}
+
+/// Parse a run of ASCII digits (at most nine) into its value.
+fn parse_digits(d: &[u8]) -> u32 {
+    d.iter().fold(0, |acc, &c| acc * 10 + (c - b'0') as u32)
+}
+
+/// The 16-bit date field value meaning "no date" in methods 7–14.
+const NO_DATE: u32 = 38400;
+
+/// The encodation method of ISO/IEC 24724:2011 §7.2.5.4 for a reduced element string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Method {
+    /// Method 2 (`"00"`): everything in the general field.
+    General,
+    /// Method 1 (`"1"`): compressed `(01)` GTIN, remainder in the general field.
+    Gtin,
+    /// Method 3 (`"0100"`): `(01)` indicator 9 + `(3103)` weight ≤ 32.767 kg.
+    Weight3103,
+    /// Method 4 (`"0101"`): `(01)` indicator 9 + `(3202)` ≤ 99.99 lb or `(3203)` ≤ 22.767 lb.
+    Weight320x,
+    /// Method 5 (`"01100"`): `(01)` indicator 9 + `(392x)` price, remainder general.
+    Price,
+    /// Method 6 (`"01101"`): `(01)` indicator 9 + `(393x)` currency + price, remainder general.
+    PriceCurrency,
+    /// Methods 7–14 (`"0111xxx"`): `(01)` indicator 9 + `(310x)`/`(320x)` weight and an
+    /// optional `(11)`/`(13)`/`(15)`/`(17)` date, nothing else.
+    WeightDate(u8),
+}
+
+/// Choose the encodation method for `reduced` exactly as §7.2.5.4 prescribes: the
+/// most specific compressed form whose field constraints the data satisfies, else
+/// the GTIN method, else the general method.
+fn select_method(reduced: &[u8]) -> Method {
+    let len = reduced.len();
+    if len < 16 || &reduced[..2] != b"01" {
+        return Method::General;
+    }
+    // Methods 3–14 require indicator digit 9 and a following (3xxx) AI. (A non-digit
+    // in the GTIN is rejected by the caller whichever GTIN method is picked.)
+    if len < 20 || reduced[2] != b'9' || reduced[16] != b'3' {
+        return Method::Gtin;
+    }
+    let ai = &reduced[17..20];
+    match ai {
+        // (310x) / (320x): six-digit weight, at most five significant digits.
+        [b'1' | b'2', b'0', x] if x.is_ascii_digit() => {
+            let weight_ok =
+                len >= 26 && reduced[20] == b'0' && reduced[20..26].iter().all(u8::is_ascii_digit);
+            if !weight_ok {
+                return Method::Gtin;
+            }
+            let weight = parse_digits(&reduced[20..26]);
+            if len == 26 {
+                if ai == b"103" && weight <= 32_767 {
+                    return Method::Weight3103;
+                }
+                if (ai == b"202" && weight <= 9_999) || (ai == b"203" && weight <= 22_767) {
+                    return Method::Weight320x;
+                }
+            }
+            let base = if ai[0] == b'1' { 7 } else { 8 };
+            if len == 26 {
+                return Method::WeightDate(base);
+            }
+            if len == 34 && reduced[26] == b'1' && reduced[28..34].iter().all(u8::is_ascii_digit) {
+                let mm = parse_digits(&reduced[30..32]);
+                let dd = parse_digits(&reduced[32..34]);
+                let date_ok = (1..=12).contains(&mm) && dd <= 31;
+                let offset = match reduced[27] {
+                    b'1' => Some(0),
+                    b'3' => Some(2),
+                    b'5' => Some(4),
+                    b'7' => Some(6),
+                    _ => None,
+                };
+                if let (true, Some(offset)) = (date_ok, offset) {
+                    return Method::WeightDate(base + offset);
+                }
+            }
+            Method::Gtin
+        }
+        // (392x) price: any general-field content may follow.
+        [b'9', b'2', b'0'..=b'3'] => Method::Price,
+        // (393x) three-digit ISO 4217 currency code, then the price.
+        [b'9', b'3', b'0'..=b'3']
+            if len >= 23 && reduced[20..23].iter().all(u8::is_ascii_digit) =>
+        {
+            Method::PriceCurrency
+        }
+        _ => Method::Gtin,
+    }
 }
 
 // ======== symbol-character widths, checksum & layout ========
@@ -637,20 +791,65 @@ fn decode_binary(bits: &[bool]) -> Result<Vec<u8>> {
     }
 
     let mut out = Vec::new();
-    let start = if bits[1] {
-        // Method 1: "1" header, then compressed (01)+GTIN14 field.
-        if size < 48 {
-            return Err(Error::undecodable(
-                "DataBar Expanded: truncated compressed GTIN field",
-            ));
-        }
-        let indicator = read_bits(bits, 4, 4);
+    // Header (after the linkage flag): "1" method 1; "00" method 2; "0100"/"0101"
+    // methods 3/4; "01100"/"01101" (+2 length bits) methods 5/6; "0111xxx" 7–14.
+    let (method, header_len) = if bits[1] {
+        (Method::Gtin, 4)
+    } else if !bits[2] {
+        (Method::General, 5)
+    } else if size < 8 {
+        return Err(Error::undecodable("DataBar Expanded: truncated header"));
+    } else if !bits[3] {
+        (
+            if bits[4] {
+                Method::Weight320x
+            } else {
+                Method::Weight3103
+            },
+            5,
+        )
+    } else if !bits[4] {
+        (
+            if bits[5] {
+                Method::PriceCurrency
+            } else {
+                Method::Price
+            },
+            8,
+        )
+    } else {
+        (Method::WeightDate(7 + read_bits(bits, 5, 3) as u8), 8)
+    };
+    // Fixed-field lengths after the header: the compressed GTIN body (40 bits, plus a
+    // 4-bit indicator digit for method 1) and each method's own fields.
+    let fixed = match method {
+        Method::General => 0,
+        Method::Gtin => 44,
+        Method::Weight3103 | Method::Weight320x => 55,
+        Method::Price => 42,
+        Method::PriceCurrency => 52,
+        Method::WeightDate(_) => 76,
+    };
+    if size < header_len + fixed {
+        return Err(Error::undecodable(
+            "DataBar Expanded: truncated compressed data field",
+        ));
+    }
+    let mut pos = header_len;
+
+    if method != Method::General {
+        let indicator = if method == Method::Gtin {
+            let v = read_bits(bits, pos, 4);
+            pos += 4;
+            v
+        } else {
+            9
+        };
         if indicator > 9 {
             return Err(Error::undecodable("DataBar Expanded: bad indicator digit"));
         }
         let mut body = Vec::with_capacity(13);
         body.push(b'0' + indicator as u8);
-        let mut pos = 8;
         for _ in 0..4 {
             let v = read_bits(bits, pos, 10);
             if v > 999 {
@@ -658,26 +857,95 @@ fn decode_binary(bits: &[bool]) -> Result<Vec<u8>> {
                     "DataBar Expanded: bad compressed digits",
                 ));
             }
-            body.push(b'0' + (v / 100) as u8);
-            body.push(b'0' + (v / 10 % 10) as u8);
-            body.push(b'0' + (v % 10) as u8);
+            push_decimal(&mut body, v, 3);
             pos += 10;
         }
         let check = gtin_check_digit(&body);
         out.extend_from_slice(b"01");
         out.extend_from_slice(&body);
         out.push(check);
-        48
-    } else if !bits[2] {
-        5 // Method 2: "00" header, no compressed field.
-    } else {
-        return Err(Error::Unsupported {
-            what: "GS1 DataBar Expanded encoding methods 3-14",
-        });
-    };
+    }
 
-    parse_general_field(bits, start, &mut out)?;
+    match method {
+        Method::Weight3103 => {
+            let weight = read_bits(bits, pos, 15);
+            pos += 15;
+            out.extend_from_slice(b"3103");
+            push_decimal(&mut out, weight, 6);
+        }
+        Method::Weight320x => {
+            let weight = read_bits(bits, pos, 15);
+            pos += 15;
+            if weight < 10_000 {
+                out.extend_from_slice(b"3202");
+                push_decimal(&mut out, weight, 6);
+            } else {
+                out.extend_from_slice(b"3203");
+                push_decimal(&mut out, weight - 10_000, 6);
+            }
+        }
+        Method::Price | Method::PriceCurrency => {
+            out.extend_from_slice(if method == Method::Price {
+                b"392"
+            } else {
+                b"393"
+            });
+            out.push(b'0' + read_bits(bits, pos, 2) as u8);
+            pos += 2;
+            if method == Method::PriceCurrency {
+                let currency = read_bits(bits, pos, 10);
+                pos += 10;
+                if currency > 999 {
+                    return Err(Error::undecodable("DataBar Expanded: bad currency code"));
+                }
+                push_decimal(&mut out, currency, 3);
+            }
+        }
+        Method::WeightDate(m) => {
+            let weight = read_bits(bits, pos, 20);
+            pos += 20;
+            let date = read_bits(bits, pos, 16);
+            pos += 16;
+            if weight >= 1_000_000 || date > NO_DATE {
+                return Err(Error::undecodable(
+                    "DataBar Expanded: bad weight or date field",
+                ));
+            }
+            out.extend_from_slice(if m % 2 == 1 { b"310" } else { b"320" });
+            out.push(b'0' + (weight / 100_000) as u8);
+            push_decimal(&mut out, weight % 100_000, 6);
+            if date != NO_DATE {
+                let month = date % 384 / 32;
+                if month > 11 {
+                    return Err(Error::undecodable("DataBar Expanded: bad date field"));
+                }
+                out.extend_from_slice(match m {
+                    7 | 8 => b"11",
+                    9 | 10 => b"13",
+                    11 | 12 => b"15",
+                    _ => b"17",
+                });
+                push_decimal(&mut out, date / 384, 2);
+                push_decimal(&mut out, month + 1, 2);
+                push_decimal(&mut out, date % 32, 2);
+            }
+        }
+        Method::General | Method::Gtin => {}
+    }
+
+    parse_general_field(bits, pos, &mut out)?;
     Ok(out)
+}
+
+/// Append `value` as exactly `digits` ASCII digits, zero padded.
+fn push_decimal(out: &mut Vec<u8>, value: u32, digits: usize) {
+    let start = out.len();
+    out.resize(start + digits, b'0');
+    let mut v = value;
+    for slot in out[start..].iter_mut().rev() {
+        *slot = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
 }
 
 /// Decode the general field from `start`, appending characters to `out`.

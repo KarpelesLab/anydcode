@@ -295,3 +295,97 @@ fn decoder_never_panics_on_garbage() {
         }
     }
 }
+
+/// `zint -b DOTCODE -d Ba` (13 x 10). No plain mask lights this symbol's edges well
+/// enough, so zint settles on a corner-forced mask (4-7): the six corner dots are lit
+/// over whatever the check words put there, and Reed-Solomon repairs them on reading.
+#[rustfmt::skip]
+const ZINT_BA_FORCED_CORNERS: &[&str] = &[
+    "1000001010101",
+    "0101010000000",
+    "0000100000001",
+    "0100010101010",
+    "1010100000101",
+    "0101000101000",
+    "0010001000100",
+    "0001000001000",
+    "1000100010101",
+    "0100010101010",
+];
+
+#[test]
+fn matches_zint_forced_corner_mask() {
+    let mut m = anyd::output::BitMatrix::new(13, 10, 3);
+    for (y, row) in ZINT_BA_FORCED_CORNERS.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x, y, c == b'1');
+        }
+    }
+    let reference = Encoding::Matrix(m);
+    let decoded = DotCodeDecoder::new().decode(&reference).unwrap();
+    assert_eq!(decoded.payload_bytes(), b"Ba");
+    let SymbolMeta::DotCode(meta) = &decoded.meta else {
+        panic!("expected DotCodeMeta");
+    };
+    assert!((4..=7).contains(&meta.mask), "mask {}", meta.mask);
+    // Both the decoded symbol and a fresh build reproduce zint's dots exactly.
+    let enc = DotCodeEncoder::new();
+    assert_eq!(enc.encode(&decoded).unwrap(), reference);
+    let built = enc.build_bytes(b"Ba").unwrap();
+    assert_eq!(enc.encode(&built).unwrap(), reference);
+}
+
+#[test]
+fn corrects_damaged_dots() {
+    // A flipped dot turns its 5-of-9 pattern into an invalid one: an erasure. A
+    // symbol with `nc` check codewords recovers from `nc` erasures, so any `nc / 2`
+    // flipped dots (each spoiling at most one codeword) must always be repaired.
+    let mut seed = 0xD07C_0DE0_EC00_0001u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for payload in [
+        &b"A"[..],
+        b"DotCode 2026",
+        b"0123456789012345678901234567890123456789",
+        &[0x80, 0xFF, 0x00, 0x7F, 0xC3, 0xA9],
+        &[b'x'; 400],
+    ] {
+        let symbol = enc.build_bytes(payload).unwrap();
+        let SymbolMeta::DotCode(meta) = &symbol.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        let nc = 3 + meta.codewords.len() / 2;
+        // Interleaved blocks (long messages) each hold a share of the check words.
+        let blocks = (meta.codewords.len() + 1 + nc).div_ceil(112);
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("expected matrix");
+        };
+        let (w, h) = (clean.width(), clean.height());
+        for _ in 0..20 {
+            let mut m = clean.clone();
+            for _ in 0..(nc / blocks - 1) / 2 {
+                let (x, y) = loop {
+                    let (x, y) = ((next() % w as u64) as usize, (next() % h as u64) as usize);
+                    if (x + y) % 2 == 0 {
+                        break (x, y);
+                    }
+                };
+                let v = m.get(x, y);
+                m.set(x, y, !v);
+            }
+            let damaged = Encoding::Matrix(m);
+            let decoded = dec.decode(&damaged).unwrap();
+            assert_eq!(decoded.payload_bytes(), payload);
+            // Re-encoding yields the pristine symbol, not the damaged one (unless the
+            // damage is exactly what a corner-forced mask would have produced).
+            let again = enc.encode(&decoded).unwrap();
+            assert!(again == Encoding::Matrix(clean.clone()) || again == damaged);
+        }
+    }
+}

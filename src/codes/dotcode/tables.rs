@@ -70,9 +70,60 @@ pub(crate) fn is_corner(column: usize, row: usize, width: usize, height: usize) 
     (column == width - 2 && row == height - 1) || (column == width - 1 && row == height - 2)
 }
 
+/// Row-major grid indices of the six reserved corner dots.
+pub(crate) fn corner_indices(width: usize, height: usize) -> [usize; 6] {
+    if height & 1 == 1 {
+        [
+            0,
+            width - 2,
+            width * 2 - 1,
+            (height - 1) * width - 1,
+            (height - 1) * width,
+            height * width - 2,
+        ]
+    } else {
+        [
+            0,
+            width - 1,
+            (height - 2) * width,
+            (height - 1) * width - 1,
+            (height - 1) * width + 1,
+            height * width - 2,
+        ]
+    }
+}
+
+/// Dots needed for `data_length` data codewords: the two mask bits plus nine per data
+/// and check codeword (`3 + data_length / 2` check codewords).
+pub(crate) fn min_dots_for(data_length: usize) -> usize {
+    9 * (data_length + 3 + data_length / 2) + 2
+}
+
+/// The number of data codewords a `width × height` symbol carries: the most that
+/// fit, since an encoder turns every spare group of dots that can hold another
+/// codeword into a pad codeword. `None` if not even one fits.
+pub(crate) fn data_length_for_size(width: usize, height: usize) -> Option<usize> {
+    let n_dots = (width * height) / 2;
+    (1..).take_while(|&dl| min_dots_for(dl) <= n_dots).last()
+}
+
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
+
+    #[test]
+    fn corner_indices_are_the_corner_cells() {
+        for (w, h) in [(6usize, 5usize), (5, 6), (21, 14), (14, 21), (200, 199)] {
+            let mut expected: Vec<usize> = (0..h)
+                .flat_map(|r| (0..w).map(move |c| (c, r)))
+                .filter(|&(c, r)| (c + r) % 2 == 0 && is_corner(c, r, w, h))
+                .map(|(c, r)| r * w + c)
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(corner_indices(w, h).to_vec(), expected, "{w}x{h}");
+        }
+    }
 
     #[test]
     fn patterns_are_distinct_and_9bit() {

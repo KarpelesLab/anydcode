@@ -27,24 +27,26 @@
 //! ## Lossless round-trip
 //!
 //! [`DotCodeMeta`] pins the exact **unmasked data codewords** (post-padding),
-//! the symbol `width`/`height`, and the data `mask` (`0..=3`). The encoder renders
+//! the symbol `width`/`height`, and the data `mask` (`0..=7`). The encoder renders
 //! straight from these — applying the mask, appending the Reed–Solomon check words,
 //! and folding — so `encode(decode(x)) == x` byte-for-byte regardless of how the
 //! same payload could otherwise have been encoded. The payload [`Segment`]s carried
 //! alongside are a human-readable reconstruction and are not consulted on re-encode.
 //!
+//! ## Masks and error correction
+//!
+//! Mask selection follows the reference scoring: the best of masks `0..=3`, and when
+//! even that scores poorly (typically an unlit edge, which would hide the symbol's
+//! extent) the best of masks `4..=7` — the same four with the six corner dots forced
+//! lit, the overwritten dots being left to error correction. The decoder corrects
+//! errors and erasures (a dot group that is no valid pattern) with the GF(113)
+//! Reed–Solomon code, per interleaved block.
+//!
 //! ## Deviations / cut scope
 //!
-//! - **Data-mask corner-forcing** (the masks 4–7 fallback that lights the six corner
-//!   dots) is not applied. Those masks rely on Reed–Solomon correction to repair the
-//!   overwritten dots; the encoder instead always emits a spec-valid mask `0..=3`,
-//!   keeping the round-trip exact. Mask selection otherwise matches the reference
-//!   scoring of masks `0..=3`.
 //! - **Structured Append** and multi-segment **ECI** planning are not implemented in
 //!   the fresh-input builder (single-segment ECI is). Reader-init (FNC3) is decodable
 //!   but not exposed as a build option.
-//! - The decoder verifies the Reed–Solomon check words but does not perform error
-//!   correction (it targets clean, encoder-produced module data).
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`Segment`]: crate::Segment
@@ -92,7 +94,8 @@ pub struct DotCodeMeta {
     pub width: usize,
     /// Symbol height in modules (`5..=200`); `width + height` is odd.
     pub height: usize,
-    /// The data mask, `0..=3`.
+    /// The data mask: `0..=3`, or `4..=7` for the same masks with the six corner
+    /// dots forced lit.
     pub mask: u8,
     /// The unmasked data codewords (post-padding), each `0..=112`.
     pub codewords: Vec<u8>,

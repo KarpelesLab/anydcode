@@ -9,7 +9,7 @@
 use super::rs::rsencode;
 use super::tables::{
     BIN_LATCH, DC_DOT_PATTERNS, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A,
-    UPPER_SHIFT_B, is_corner,
+    UPPER_SHIFT_B, corner_indices, data_length_for_size, is_corner, min_dots_for,
 };
 use super::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
 use crate::error::{Error, Result};
@@ -544,10 +544,6 @@ fn emit_b_char(source: &[u8], pos: usize, out: &mut Vec<u8>) -> usize {
 // Symbol sizing (Annex 5.2.2)
 // ---------------------------------------------------------------------------
 
-fn min_dots_for(data_length: usize) -> usize {
-    9 * (data_length + 3 + data_length / 2) + 2
-}
-
 /// Choose (width, height) for `data_length` codewords, optionally honouring a
 /// user-requested `width`. Port of zint's automatic and user-width sizing.
 pub(crate) fn select_size(data_length: usize, width: Option<usize>) -> Result<(usize, usize)> {
@@ -752,15 +748,23 @@ pub(crate) fn fold_dotstream(stream: &[bool], width: usize, height: usize) -> Ve
 }
 
 /// Render a padded codeword set + geometry + mask into the final dark-module grid.
+/// Masks `4..=7` are masks `0..=3` with the six corner dots forced lit afterwards
+/// (Reed–Solomon absorbs the overwritten dots).
 pub(crate) fn render_grid(data: &[u8], width: usize, height: usize, mask: u8) -> Vec<bool> {
-    let block = build_masked_block(data, mask);
+    let block = build_masked_block(data, mask & 3);
     let mut stream = make_dotstream(&block);
     let n_dots = (height * width) / 2;
     // Pad the tail with lit dots.
     while stream.len() < n_dots {
         stream.push(true);
     }
-    fold_dotstream(&stream, width, height)
+    let mut grid = fold_dotstream(&stream, width, height);
+    if mask >= 4 {
+        for idx in corner_indices(width, height) {
+            grid[idx] = true;
+        }
+    }
+    grid
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +964,18 @@ pub(crate) fn select_mask(data: &[u8], width: usize, height: usize) -> u8 {
             best_mask = m;
         }
     }
+    // A poor best score (typically an unlit edge, which would hide the symbol's
+    // extent from a reader) is re-evaluated with the corner dots forced lit.
+    if high <= ((height * width) / 2) as i64 {
+        for m in 4..8u8 {
+            let grid = render_grid(data, width, height, m);
+            let score = score_array(&grid, height, width);
+            if score >= high {
+                high = score;
+                best_mask = m;
+            }
+        }
+    }
     best_mask
 }
 
@@ -1042,8 +1058,8 @@ pub(crate) fn render_meta(meta: &DotCodeMeta) -> Result<Encoding> {
     if meta.codewords.is_empty() {
         return Err(Error::invalid_parameter("DotCode meta has no codewords"));
     }
-    if meta.mask > 3 {
-        return Err(Error::invalid_parameter("DotCode mask must be 0..=3"));
+    if meta.mask > 7 {
+        return Err(Error::invalid_parameter("DotCode mask must be 0..=7"));
     }
     if !(MIN_SIZE..=MAX_SIZE).contains(&meta.width) || !(MIN_SIZE..=MAX_SIZE).contains(&meta.height)
     {
@@ -1057,11 +1073,12 @@ pub(crate) fn render_meta(meta: &DotCodeMeta) -> Result<Encoding> {
             return Err(Error::invalid_parameter("DotCode codeword out of range"));
         }
     }
-    // Mask bits plus data and check codewords must fit the symbol's dots; folding
-    // would otherwise silently drop the tail.
-    if min_dots_for(meta.codewords.len()) > (meta.width * meta.height) / 2 {
+    // The codewords (padding included) must be exactly what the size carries: more
+    // would be silently dropped by the fold, fewer would leave room that the
+    // standard fills with pad codewords (and a reader sizes the message from it).
+    if data_length_for_size(meta.width, meta.height) != Some(meta.codewords.len()) {
         return Err(Error::capacity(
-            "DotCode codewords do not fit the symbol size",
+            "DotCode codeword count does not match the symbol size",
         ));
     }
     let grid = render_grid(&meta.codewords, meta.width, meta.height, meta.mask);

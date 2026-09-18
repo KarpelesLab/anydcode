@@ -1,18 +1,18 @@
 //! DotCode structural decoding: [`BitMatrix`] → [`Symbol`].
 //!
 //! The decoder reverses the checkerboard fold to recover the dot bit stream, reads
-//! the 2-bit mask header and the 9-bit codeword patterns, un-applies the mask,
-//! verifies the Reed–Solomon check words, and reconstructs the payload
-//! [`Segment`]s. The recovered (unmasked) data codewords plus geometry and mask are
-//! stored in [`DotCodeMeta`] so re-encoding is byte-for-byte identical.
+//! the 2-bit mask header and the 9-bit codeword patterns (an invalid pattern is an
+//! erasure), Reed–Solomon-corrects them, un-applies the mask, and reconstructs the
+//! payload [`Segment`]s. The recovered (unmasked) data codewords plus geometry and
+//! mask are stored in [`DotCodeMeta`] so re-encoding is byte-for-byte identical.
 //!
-//! Corner-forcing (masks 4–7) is not assumed on decode — consistent with the
-//! encoder, which never forces corners (see [`super`]).
+//! Corner-forcing (masks 4–7) is recognised after correction: the six corner dots
+//! are all lit although the corrected codewords alone would not light them.
 
-use super::rs::rsencode;
+use super::rs::rsdecode;
 use super::tables::{
-    BIN_LATCH, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A, UPPER_SHIFT_B,
-    codeword_for_pattern, is_corner,
+    BIN_LATCH, DC_DOT_PATTERNS, FNC1, FNC2, FNC3, LATCH_A, LATCH_B_FROM_A, LATCH_BC, UPPER_SHIFT_A,
+    UPPER_SHIFT_B, codeword_for_pattern, data_length_for_size, is_corner,
 };
 
 use super::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
@@ -58,52 +58,52 @@ impl DotCodeDecoder {
             return Err(Error::undecodable("DotCode symbol too small to hold data"));
         }
 
-        // Mask header (2 bits).
-        let mask = ((stream[0] as u8) << 1) | (stream[1] as u8);
+        // The size fixes the codeword count: as many data codewords (plus their
+        // `3 + n/2` check codewords) as fit after the two mask bits.
+        let data_length = data_length_for_size(width, height)
+            .ok_or_else(|| Error::undecodable("DotCode symbol too small to hold data"))?;
+        let ecc_length = 3 + data_length / 2;
 
-        // Read 9-bit codeword patterns until an invalid pattern (pad region).
-        let mut codewords = Vec::new();
-        let mut pos = 2;
-        while pos + 9 <= stream.len() {
-            let mut pat = 0u16;
-            for k in 0..9 {
-                pat = (pat << 1) | stream[pos + k] as u16;
-            }
-            match codeword_for_pattern(pat) {
-                Some(cw) => {
-                    codewords.push(cw);
-                    pos += 9;
-                }
-                None => break,
-            }
+        // The Reed–Solomon block is [mask, masked data…, check words…]; a dot group
+        // that is not a valid 9-bit pattern is an erasure.
+        let mut block = vec![((stream[0] as u8) << 1) | (stream[1] as u8)];
+        let mut erased = vec![false];
+        let (groups, _) = stream[2..].as_chunks::<9>();
+        for group in groups.iter().take(data_length + ecc_length) {
+            let pat = group.iter().fold(0u16, |p, &bit| (p << 1) | bit as u16);
+            let cw = codeword_for_pattern(pat);
+            block.push(cw.unwrap_or(0));
+            erased.push(cw.is_none());
         }
-
-        // The stream holds `mask codeword` + data + ECC codewords.
-        // Split off the leading mask codeword.
-        if codewords.is_empty() {
-            return Err(Error::undecodable("DotCode has no codewords"));
-        }
-        let total = codewords.len(); // = data_length + ecc_length (mask codeword is header bits)
-
-        let data_length = data_length_for(total)
-            .ok_or_else(|| Error::undecodable("DotCode codeword count is inconsistent"))?;
-        let ecc_length = total - data_length;
-
-        let masked_data = &codewords[..data_length];
-        let ecc = &codewords[data_length..];
-
-        // Verify Reed–Solomon check words over [mask, masked_data].
-        let mut block = Vec::with_capacity(data_length + 1 + ecc_length);
-        block.push(mask);
-        block.extend_from_slice(masked_data);
-        block.extend(core::iter::repeat_n(0u8, ecc_length));
-        rsencode(data_length + 1, ecc_length, &mut block);
-        if &block[data_length + 1..] != ecc {
+        if !rsdecode(data_length + 1, ecc_length, &mut block, &erased) {
             return Err(Error::ErrorCorrectionFailed);
+        }
+        let mut mask = block[0];
+        if mask > 3 {
+            return Err(Error::undecodable("DotCode mask out of range"));
         }
 
         // Un-apply the mask to recover the original data codewords.
-        let data = unmask(masked_data, mask);
+        let data = unmask(&block[1..=data_length], mask);
+
+        // Forced corners (masks 4–7): the corner dots — the last six of the stream —
+        // are all lit although the corrected codewords leave at least one unlit. Only
+        // trusted when nothing else needed repair; on a damaged symbol a lit corner
+        // is just as likely noise.
+        let clean_dot = |k: usize| match k {
+            0 | 1 => (mask >> (1 - k)) & 1 != 0,
+            _ => match block.get(1 + (k - 2) / 9) {
+                Some(&cw) => (DC_DOT_PATTERNS[cw as usize] >> (8 - (k - 2) % 9)) & 1 != 0,
+                None => true,
+            },
+        };
+        let body = stream.len() - 6;
+        let forced = stream[body..].iter().all(|&lit| lit)
+            && !(body..stream.len()).all(clean_dot)
+            && (0..body).all(|k| stream[k] == clean_dot(k));
+        if forced {
+            mask += 4;
+        }
 
         let segments = codewords_to_segments(&data);
 
@@ -132,16 +132,10 @@ impl Decode for DotCodeDecoder {
     }
 }
 
-/// Unique data-codeword count for a total of `total` (data + ECC) codewords, where
-/// `ecc = 3 + data/2`. Returns `None` if no consistent split exists.
-fn data_length_for(total: usize) -> Option<usize> {
-    (1..=total).find(|&dl| dl + 3 + dl / 2 == total)
-}
-
 const MASK_WEIGHTS: [u8; 4] = [0, 3, 7, 17];
 
 fn unmask(masked_data: &[u8], mask: u8) -> Vec<u8> {
-    let step = MASK_WEIGHTS[mask as usize] as u16;
+    let step = MASK_WEIGHTS[(mask & 3) as usize] as u16;
     masked_data
         .iter()
         .enumerate()

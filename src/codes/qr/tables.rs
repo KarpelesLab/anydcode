@@ -176,3 +176,82 @@ const REMAINDER_BITS: [u8; 40] = [
     3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4,
     3, 3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Cross-check the transcribed tables against an independent derivation: the
+    /// raw module count of a version (closed form), the per-level EC codewords per
+    /// block and block counts, from which the whole block layout follows.
+    #[test]
+    fn tables_match_independent_derivation() {
+        #[rustfmt::skip]
+        const EC_PER_BLOCK: [[u8; 40]; 4] = [
+            [7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+            [10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+            [13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+            [17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+        ];
+        #[rustfmt::skip]
+        const BLOCKS: [[u8; 40]; 4] = [
+            [1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+            [1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+            [1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+            [1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81],
+        ];
+        for v in 1..=40usize {
+            let version = Version::new(v as u8).unwrap();
+            // Raw data modules: the grid minus every function pattern.
+            let mut raw = (16 * v + 128) * v + 64;
+            let aligns = v / 7 + 2;
+            if v >= 2 {
+                raw -= (25 * aligns - 10) * aligns - 55;
+            }
+            if v >= 7 {
+                raw -= 36;
+            }
+            assert_eq!(remainder_bits(version), raw % 8, "v{v} remainder");
+
+            // Alignment centres: evenly spaced back from `size - 7`, first at 6.
+            let mut expected = std::vec::Vec::new();
+            if v >= 2 {
+                let step = if v == 32 {
+                    26
+                } else {
+                    (v * 4 + aligns * 2 + 1) / (aligns * 2 - 2) * 2
+                };
+                expected = (0..aligns - 1)
+                    .map(|i| (version.size() - 7 - i * step) as u8)
+                    .collect();
+                expected.push(6);
+                expected.reverse();
+            }
+            assert_eq!(alignment_positions(version), expected, "v{v} alignment");
+
+            for (li, level) in [EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H]
+                .into_iter()
+                .enumerate()
+            {
+                let ecb = ec_blocks(version, level);
+                let (total, blocks) = (raw / 8, BLOCKS[li][v - 1] as usize);
+                assert_eq!(ecb.total_codewords(), total, "v{v} {level:?} total");
+                assert_eq!(ecb.total_blocks(), blocks, "v{v} {level:?} blocks");
+                assert_eq!(
+                    ecb.ec_per_block,
+                    EC_PER_BLOCK[li][v - 1] as usize,
+                    "v{v} {level:?} ec"
+                );
+                // `total % blocks` long blocks carry one extra data codeword.
+                let short = total / blocks - ecb.ec_per_block;
+                let long_blocks = total % blocks;
+                assert_eq!(ecb.group1_data, short, "v{v} {level:?}");
+                assert_eq!(ecb.group1_blocks, blocks - long_blocks, "v{v} {level:?}");
+                assert_eq!(ecb.group2_blocks, long_blocks, "v{v} {level:?}");
+                if long_blocks > 0 {
+                    assert_eq!(ecb.group2_data, short + 1, "v{v} {level:?}");
+                }
+            }
+        }
+    }
+}

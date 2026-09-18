@@ -83,6 +83,21 @@ impl AztecDecoder {
             return Err(Error::ErrorCorrectionFailed);
         }
 
+        // Bit stuffing exists so that no data codeword is ever all zeros or all ones
+        // (ISO/IEC 24778 §7.3.1.2). One that is cannot have come from an encoder — but
+        // it is exactly what a blank or saturated patch of image samples to, and the
+        // all-zero word is a valid Reed–Solomon codeword, so without this check an
+        // empty region "decodes" to a run of FLG(0) characters.
+        let all_ones = (1u16 << w) - 1;
+        if words[..data_words]
+            .iter()
+            .any(|&wd| wd == 0 || wd == all_ones)
+        {
+            return Err(Error::undecodable(
+                "Aztec data codeword is all zeros or all ones",
+            ));
+        }
+
         // First data_words words → stuffed bits → high-level bits → payload.
         let mut stuffed = Vec::with_capacity(data_words * w);
         for &wd in &words[..data_words] {

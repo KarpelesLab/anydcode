@@ -413,10 +413,16 @@ fn run(code: &Code, t: &Trial) -> Outcome {
         crop_reads.extend(reads(&syms));
     }
     secs[1] = t0.elapsed().as_secs_f64();
-    // --- whole-frame 2D path (half-res) ---
+    // --- whole-frame 2D path: alternately the half-res frame and, at full
+    // resolution, the central half of it (where a user aims) — the same pixel count,
+    // so small codes get their native resolution every other tick. Timed per tick.
     let t0 = Instant::now();
-    let f2d = reads(&anyd::pipeline::scan_2d(&frame(&small)));
-    secs[2] = t0.elapsed().as_secs_f64();
+    let mut f2d = reads(&anyd::pipeline::scan_2d(&frame(&small)));
+    let (w, h) = (sc.image.width() as f32, sc.image.height() as f32);
+    if let Some(centre) = crop(&sc.image, [w * 0.25, h * 0.25, w * 0.75, h * 0.75]) {
+        f2d.extend(reads(&anyd::pipeline::scan_2d(&frame(&centre))));
+    }
+    secs[2] = t0.elapsed().as_secs_f64() / 2.0;
     // --- decoder ceiling: ground-truth crop ---
     let t0 = Instant::now();
     let ideal = crop(

@@ -63,7 +63,7 @@ mod tables;
 #[cfg(feature = "decode")]
 pub use decode::EanDecoder;
 #[cfg(feature = "scan")]
-pub use edge::{decode_edges, scan};
+pub use edge::{decode_edges, decode_edges_within, scan};
 #[cfg(feature = "encode")]
 pub use encode::EanEncoder;
 

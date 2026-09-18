@@ -308,6 +308,12 @@ impl Margins<'_> {
 /// artwork) yields only a stray line or two that happen to slip past a checksum — most
 /// dangerously as UPC-E, whose eight digits are cheap to satisfy by chance.
 const MIN_CONSENSUS_VOTES: usize = 3;
+/// The floor for a UPC-E reading. A slanted scanline that leaves an EAN-13's bars just
+/// past its centre guard — into the white above or below them — yields a run sequence
+/// that *is* a UPC-E, quiet zone included; only the couple of lines exiting at exactly
+/// that module see it (each counted once per prominence level), whereas a real UPC-E is
+/// read by every line crossing it.
+const MIN_UPCE_VOTES: usize = 8;
 /// The winning value must additionally out-poll the runner-up by this factor, so a
 /// scanline set split between two readings is treated as unresolved rather than guessed.
 const DOMINANCE: usize = 2;
@@ -336,7 +342,11 @@ pub fn scan(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Option<Symbol> {
     tally.sort_by_key(|(_, n, _)| core::cmp::Reverse(*n));
     let top = tally.first().map(|(_, n, _)| *n).unwrap_or(0);
     let runner_up = tally.get(1).map(|(_, n, _)| *n).unwrap_or(0);
-    if top < MIN_CONSENSUS_VOTES || top < DOMINANCE * runner_up {
+    let floor = match tally.first() {
+        Some((_, _, sym)) if sym.symbology == Symbology::UpcE => MIN_UPCE_VOTES,
+        _ => MIN_CONSENSUS_VOTES,
+    };
+    if top < floor || top < DOMINANCE * runner_up {
         return None;
     }
     tally.into_iter().next().map(|(_, _, s)| s)

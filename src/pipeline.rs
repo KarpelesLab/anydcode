@@ -298,6 +298,15 @@ fn axis_distance_deg(a: f32, b: f32) -> f32 {
 /// so differently on each line.
 const MIN_LINE_VOTES: usize = 2;
 
+/// The vote floor for a UPC-E. Its 51 modules are exactly the left half of an EAN-13
+/// (start guard, six L/G digits, then `010101` = centre guard + one bar), so a slanted
+/// scan line that leaves an EAN-13's bars just past the centre guard — into the white
+/// above or below them, which looks like a quiet zone — reads a structurally perfect
+/// UPC-E, check digit and all, for one EAN-13 in ten. Only the two or three lines that
+/// exit at exactly that module do so, whereas a real UPC-E is read by every line that
+/// crosses it.
+const MIN_UPCE_VOTES: usize = 5;
+
 /// Light margin (modules) a span must show on *both* sides to be decoded. Specified
 /// quiet zones are 10 modules; a bar pattern butting against print or the crop edge is
 /// a fragment of something, and fragments are where misreads come from.
@@ -409,7 +418,13 @@ fn scan_1d_sweep(
             }
         }
     }
-    readings.retain(|(_, n)| *n >= MIN_LINE_VOTES);
+    readings.retain(|(sym, n)| {
+        *n >= if sym.symbology == Symbology::UpcE {
+            MIN_UPCE_VOTES
+        } else {
+            MIN_LINE_VOTES
+        }
+    });
 
     // A reading contained in a longer reading of the same symbology that is at least
     // as well supported is that longer symbol seen through a scanline that left its

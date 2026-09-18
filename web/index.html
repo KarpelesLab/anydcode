@@ -543,8 +543,8 @@ decodeWorker.onmessage = (e) => {
 // that would silently disable decoding for the rest of the session.
 decodeWorker.onerror = () => { workerBusy = false; };
 
-// A second, parallel worker reads 2D codes (QR / Data Matrix / PDF417) directly off the
-// whole frame — they self-localize, so they do not need the coarse locator, which fixes
+// A second, parallel worker reads 2D codes (QR / Data Matrix / Aztec / PDF417 …) directly
+// off the frame — they self-localize, so they do not need the coarse locator, which fixes
 // the case where a QR is in view but the locator never boxes it. It reuses the locate
 // pass's half-resolution luma (transferred, zero extra conversion — fast, and big
 // enough for a held-up code) and hands back each code's box in full-frame pixels. Kept
@@ -559,7 +559,7 @@ self.onmessage = async (e) => {
   let out = [];
   try {
     await ready;
-    const { width, height, luma, scale } = e.data;
+    const { width, height, luma, scale, ox, oy } = e.data;
     const p = w.alloc(luma.length); mem().set(luma, p);
     let pk; try { pk = w.decode2d(width, height, p); } finally { w.dealloc(p, luma.length); }
     const ptr = Number(pk >> 32n), len = Number(pk & 0xffffffffn);
@@ -567,7 +567,7 @@ self.onmessage = async (e) => {
     const res = JSON.parse(new TextDecoder().decode(bytes) || '[]');
     out = res.map(r => ({
       symbology: r.symbology, text: r.text,
-      box: r.box ? { x0: r.box.x0 * scale, y0: r.box.y0 * scale, x1: r.box.x1 * scale, y1: r.box.y1 * scale } : null,
+      box: r.box ? { x0: r.box.x0 * scale + ox, y0: r.box.y0 * scale + oy, x1: r.box.x1 * scale + ox, y1: r.box.y1 * scale + oy } : null,
     }));
   } catch (err) { /* report nothing this round */ }
   self.postMessage(out);
@@ -749,6 +749,8 @@ document.getElementById('cam-capture').onclick = () => {
 
 let liveCands = [], acquiring = [], liveScale = [1, 1], lastLocate = 0, lastMs = 0;
 const locCanvas = document.createElement('canvas');
+const ctrCanvas = document.createElement('canvas');
+let tick2d = 0;
 function loop(ts) {
   if (!running) { return; }
   requestAnimationFrame(loop);
@@ -806,7 +808,23 @@ function loop(ts) {
     const want2d = !worker2dBusy && ts - last2d > 400;
     if (want2d) {
       last2d = ts; worker2dBusy = true;
-      worker2d.postMessage({ width: lw, height: lh, luma, scale: sc }, [luma.buffer]);
+      // Alternate what the 2D worker sees: the whole frame at half resolution (reach),
+      // then the central half of the frame at FULL resolution (detail) — the same pixel
+      // count, so the same cost. A small or dense code is unreadable at half
+      // resolution, and the centre is where a user aiming at one puts it.
+      if ((tick2d++ & 1) === 0) {
+        worker2d.postMessage({ width: lw, height: lh, luma, scale: sc, ox: 0, oy: 0 }, [luma.buffer]);
+      } else {
+        const cw = pw >> 1, chh = ph >> 1, cx0 = (pw - cw) >> 1, cy0 = (ph - chh) >> 1;
+        if (ctrCanvas.width !== cw) ctrCanvas.width = cw;
+        if (ctrCanvas.height !== chh) ctrCanvas.height = chh;
+        const cctx = ctrCanvas.getContext('2d', { willReadFrequently: true });
+        // Source rect in the video's own pixels, drawn 1:1 in processed pixels.
+        const k = vw / pw;
+        cctx.drawImage(video, cx0 * k, cy0 * k, cw * k, chh * k, 0, 0, cw, chh);
+        const centre = lumaFrom(cctx.getImageData(0, 0, cw, chh)).luma;
+        worker2d.postMessage({ width: cw, height: chh, luma: centre, scale: 1, ox: cx0, oy: cy0 }, [centre.buffer]);
+      }
     }
     const wantCrop = !workerBusy && ts - lastSent > 120;
     if (wantCrop) {

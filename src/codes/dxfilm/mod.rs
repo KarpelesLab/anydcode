@@ -111,9 +111,8 @@ impl DxData {
         let (p1, rest) = text
             .split_once('-')
             .ok_or_else(|| Error::invalid_data("DX number must contain '-'"))?;
-        let part1: u8 = p1
-            .parse()
-            .map_err(|_| Error::invalid_data("DX part 1 is not a number"))?;
+        let part1 =
+            parse_decimal(p1).ok_or_else(|| Error::invalid_data("DX part 1 is not a number"))?;
         if part1 == 0 || part1 > 127 {
             return Err(Error::capacity("DX part 1 must be 1..=127"));
         }
@@ -123,9 +122,8 @@ impl DxData {
                     Some(d) => (d, true),
                     None => (frame_str, false),
                 };
-                let frame: u8 = digits
-                    .parse()
-                    .map_err(|_| Error::invalid_data("frame number is not a number"))?;
+                let frame = parse_decimal(digits)
+                    .ok_or_else(|| Error::invalid_data("frame number is not a number"))?;
                 if frame > 63 {
                     return Err(Error::capacity("frame number must be 0..=63"));
                 }
@@ -133,9 +131,8 @@ impl DxData {
             }
             None => (rest, None),
         };
-        let part2: u8 = p2_str
-            .parse()
-            .map_err(|_| Error::invalid_data("DX part 2 is not a number"))?;
+        let part2 = parse_decimal(p2_str)
+            .ok_or_else(|| Error::invalid_data("DX part 2 is not a number"))?;
         if part2 > 15 {
             return Err(Error::capacity("DX part 2 must be 0..=15"));
         }
@@ -166,6 +163,16 @@ impl DxData {
         }
         bits
     }
+}
+
+/// Parse a field of the text form: decimal digits only. `str::parse` alone would
+/// also take a leading `+`, which is no part of a DX number.
+#[cfg(all(feature = "alloc", feature = "encode"))]
+fn parse_decimal(field: &str) -> Option<u8> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    field.parse().ok()
 }
 
 /// Write `value` into `bits[start..start+len]`, most-significant bit first.

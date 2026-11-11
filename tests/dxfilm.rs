@@ -197,3 +197,76 @@ fn rejects_out_of_range() {
     assert!(enc.build_text("not-a-code").is_err());
     assert!(enc.build_text("115").is_err()); // missing '-'
 }
+
+/// The text form's numbers are plain decimal digits: a sign (which Rust's integer
+/// parser would take) or stray characters make it something other than a DX number.
+#[test]
+fn text_fields_must_be_decimal_digits() {
+    let enc = DxFilmEncoder::new();
+    for bad in [
+        "+115-10",
+        "115-+10",
+        "115-10/+11",
+        "115-10/+11A",
+        "115--10",
+        " 115-10",
+        "115-10 ",
+        "115-10/",
+        "115-10/A",
+        "115-10/11AA",
+        "115-10/11a",
+        "-10",
+        "115-",
+        "",
+    ] {
+        assert!(enc.build_text(bad).is_err(), "{bad:?} accepted");
+        // Nor does the encoder take it from a hand-assembled symbol.
+        let mut symbol = enc.build(115, 10, None).unwrap();
+        symbol.segments[0].data = bad.as_bytes().to_vec();
+        assert!(enc.encode(&symbol).is_err(), "{bad:?} encoded");
+    }
+    assert_eq!(
+        enc.build_text("115-10/11A").unwrap(),
+        enc.build(115, 10, Some((11, true))).unwrap()
+    );
+}
+
+/// The decoder checks every fixed part of the two tracks.
+#[test]
+fn decoder_rejects_damaged_tracks() {
+    let enc = DxFilmEncoder::new();
+    let dec = DxFilmDecoder::new();
+    for symbol in [
+        enc.build(115, 10, None).unwrap(),
+        enc.build(115, 10, Some((11, true))).unwrap(),
+    ] {
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("DX Film Edge encodes to a matrix");
+        };
+        assert_eq!(dec.decode_matrix(&clean).unwrap(), symbol);
+        // Any single module flipped breaks the clock track, a guard, a separator or
+        // the parity.
+        for y in 0..clean.height() {
+            for x in 0..clean.width() {
+                let mut damaged = clean.clone();
+                damaged.set(x, y, !clean.get(x, y));
+                assert!(
+                    matches!(
+                        dec.decode_matrix(&damaged),
+                        Err(anyd::Error::Undecodable { .. })
+                    ),
+                    "module ({x}, {y}) flipped"
+                );
+            }
+        }
+        // Wrong shapes.
+        for (w, h) in [
+            (clean.width(), 1),
+            (clean.width(), 3),
+            (clean.width() - 1, 2),
+            (0, 2),
+        ] {
+            assert!(dec.decode_matrix(&BitMatrix::new(w, h, 0)).is_err());
+        }
+    }
+}

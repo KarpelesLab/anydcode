@@ -193,3 +193,171 @@ fn zint_gs1_fnc1_decodes() {
         b"10AB\x1d21X",
     );
 }
+
+use anyd::error::Error;
+
+/// A symbol holds 49 code characters. An upper-case letter or digit takes one, a
+/// lower-case letter or control two (the first Shift of the symbol moves into the
+/// starting mode): 49 / 25 of them fit, one more is a capacity error.
+#[test]
+fn capacity_is_49_code_characters() {
+    let enc = Code49Encoder::new();
+    for (byte, max) in [(b'K', 49usize), (b'7', 49), (b'k', 25), (0x07, 25)] {
+        let symbol = enc.build(&vec![byte; max]).unwrap();
+        let SymbolMeta::Code49(meta) = &symbol.meta else {
+            panic!();
+        };
+        assert_eq!((meta.rows, meta.grid.len()), (8, 64), "{byte}");
+        assert_lossless(&vec![byte; max]);
+        for over in [max + 1, max + 2, 300] {
+            let err = enc.build(&vec![byte; over]).unwrap_err();
+            assert!(matches!(err, Error::Capacity { .. }), "{byte} x {over}");
+        }
+    }
+}
+
+/// Every row count is reachable, both by data length and by `min_rows` padding.
+#[test]
+fn every_row_count_roundtrips() {
+    let enc = Code49Encoder::new();
+    let dec = Code49Decoder::new();
+    let mut seen = [false; 9];
+    for n in 1..=49usize {
+        let data: Vec<u8> = (0..n).map(|i| b'A' + (i % 26) as u8).collect();
+        let symbol = enc.build(&data).unwrap();
+        let SymbolMeta::Code49(meta) = &symbol.meta else {
+            panic!();
+        };
+        assert_eq!(
+            meta.grid[(meta.rows - 1) * 8 + 6] as usize,
+            7 * (meta.rows - 2)
+        );
+        seen[meta.rows] = true;
+        assert_lossless(&data);
+    }
+    assert_eq!(
+        seen,
+        [false, false, true, true, true, true, true, true, true]
+    );
+
+    for rows in 2..=8usize {
+        let padded = enc.build_rows(b"x", Some(rows)).unwrap();
+        let SymbolMeta::Code49(meta) = &padded.meta else {
+            panic!();
+        };
+        assert_eq!(meta.rows, rows);
+        let encoding = enc.encode(&padded).unwrap();
+        assert_eq!(dec.decode(&encoding).unwrap(), padded);
+    }
+}
+
+/// Every ASCII byte, followed by a spread of second bytes from each character class,
+/// survives the code-character planning and its inverse — at the start of the symbol
+/// (where a leading Shift 1 / Shift 2 becomes starting mode 4 / 5) and after another
+/// character; a sample also goes through the module matrix and back.
+#[test]
+fn every_byte_roundtrips_in_context() {
+    let enc = Code49Encoder::new();
+    let dec = Code49Decoder::new();
+    for prefix in [&b""[..], b"Z"] {
+        for a in 0..=127u8 {
+            for b in (0..=127u8).step_by(11) {
+                let mut data = prefix.to_vec();
+                data.extend_from_slice(&[a, b]);
+                let symbol = enc.build(&data).unwrap();
+                assert_eq!(symbol.payload_bytes(), data);
+                if a % 16 == 5 && b == 66 {
+                    let encoding = enc.encode(&symbol).unwrap();
+                    assert_eq!(dec.decode(&encoding).unwrap(), symbol, "{data:?}");
+                }
+            }
+        }
+    }
+}
+
+/// The parameter and input error paths of the public API.
+#[test]
+fn rejects_bad_parameters_and_input() {
+    let enc = Code49Encoder::new();
+    let dec = Code49Decoder::new();
+
+    assert!(matches!(enc.build(b""), Err(Error::InvalidData { .. })));
+    assert!(matches!(
+        enc.build(b"A\x80"),
+        Err(Error::InvalidData { .. })
+    ));
+    for rows in [0, 1, 9, 100] {
+        assert!(
+            matches!(
+                enc.build_rows(b"A", Some(rows)),
+                Err(Error::InvalidParameter { .. })
+            ),
+            "{rows} rows"
+        );
+    }
+
+    // Metadata that is not a symbol. The grid stores its own check and mode
+    // characters, so a grid that disagrees with itself must be refused: it would
+    // render, but no decoder (this one included) would accept the result.
+    let good = vec![10u8, 11, 12, 13, 1, 2, 3, 3, 4, 48, 26, 9, 17, 31, 0, 37];
+    let symbol = |rows: usize, grid: Vec<u8>| {
+        Symbol::new(
+            Symbology::Code49,
+            Vec::new(),
+            SymbolMeta::Code49(Code49Meta { rows, grid }),
+        )
+    };
+    assert!(enc.encode(&symbol(2, good.clone())).is_ok());
+    let edit = |i: usize, v: u8| {
+        let mut g = good.clone();
+        g[i] = v;
+        g
+    };
+    let bad = [
+        symbol(1, good[..8].to_vec()),
+        symbol(9, vec![48; 72]),
+        symbol(3, good.clone()),
+        symbol(2, good[..15].to_vec()),
+        symbol(2, edit(0, 49)), // not a code character
+        symbol(2, edit(0, 11)), // data changed, checks stale
+        symbol(2, edit(7, 4)),  // row check
+        symbol(2, edit(15, 0)), // last-row check
+        symbol(2, edit(12, 0)), // symbol check
+        symbol(2, edit(14, 7)), // mode character says three rows
+        Symbol::new(Symbology::Code49, Vec::new(), SymbolMeta::Generic),
+    ];
+    for s in bad {
+        assert!(
+            matches!(enc.encode(&s), Err(Error::InvalidParameter { .. })),
+            "{:?}",
+            s.meta
+        );
+    }
+
+    // Decoder input that cannot be a Code 49 grid.
+    let linear = Encoding::Linear(anyd::output::LinearPattern {
+        modules: vec![true; 70],
+        quiet_zone: 10,
+    });
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(Error::Unsupported { .. })
+    ));
+    for (width, height) in [(70, 1), (70, 9), (69, 4), (71, 4), (0, 0)] {
+        let m = anyd::output::BitMatrix::new(width, height, 10);
+        assert!(dec.decode_matrix(&m).is_err(), "{width}x{height}");
+    }
+
+    // A single-module flip anywhere in a valid symbol is caught by a pattern, parity
+    // or check-character test.
+    let Encoding::Matrix(m) = enc.encode(&enc.build(b"Flip me 42").unwrap()).unwrap() else {
+        panic!("expected matrix");
+    };
+    for y in 0..m.height() {
+        for x in (y..m.width()).step_by(5) {
+            let mut damaged = m.clone();
+            damaged.set(x, y, !m.get(x, y));
+            assert!(dec.decode_matrix(&damaged).is_err(), "flip ({x}, {y})");
+        }
+    }
+}

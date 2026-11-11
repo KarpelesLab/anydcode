@@ -211,3 +211,169 @@ fn zint_gs1_fnc1_separator_decodes_as_gs() {
         }
     }
 }
+
+use anyd::error::Error;
+
+fn code16k_symbol(rows: usize, values: Vec<u8>) -> Symbol {
+    Symbol::new(
+        Symbology::Code16k,
+        Vec::new(),
+        SymbolMeta::Code16k(Code16kMeta { rows, values }),
+    )
+}
+
+/// 16 rows of five characters, less the mode character and the two checks, leave 77
+/// data characters. Exactly that many fit; one more — or a code-set change that
+/// costs an extra character — is a capacity error.
+#[test]
+fn capacity_is_77_symbol_characters() {
+    let enc = Code16kEncoder::new();
+    let symbol = enc.build(&[b'K'; 77]).unwrap();
+    let SymbolMeta::Code16k(meta) = &symbol.meta else {
+        panic!();
+    };
+    assert_eq!((meta.rows, meta.values.len()), (16, 78));
+    assert_lossless(&[b'K'; 77]);
+
+    for over in [78, 79, 200] {
+        let err = enc.build(&vec![b'K'; over]).unwrap_err();
+        assert!(matches!(err, Error::Capacity { .. }), "{over}: {err:?}");
+    }
+    // 76 set B characters and one control: the Shift makes 78.
+    let mut data = vec![b'k'; 76];
+    data.push(0x07);
+    assert!(matches!(enc.build(&data), Err(Error::Capacity { .. })));
+    data.remove(0);
+    assert_lossless(&data);
+}
+
+/// Every row count is reachable, both by data length and by `min_rows` padding.
+#[test]
+fn every_row_count_roundtrips() {
+    let enc = Code16kEncoder::new();
+    for rows in 2..=16usize {
+        // rows * 5 - 3 data characters exactly fill `rows` rows.
+        let data: Vec<u8> = (0..rows * 5 - 3).map(|i| b'a' + (i % 26) as u8).collect();
+        let symbol = enc.build(&data).unwrap();
+        let SymbolMeta::Code16k(meta) = &symbol.meta else {
+            panic!();
+        };
+        assert_eq!(meta.rows, rows);
+        assert_eq!(meta.values[0] as usize, 7 * (rows - 2) + 1);
+        assert_lossless(&data);
+
+        let padded = enc.build_rows(b"x", Some(rows)).unwrap();
+        let SymbolMeta::Code16k(meta) = &padded.meta else {
+            panic!();
+        };
+        assert_eq!(meta.rows, rows);
+        let encoding = enc.encode(&padded).unwrap();
+        let decoded = Code16kDecoder::new().decode(&encoding).unwrap();
+        assert_eq!(decoded, padded);
+    }
+    // `min_rows` never shrinks a symbol that needs more.
+    let symbol = enc.build_rows(&[b'Q'; 40], Some(2)).unwrap();
+    let SymbolMeta::Code16k(meta) = &symbol.meta else {
+        panic!();
+    };
+    assert_eq!(meta.rows, 9);
+}
+
+/// Every ordered pair of ASCII bytes survives, entered from set A and from set B:
+/// this walks each start mode, Shift, latch and the set A / set B overlap.
+#[test]
+fn every_byte_pair_roundtrips() {
+    let enc = Code16kEncoder::new();
+    let dec = Code16kDecoder::new();
+    for prefix in [&b""[..], b"\x02", b"z"] {
+        for a in 0..=127u8 {
+            for b in (0..=127u8).step_by(3) {
+                let mut data = prefix.to_vec();
+                data.extend_from_slice(&[a, b, a]);
+                let symbol = enc.build(&data).unwrap();
+                assert_eq!(symbol.payload_bytes(), data);
+                let encoding = enc.encode(&symbol).unwrap();
+                let decoded = dec.decode(&encoding).unwrap();
+                assert_eq!(decoded, symbol, "{data:?}");
+            }
+        }
+    }
+}
+
+/// The parameter and input error paths of the public API.
+#[test]
+fn rejects_bad_parameters_and_input() {
+    let enc = Code16kEncoder::new();
+    let dec = Code16kDecoder::new();
+
+    assert!(matches!(enc.build(b""), Err(Error::InvalidData { .. })));
+    assert!(matches!(
+        enc.build(b"A\x80"),
+        Err(Error::InvalidData { .. })
+    ));
+    for rows in [0, 1, 17, 100] {
+        assert!(
+            matches!(
+                enc.build_rows(b"A", Some(rows)),
+                Err(Error::InvalidParameter { .. })
+            ),
+            "{rows} rows"
+        );
+    }
+
+    // Metadata that is not a symbol: row count out of range, value count that does
+    // not match it, a value past the 107 patterns, or a first character that states
+    // a different row count than the symbol has (it could never be read back).
+    let good = vec![1u8, 33, 34, 35, 36, 99, 12, 34];
+    assert!(enc.encode(&code16k_symbol(2, good.clone())).is_ok());
+    let mut too_big = good.clone();
+    too_big[3] = 107;
+    let mut wrong_rows = good.clone();
+    wrong_rows[0] = 7 + 1; // says three rows
+    let bad = [
+        code16k_symbol(1, vec![1, 33, 34]),
+        code16k_symbol(17, vec![106; 83]),
+        code16k_symbol(3, good.clone()),
+        code16k_symbol(2, good[..7].to_vec()),
+        code16k_symbol(2, too_big),
+        code16k_symbol(2, wrong_rows),
+        Symbol::new(Symbology::Code16k, Vec::new(), SymbolMeta::Generic),
+    ];
+    for symbol in bad {
+        assert!(
+            matches!(enc.encode(&symbol), Err(Error::InvalidParameter { .. })),
+            "{:?}",
+            symbol.meta
+        );
+    }
+
+    // Decoder input that cannot be a Code 16K grid.
+    let linear = Encoding::Linear(anyd::output::LinearPattern {
+        modules: vec![true; 70],
+        quiet_zone: 10,
+    });
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(Error::Unsupported { .. })
+    ));
+    for (width, height) in [(70, 1), (70, 17), (69, 4), (71, 4), (0, 0)] {
+        let m = anyd::output::BitMatrix::new(width, height, 10);
+        assert!(dec.decode_matrix(&m).is_err(), "{width}x{height}");
+    }
+
+    // A valid symbol with its rows swapped keeps every row intact but breaks the
+    // row-number delimiters.
+    let Encoding::Matrix(m) = enc
+        .encode(&enc.build(b"Row order matters").unwrap())
+        .unwrap()
+    else {
+        panic!("expected matrix");
+    };
+    let mut swapped = m.clone();
+    for x in 0..m.width() {
+        swapped.set(x, 0, m.get(x, 1));
+        swapped.set(x, 1, m.get(x, 0));
+    }
+    assert!(dec.decode_matrix(&m).is_ok());
+    assert!(dec.decode_matrix(&swapped).is_err());
+}

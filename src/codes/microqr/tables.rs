@@ -12,6 +12,18 @@ pub struct MicroParams {
     pub data_cw: usize,
     /// Number of error-correction codewords.
     pub ec_cw: usize,
+    /// How many of them are misdecode protection (`p` in ISO/IEC 18004 Table 9)
+    /// rather than correction capacity.
+    pub protect: usize,
+}
+
+impl MicroParams {
+    /// Most codeword errors the symbol may correct: `(5,3,0)` for M1 (detection
+    /// only), `(10,5,1)` M2-L, `(10,4,2)` M2-M, `(17,11,2)` M3-L, `(17,9,4)` M3-M,
+    /// `(24,16,3)` M4-L, `(24,14,5)` M4-M, `(24,10,7)` M4-Q.
+    pub fn max_errors(&self) -> usize {
+        (self.ec_cw - self.protect) / 2
+    }
 }
 
 /// The codeword layout for a Micro QR (version, EC level), or `None` for an
@@ -19,18 +31,22 @@ pub struct MicroParams {
 pub fn ec_params(version: MicroVersion, ec: MicroEcLevel) -> Option<MicroParams> {
     use MicroEcLevel::*;
     use MicroVersion::*;
-    let (data_cw, ec_cw) = match (version, ec) {
-        (M1, Detection) => (3, 2),
-        (M2, L) => (5, 5),
-        (M2, M) => (4, 6),
-        (M3, L) => (11, 6),
-        (M3, M) => (9, 8),
-        (M4, L) => (16, 8),
-        (M4, M) => (14, 10),
-        (M4, Q) => (10, 14),
+    let (data_cw, ec_cw, protect) = match (version, ec) {
+        (M1, Detection) => (3, 2, 2),
+        (M2, L) => (5, 5, 3),
+        (M2, M) => (4, 6, 2),
+        (M3, L) => (11, 6, 2),
+        (M3, M) => (9, 8, 0),
+        (M4, L) => (16, 8, 2),
+        (M4, M) => (14, 10, 0),
+        (M4, Q) => (10, 14, 0),
         _ => return None,
     };
-    Some(MicroParams { data_cw, ec_cw })
+    Some(MicroParams {
+        data_cw,
+        ec_cw,
+        protect,
+    })
 }
 
 /// Whether the final data codeword of this version is only 4 bits (M1 and M3).

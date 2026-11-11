@@ -6,9 +6,13 @@
 //! geometry against zint's documented macromodule layout.
 #![cfg(all(feature = "decode", feature = "encode", feature = "gridmatrix"))]
 
-use anyd::codes::gridmatrix::{EcLevel, GmMode, GridMatrixDecoder, GridMatrixEncoder, Version};
+use anyd::codes::gridmatrix::{
+    EcLevel, GmMode, GridMatrixDecoder, GridMatrixEncoder, GridMatrixMeta, Version,
+};
 use anyd::output::Encoding;
-use anyd::symbol::SymbolMeta;
+use anyd::segment::Segment;
+use anyd::symbol::{Symbol, SymbolMeta};
+use anyd::symbology::Symbology;
 use anyd::traits::{Decode, Encode};
 
 /// Assert a payload decodes to the same segments/meta and re-encodes identically.
@@ -345,4 +349,418 @@ fn decoder_never_panics_on_garbage() {
             }
         }
     }
+}
+
+// --- Larger zint vectors: several layers, several RS blocks, mode switches ---
+
+/// A matrix from zint's `--dump` rows (hex, most significant bit first).
+fn matrix_from_hex(rows: &[&str]) -> anyd::output::BitMatrix {
+    let size = rows.len();
+    let mut m = anyd::output::BitMatrix::new(size, size, 2);
+    for (y, row) in rows.iter().enumerate() {
+        for x in 0..size {
+            let nibble = (row.as_bytes()[x / 4] as char).to_digit(16).unwrap();
+            m.set(x, y, nibble & (8 >> (x % 4)) != 0);
+        }
+    }
+    m
+}
+
+/// `zint -b 142 --vers=3 --secure=2 -d "GRID MATRIX LAYERS AND BLOCKS"` (42×42):
+/// three layers of layer ids and upper-case mode with spaces.
+#[test]
+fn version_3_upper_mode_matches_zint() {
+    let reference = Encoding::Matrix(matrix_from_hex(&[
+        "FC0FC0FC0FC",
+        "DD6DD6DD6DC",
+        "C5EFDEFDEFC",
+        "9C084084084",
+        "D4084084084",
+        "FC0FC0FC0FC",
+        "03F03F03F00",
+        "4AF22D3AF58",
+        "4BF13B7BF78",
+        "6A11BB02100",
+        "1A13A902100",
+        "03F03F03F00",
+        "FC0FC0FC0FC",
+        "D4E84284EDC",
+        "ADE95C95EFC",
+        "DC0FD48C084",
+        "F40D40C4084",
+        "FC0FC0FC0FC",
+        "03F03F03F00",
+        "5AF1BD0AF58",
+        "3BF2310BF78",
+        "7A10353A100",
+        "3A10230A100",
+        "03F03F03F00",
+        "FC0FC0FC0FC",
+        "DCE8C084EDC",
+        "FDEB44DDEFC",
+        "D40E40BC084",
+        "940B4CEC084",
+        "FC0FC0FC0FC",
+        "03F03F03F00",
+        "42F3AF3AF58",
+        "7BF7BF7BF78",
+        "5A102102100",
+        "32102102100",
+        "03F03F03F00",
+        "FC0FC0FC0FC",
+        "CD0C50DD6DC",
+        "94CDD6FDEFC",
+        "B50A5084084",
+        "8CAE4084084",
+        "FC0FC0FC0FC",
+    ]));
+    let enc = GridMatrixEncoder::new();
+    let payload = b"GRID MATRIX LAYERS AND BLOCKS";
+    let decoded = GridMatrixDecoder::new().decode(&reference).unwrap();
+    let built = enc
+        .build_sized(payload, Version::new(3).unwrap(), EcLevel::L2)
+        .unwrap();
+    assert_eq!(decoded, built);
+    assert_eq!(enc.encode(&built).unwrap(), reference);
+}
+
+/// `zint -b 142 --vers=4 --secure=4 --binary --esc -d
+/// "\x80\x81\xFE\xFF\x00\x01 bytes \xA5…(27×)"` (54×54): byte → lower → byte, so
+/// the 4-bit switch out of byte mode and the 7-bit switch into it are both
+/// checked, across several interleaved RS blocks.
+#[test]
+fn version_4_byte_and_lower_switches_match_zint() {
+    let reference = Encoding::Matrix(matrix_from_hex(&[
+        "FC0FC0FC0FC0FC",
+        "BCEB4EB4CB4AAC",
+        "DD6BDED44D52EC",
+        "F48CD6B44ED6EC",
+        "DCAFD2A52CC69C",
+        "FC0FC0FC0FC0FC",
+        "03F03F03F03F00",
+        "32702702702738",
+        "73F03F03F03F28",
+        "0A10A912B32748",
+        "3A13372A54A958",
+        "03F03F03F03F00",
+        "FC0FC0FC0FC0FC",
+        "B40FD8FD8FC0BC",
+        "8C0FC0FC0FC0D4",
+        "BCA94E840A4AF4",
+        "FC0ED4BD2CD4AC",
+        "FC0FC0FC0FC0FC",
+        "03F03F03F03F00",
+        "32763743762720",
+        "5BF03F03F03F40",
+        "4A72A10210A508",
+        "4295295A133B08",
+        "03F03F03F03F00",
+        "FC0FC0FC0FC0FC",
+        "BC0FD0BD0FC0BC",
+        "A40FC0FC0FC0B4",
+        "84C9C09C8AC2FC",
+        "9D2A40840FCCFC",
+        "FC0FC0FC0FC0FC",
+        "03F03F03F03F00",
+        "3A763743762728",
+        "0BF03F03F03F70",
+        "12B32F2AF22910",
+        "5A54A17BF0B758",
+        "03F03F03F03F00",
+        "FC0FC0FC0FC0FC",
+        "A40FD8FD8FC0BC",
+        "840FC0FC0FC084",
+        "C44AC4A42AC4AC",
+        "ECA94ADCCACA8C",
+        "FC0FC0FC0FC0FC",
+        "03F03F03F03F00",
+        "22702702702720",
+        "73F03F03F03F40",
+        "4A90A52A732B58",
+        "33733B5294A558",
+        "03F03F03F03F00",
+        "FC0FC0FC0FC0FC",
+        "B4ABCCB48B4CB4",
+        "DD694EA4E940DC",
+        "E40ACE956E5AAC",
+        "AD6EC6B52FDCA4",
+        "FC0FC0FC0FC0FC",
+    ]));
+    let want = Symbol::new(
+        Symbology::GridMatrix,
+        vec![
+            Segment::byte(b"\x80\x81\xFE\xFF\x00\x01".to_vec()),
+            Segment::alphanumeric(b" bytes ".to_vec()),
+            Segment::byte(vec![0xA5; 27]),
+        ],
+        SymbolMeta::GridMatrix(GridMatrixMeta {
+            version: Version::new(4).unwrap(),
+            ec_level: EcLevel::L4,
+            modes: vec![GmMode::Byte, GmMode::Lower, GmMode::Byte],
+        }),
+    );
+    assert_eq!(GridMatrixDecoder::new().decode(&reference).unwrap(), want);
+    assert_eq!(GridMatrixEncoder::new().encode(&want).unwrap(), reference);
+}
+
+// --- Capacity boundaries ---
+
+/// At every version and level: the longest digit string and byte string the data
+/// codewords can hold (numeral mode costs 4 + 2 + 10 bits around 10-bit groups of
+/// three digits; a byte block 4 + 9 + 4 around its bytes) fit and round-trip, one
+/// more group or byte is a capacity error, and `build_with_ec` moves to the next
+/// version exactly there.
+#[test]
+fn capacity_boundaries_at_every_version_and_level() {
+    let enc = GridMatrixEncoder::new();
+    let version_of = |s: &Symbol| match &s.meta {
+        SymbolMeta::GridMatrix(m) => m.version.number(),
+        _ => panic!("expected GridMatrixMeta"),
+    };
+    for v in 1..=13u8 {
+        let version = Version::new(v).unwrap();
+        for ec in EcLevel::ALL {
+            let bits = 7 * version.data_codewords(ec);
+            if bits == 0 {
+                // Version 1 has no level 1.
+                assert!(enc.build_sized(b"1", version, ec).is_err());
+                continue;
+            }
+            let digits = (bits - 16) / 10 * 3;
+            // Every 512 bytes open a new block: 4 + 9 bits each, plus the final 4.
+            let byte_bits = |n: usize| 8 * n + 13 * n.div_ceil(512) + 4;
+            let bytes = (1..).take_while(|&n| byte_bits(n) <= bits).count();
+            for (max, fill) in [(digits, b'7'), (bytes, 0xA5)] {
+                let what = format!("v{v} {ec:?} {max} x {fill:#04x}");
+                let full = enc.build_sized(&vec![fill; max], version, ec).unwrap();
+                let encoding = enc.encode(&full).unwrap();
+                assert_eq!(
+                    GridMatrixDecoder::new().decode(&encoding).unwrap(),
+                    full,
+                    "{what}"
+                );
+                assert_eq!(
+                    version_of(&enc.build_with_ec(&vec![fill; max], ec).unwrap()),
+                    v,
+                    "{what}"
+                );
+
+                let over = vec![fill; max + 1];
+                assert!(
+                    matches!(
+                        enc.build_sized(&over, version, ec),
+                        Err(anyd::Error::Capacity { .. })
+                    ),
+                    "{what}"
+                );
+                match enc.build_with_ec(&over, ec) {
+                    Ok(sym) => assert_eq!(version_of(&sym), v + 1, "{what}"),
+                    Err(e) => {
+                        assert_eq!(v, 13, "{what}");
+                        assert!(matches!(e, anyd::Error::Capacity { .. }), "{what}");
+                    }
+                }
+            }
+        }
+    }
+    // `build` gives up past version 13 at its recommended level too.
+    assert!(matches!(
+        enc.build(&vec![b'7'; 4000]),
+        Err(anyd::Error::Capacity { .. })
+    ));
+}
+
+// --- Error paths and parameter ranges ---
+
+#[test]
+fn encoder_rejects_what_it_cannot_represent() {
+    let enc = GridMatrixEncoder::new();
+    let symbol = |segments: Vec<Segment>, modes: Vec<GmMode>| {
+        Symbol::new(
+            Symbology::GridMatrix,
+            segments,
+            SymbolMeta::GridMatrix(GridMatrixMeta {
+                version: Version::new(2).unwrap(),
+                ec_level: EcLevel::L3,
+                modes,
+            }),
+        )
+    };
+    let seg = |data: &[u8]| Segment::byte(data.to_vec());
+    // Sanity: the helper makes encodable symbols.
+    assert!(
+        enc.encode(&symbol(vec![seg(b"AB")], vec![GmMode::Upper]))
+            .is_ok()
+    );
+    for (segments, modes) in [
+        // Bytes outside the mode's alphabet.
+        (vec![seg(b"12a")], vec![GmMode::Numeral]),
+        (vec![seg(b"ab")], vec![GmMode::Upper]),
+        (vec![seg(b"AB")], vec![GmMode::Lower]),
+        (vec![seg(b"a1")], vec![GmMode::Lower]),
+        // Runs the bit format cannot express.
+        (vec![seg(b"")], vec![GmMode::Numeral]),
+        (vec![seg(b"")], vec![GmMode::Byte]),
+    ] {
+        assert!(
+            matches!(
+                enc.encode(&symbol(segments, modes.clone())),
+                Err(anyd::Error::InvalidData { .. })
+            ),
+            "{modes:?}"
+        );
+    }
+    for (segments, modes) in [
+        // Modes that are modelled but not implemented.
+        (vec![seg(b"\xB0\xA1")], vec![GmMode::Chinese]),
+        (vec![seg(b"A1")], vec![GmMode::Mixed]),
+        // No switch exists from a mode to itself.
+        (
+            vec![seg(b"A"), seg(b"B")],
+            vec![GmMode::Upper, GmMode::Upper],
+        ),
+        (
+            vec![seg(b"\x80"), seg(b"\x81")],
+            vec![GmMode::Byte, GmMode::Byte],
+        ),
+    ] {
+        assert!(
+            matches!(
+                enc.encode(&symbol(segments, modes.clone())),
+                Err(anyd::Error::Unsupported { .. })
+            ),
+            "{modes:?}"
+        );
+    }
+    // Mode list and segment list must line up; and there must be a segment.
+    for (segments, modes) in [
+        (vec![seg(b"A")], vec![]),
+        (vec![seg(b"A")], vec![GmMode::Upper, GmMode::Lower]),
+        (vec![], vec![]),
+    ] {
+        assert!(matches!(
+            enc.encode(&symbol(segments, modes)),
+            Err(anyd::Error::InvalidParameter { .. })
+        ));
+    }
+    // Wrong symbology / metadata, and version 1 at the level it does not have.
+    let mut wrong = symbol(vec![seg(b"A")], vec![GmMode::Upper]);
+    wrong.symbology = Symbology::QrCode;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let generic = Symbol::new(Symbology::GridMatrix, vec![seg(b"A")], SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&generic),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut v1l1 = symbol(vec![seg(b"A")], vec![GmMode::Upper]);
+    v1l1.meta = SymbolMeta::GridMatrix(GridMatrixMeta {
+        version: Version::new(1).unwrap(),
+        ec_level: EcLevel::L1,
+        modes: vec![GmMode::Upper],
+    });
+    assert!(matches!(
+        enc.encode(&v1l1),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(enc.build_with_ec(b"A", EcLevel::L1).is_ok()); // version 2 has level 1
+}
+
+#[test]
+fn decoder_rejects_non_grid_matrix_inputs() {
+    let dec = GridMatrixDecoder::new();
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn parameter_types_validate_their_ranges() {
+    assert!(Version::new(0).is_none() && Version::new(14).is_none());
+    for v in 1..=13u8 {
+        let version = Version::new(v).unwrap();
+        assert_eq!(version.number(), v);
+        assert_eq!(version.macromodules_per_dim(), 2 * v as usize + 1);
+        assert_eq!(version.size(), 6 + 12 * v as usize);
+        assert_eq!(version.total_codewords(), 2 * (2 * v as usize + 1).pow(2));
+        // More protection, less data; and always some of each.
+        let data: Vec<usize> = EcLevel::ALL
+            .iter()
+            .map(|&ec| version.data_codewords(ec))
+            .collect();
+        assert!(data.windows(2).all(|w| w[0] > w[1] || w[0] == 0), "v{v}");
+        assert!(data[0] < version.total_codewords());
+    }
+    for (i, ec) in EcLevel::ALL.into_iter().enumerate() {
+        assert_eq!(ec.number(), i + 1);
+        assert_eq!(EcLevel::from_number(i + 1), Some(ec));
+    }
+    assert!(EcLevel::from_number(0).is_none() && EcLevel::from_number(6).is_none());
+    let modes = [
+        GmMode::Chinese,
+        GmMode::Numeral,
+        GmMode::Lower,
+        GmMode::Upper,
+        GmMode::Mixed,
+        GmMode::Byte,
+    ];
+    for (i, mode) in modes.into_iter().enumerate() {
+        assert_eq!(mode.index() as usize, i + 1);
+    }
+    let default = GridMatrixMeta::default();
+    assert_eq!(
+        (
+            default.version.number(),
+            default.ec_level,
+            default.modes.len()
+        ),
+        (1, EcLevel::L5, 0)
+    );
+}
+
+/// Random payloads over every character class, at every EC level: `build`,
+/// `build_with_ec` and `build_text` all produce symbols that decode to themselves.
+#[test]
+fn random_payloads_roundtrip_at_every_level() {
+    let mut rng = anyd::transform::Rng::new(0x6D61_7472_6978);
+    let enc = GridMatrixEncoder::new();
+    let dec = GridMatrixDecoder::new();
+    for round in 0..120 {
+        let len = (rng.next_u64() % 90) as usize;
+        let mut payload = Vec::with_capacity(len);
+        while payload.len() < len {
+            let run = 1 + (rng.next_u64() % 7) as usize;
+            let class = rng.next_u64() % 5;
+            for _ in 0..run {
+                let r = rng.next_u64();
+                payload.push(match class {
+                    0 => b'0' + (r % 10) as u8,
+                    1 => b"ABCXYZ "[(r % 7) as usize],
+                    2 => b"abcxyz "[(r % 7) as usize],
+                    3 => b"!.,-#\x00\x7F"[(r % 7) as usize],
+                    _ => 0x80 | r as u8,
+                });
+            }
+        }
+        payload.truncate(len);
+        let symbol = match round % 3 {
+            0 => enc.build(&payload).unwrap(),
+            _ => enc
+                .build_with_ec(&payload, EcLevel::ALL[round % 5])
+                .unwrap(),
+        };
+        assert_eq!(symbol.payload_bytes(), payload);
+        let encoding = enc.encode(&symbol).unwrap();
+        assert_eq!(dec.decode(&encoding).unwrap(), symbol, "{payload:?}");
+    }
+    let symbol = enc.build_text("Grid Matrix 网格矩阵码 2026").unwrap();
+    let decoded = dec.decode(&enc.encode(&symbol).unwrap()).unwrap();
+    assert_eq!(
+        decoded.text().as_deref(),
+        Some("Grid Matrix 网格矩阵码 2026")
+    );
 }

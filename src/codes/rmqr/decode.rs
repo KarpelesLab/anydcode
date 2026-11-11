@@ -334,6 +334,53 @@ mod tests {
         }
     }
 
+    /// Any content the parser accepts (i.e. anything a Reed–Solomon-valid symbol may
+    /// carry) must be content the encoder can write back into the same size, and
+    /// writing it back must be stable: `decode(encode(decode(x))) == decode(x)`.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn accepted_streams_reencode_to_the_same_segments() {
+        use crate::codes::rmqr::RmqrEncoder;
+        use crate::traits::{Decode, Encode};
+        let mut state = 0x23F1_77AB_C0DE_5EEDu64;
+        let mut accepted = 0;
+        for size in RmqrSize::all() {
+            for ec in [RmqrEcLevel::M, RmqrEcLevel::H] {
+                let capacity = info(size).data_bit_capacity(ec);
+                for round in 0..60 {
+                    let mut content: Vec<bool> =
+                        (0..capacity).map(|_| noise(&mut state) & 1 != 0).collect();
+                    // Open with a real mode and a small count, and end some streams
+                    // cleanly, so most of them get past their first segment.
+                    let mode = [1, 2, 3, 4, 7][round % 5];
+                    for (k, bit) in content.iter_mut().take(3).enumerate() {
+                        *bit = (mode >> (2 - k)) & 1 != 0;
+                    }
+                    content[3] = false;
+                    content[4] = false;
+                    if round % 2 == 0 {
+                        let tail = capacity - (noise(&mut state) as usize % capacity);
+                        content[tail..].fill(false);
+                    }
+                    let Ok(segments) = parse_segments(&content, size) else {
+                        continue;
+                    };
+                    accepted += 1;
+                    let symbol = Symbol::new(
+                        Symbology::RectMicroQrCode,
+                        segments,
+                        SymbolMeta::Rmqr(RmqrMeta { size, ec_level: ec }),
+                    );
+                    let encoding = RmqrEncoder::new()
+                        .encode(&symbol)
+                        .unwrap_or_else(|e| panic!("{symbol:?} does not re-encode: {e}"));
+                    assert_eq!(RmqrDecoder::new().decode(&encoding).as_ref(), Ok(&symbol));
+                }
+            }
+        }
+        assert!(accepted > 500, "only {accepted} streams accepted");
+    }
+
     fn bits(s: &str) -> Vec<bool> {
         s.bytes()
             .filter(|b| !b.is_ascii_whitespace())

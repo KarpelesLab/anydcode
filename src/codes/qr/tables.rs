@@ -57,6 +57,20 @@ pub fn ec_blocks(version: Version, level: EcLevel) -> EcBlocks {
     }
 }
 
+/// Misdecode-protection codewords `p` of a version and level (ISO/IEC 18004
+/// Table 9): EC codewords the smallest symbols hold back from correction to keep
+/// the misdecode probability down. A block corrects at most
+/// `(ec_per_block - p) / 2` codeword errors — `(26,19,2)` for 1-L, `(26,16,4)` for
+/// 1-M, `(44,34,4)` for 2-L.
+pub fn misdecode_protection(version: Version, level: EcLevel) -> usize {
+    match (version.number(), level) {
+        (1, EcLevel::L) => 3,
+        (1, EcLevel::M) | (2, EcLevel::L) => 2,
+        (1, EcLevel::Q | EcLevel::H) | (3, EcLevel::L) => 1,
+        _ => 0,
+    }
+}
+
 /// Alignment-pattern center coordinates for a version (empty for version 1).
 pub fn alignment_positions(version: Version) -> &'static [u8] {
     ALIGNMENT_POSITIONS[version.number() as usize - 1]

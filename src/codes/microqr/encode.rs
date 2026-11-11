@@ -375,6 +375,13 @@ fn write_segment(w: &mut impl BitSink, seg: &SegmentView<'_>, version: MicroVers
     })?;
     match seg.mode {
         Mode::Numeric => {
+            // Numeric mode's indicator is all zeros, so a zero count is bit-for-bit
+            // the terminator: every reader stops there and drops what follows.
+            if seg.data.is_empty() {
+                return Err(Error::invalid_data(
+                    "an empty numeric segment is the Micro QR terminator",
+                ));
+            }
             w.push(seg.data.len() as u32, ccb);
             for chunk in seg.data.chunks(3) {
                 let mut val = 0u32;

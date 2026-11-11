@@ -345,6 +345,64 @@ mod tests {
         }
     }
 
+    /// Any content the parser accepts (i.e. anything a Reed–Solomon-valid symbol may
+    /// carry) must be content the encoder can write back into the same version, and
+    /// writing it back must be stable: `decode(encode(decode(x))) == decode(x)`.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn accepted_streams_reencode_to_the_same_segments() {
+        use crate::codes::microqr::MicroQrEncoder;
+        use crate::codes::microqr::tables::data_bit_capacity;
+        use crate::traits::{Decode, Encode};
+        use MicroEcLevel::{Detection, L, M, Q};
+        use MicroVersion::{M1, M2, M3, M4};
+        let mut state = 0x51C0_9A7E_0BAD_C0DEu64;
+        let mut accepted = 0;
+        for (version, level) in [
+            (M1, Detection),
+            (M2, L),
+            (M2, M),
+            (M3, L),
+            (M3, M),
+            (M4, L),
+            (M4, M),
+            (M4, Q),
+        ] {
+            let capacity = data_bit_capacity(version, level).unwrap();
+            let mib = mode_indicator_bits(version);
+            for round in 0..1500 {
+                let mut content: Vec<bool> =
+                    (0..capacity).map(|_| noise(&mut state) & 1 != 0).collect();
+                // Keep the first count small so most streams get past one segment,
+                // and end some of them cleanly.
+                content[mib] = false;
+                if round % 2 == 0 {
+                    let tail = capacity - (noise(&mut state) as usize % capacity);
+                    content[tail..].fill(false);
+                }
+                let Ok(segments) = parse_segments(&content, version) else {
+                    continue;
+                };
+                accepted += 1;
+                let meta = MicroQrMeta {
+                    version,
+                    ec_level: level,
+                    mask: MicroMask::new((round % 4) as u8).unwrap(),
+                };
+                let symbol =
+                    Symbol::new(Symbology::MicroQrCode, segments, SymbolMeta::MicroQr(meta));
+                let encoding = MicroQrEncoder::new()
+                    .encode(&symbol)
+                    .unwrap_or_else(|e| panic!("{symbol:?} does not re-encode: {e}"));
+                assert_eq!(
+                    MicroQrDecoder::new().decode(&encoding).as_ref(),
+                    Ok(&symbol)
+                );
+            }
+        }
+        assert!(accepted > 2000, "only {accepted} streams accepted");
+    }
+
     /// ISO/IEC 18004 Table 9 codes `(c, k, r)`: Micro QR corrects `r` codeword
     /// errors, which for M2, M3-L and M4-L is less than half the EC count (the rest
     /// is misdecode protection). `r` damaged codewords must be repaired and `r + 1`

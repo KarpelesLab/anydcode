@@ -310,6 +310,53 @@ mod tests {
         }
     }
 
+    /// Any data stream the parser accepts (i.e. anything a Reed–Solomon-valid symbol
+    /// may carry) must be content the encoder can write back into the same version,
+    /// and writing it back must be stable: `decode(encode(decode(x))) == decode(x)`.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn accepted_streams_reencode_to_the_same_segments() {
+        use crate::codes::hanxin::{EcLevel, HanXinEncoder, Mask};
+        use crate::traits::{Decode, Encode};
+        let mut state = 0x4A4E_5849_4E00_0001u64;
+        let mut accepted = 0;
+        for v in 1..=3 {
+            let version = Version::new(v).unwrap();
+            for level in [EcLevel::L1, EcLevel::L2, EcLevel::L3, EcLevel::L4] {
+                let capacity = data_codewords(version, level);
+                for round in 0..400 {
+                    let mut data: Vec<u8> = (0..capacity).map(|_| noise(&mut state)).collect();
+                    // Open with an implemented mode (binary gets a small count) and
+                    // zero-pad the tail of some streams so they end cleanly.
+                    data[0] = [0x10, 0x20, 0x30][round % 3] | (data[0] & 0x0F);
+                    if round % 3 == 2 {
+                        data[0] &= 0xF0;
+                        data[1] &= 0x07;
+                    }
+                    if round % 2 == 0 {
+                        let tail = capacity - (noise(&mut state) as usize % capacity);
+                        data[tail..].fill(0);
+                    }
+                    let Ok(segments) = parse_segments(&data) else {
+                        continue;
+                    };
+                    accepted += 1;
+                    let meta = HanXinMeta {
+                        version,
+                        ec_level: level,
+                        mask: Mask::new((round % 4) as u8).unwrap(),
+                    };
+                    let symbol = Symbol::new(Symbology::HanXin, segments, SymbolMeta::HanXin(meta));
+                    let encoding = HanXinEncoder::new()
+                        .encode(&symbol)
+                        .unwrap_or_else(|e| panic!("{symbol:?} does not re-encode: {e}"));
+                    assert_eq!(HanXinDecoder::new().decode(&encoding).as_ref(), Ok(&symbol));
+                }
+            }
+        }
+        assert!(accepted > 300, "only {accepted} streams accepted");
+    }
+
     /// A numeric group must fit the digit count it stands for: the final group's
     /// width comes from the terminator, so e.g. 1020 as a single digit is malformed
     /// (and used to overflow `b'0' + value`).

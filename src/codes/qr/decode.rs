@@ -436,6 +436,47 @@ mod tests {
         }
     }
 
+    /// Any data stream the parser accepts (i.e. anything a Reed–Solomon-valid symbol
+    /// may carry) must be content the encoder can write back into the same version,
+    /// and writing it back must be stable: `decode(encode(decode(x))) == decode(x)`.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn accepted_streams_reencode_to_the_same_segments() {
+        use crate::codes::qr::QrEncoder;
+        use crate::traits::{Decode, Encode};
+        let mut state = 0xD1B5_4A32_D192_ED03u64;
+        let mut accepted = 0;
+        for (v, rounds) in [(1, 1500), (5, 700), (9, 300), (10, 150), (27, 40)] {
+            let version = Version::new(v).unwrap();
+            let capacity = ec_blocks(version, EcLevel::L).total_data();
+            for round in 0..rounds {
+                let len = 1 + (noise(&mut state) as usize * 7 + round) % capacity;
+                let mut data: Vec<u8> = (0..len).map(|_| noise(&mut state)).collect();
+                // Open with a real mode and a small count so most streams get past
+                // their first segment.
+                data[0] = [0x10, 0x20, 0x40, 0x80, 0x70, 0x00][round % 6] | (data[0] & 0x01);
+                if let Some(b) = data.get_mut(1) {
+                    *b &= [0xFF, 0x1F, 0x03][round % 3];
+                }
+                let Ok(segments) = parse_segments(&data, version) else {
+                    continue;
+                };
+                accepted += 1;
+                let meta = QrMeta {
+                    version,
+                    ec_level: EcLevel::L,
+                    mask: Mask::new((round % 8) as u8).unwrap(),
+                };
+                let symbol = Symbol::new(Symbology::QrCode, segments, SymbolMeta::Qr(meta));
+                let encoding = QrEncoder::new()
+                    .encode(&symbol)
+                    .unwrap_or_else(|e| panic!("v{v}: {symbol:?} does not re-encode: {e}"));
+                assert_eq!(QrDecoder::new().decode(&encoding).as_ref(), Ok(&symbol));
+            }
+        }
+        assert!(accepted > 400, "only {accepted} streams accepted");
+    }
+
     /// ISO/IEC 18004 Table 9 gives each symbol's code as `(c, k, r)` — `r` codeword
     /// errors are correctable. The smallest symbols keep `p` EC codewords back as
     /// misdecode protection, so `r` is below half the EC count: (26,19,2) for 1-L,

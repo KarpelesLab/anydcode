@@ -155,6 +155,13 @@ fn widths_to_bits(widths: &[u32]) -> Result<Vec<bool>> {
     let mut bits = Vec::new();
     let mut in_block = false;
     for pair in widths.as_chunks::<2>().0 {
+        // Between the `01` that opens a block and the `10` that closes it there are
+        // only `1` bits, i.e. narrow bars: a wide bar there would start a second
+        // block inside the first, which no bit stream renders to (`010` is always
+        // wide/wide, never `01` + `0…`).
+        if in_block && pair[0] > 1 {
+            return Err(Error::undecodable("Telepen wide bar inside an open block"));
+        }
         match (pair[0] > 1, pair[1] > 1) {
             (false, false) => bits.push(true), // "1"
             (true, false) => {

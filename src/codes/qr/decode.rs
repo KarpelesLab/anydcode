@@ -5,7 +5,9 @@
 //! exact segments and [`QrMeta`], so the result re-encodes identically.
 
 use super::matrix::Canvas;
-use super::tables::{char_count_bits, ec_blocks, mode_from_indicator, remainder_bits};
+use super::tables::{
+    char_count_bits, ec_blocks, misdecode_protection, mode_from_indicator, remainder_bits,
+};
 use super::{EcLevel, Mask, QrMeta, Version};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
@@ -121,7 +123,8 @@ fn decode_with_format(
     }
     let _ = remainder_bits(version); // remainder bits already excluded above
 
-    let data = deinterleave_and_correct(&codewords, &ecb)?;
+    let max_errors = (ecb.ec_per_block - misdecode_protection(version, level)) / 2;
+    let data = deinterleave_and_correct(&codewords, &ecb, max_errors)?;
     let segments = parse_segments(&data, version)?;
 
     let meta = QrMeta {
@@ -160,8 +163,13 @@ fn version_from_size(width: usize, height: usize) -> Result<Version> {
 }
 
 /// De-interleave codewords back into blocks, RS-correct each, and concatenate the
-/// corrected data codewords in original block order.
-fn deinterleave_and_correct(codewords: &[u8], ecb: &super::tables::EcBlocks) -> Result<Vec<u8>> {
+/// corrected data codewords in original block order. A block needing more than
+/// `max_errors` corrections is beyond the symbol's error-correction capacity.
+fn deinterleave_and_correct(
+    codewords: &[u8],
+    ecb: &super::tables::EcBlocks,
+    max_errors: usize,
+) -> Result<Vec<u8>> {
     let total_blocks = ecb.total_blocks();
     let block_sizes: Vec<usize> = (0..ecb.group1_blocks)
         .map(|_| ecb.group1_data)
@@ -200,6 +208,12 @@ fn deinterleave_and_correct(codewords: &[u8], ecb: &super::tables::EcBlocks) -> 
         full.extend_from_slice(&block_ec[bi]);
         let corrected =
             super::gf::decode(&full, ecb.ec_per_block).ok_or(Error::ErrorCorrectionFailed)?;
+        // The smallest symbols hold EC codewords back as misdecode protection: a
+        // "correction" beyond the capacity is likelier a wrong codeword than a fix.
+        let errors = full.iter().zip(&corrected).filter(|(a, b)| a != b).count();
+        if errors > max_errors {
+            return Err(Error::ErrorCorrectionFailed);
+        }
         out.extend_from_slice(&corrected[..block_sizes[bi]]);
     }
     Ok(out)
@@ -419,6 +433,71 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// ISO/IEC 18004 Table 9 gives each symbol's code as `(c, k, r)` — `r` codeword
+    /// errors are correctable. The smallest symbols keep `p` EC codewords back as
+    /// misdecode protection, so `r` is below half the EC count: (26,19,2) for 1-L,
+    /// (26,16,4) for 1-M, (44,34,4) for 2-L. Up to `r` damaged codewords must be
+    /// repaired, and `r + 1` reported — 1-L used to "correct" a third error with a
+    /// single codeword of redundancy left to vouch for the result.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn corrects_exactly_the_table_9_capacity() {
+        use crate::codes::qr::QrEncoder;
+        use crate::traits::Encode;
+        for (v, level, r) in [
+            (1, EcLevel::L, 2),
+            (1, EcLevel::M, 4),
+            (1, EcLevel::Q, 6),
+            (1, EcLevel::H, 8),
+            (2, EcLevel::L, 4),
+            (2, EcLevel::M, 8),
+            (3, EcLevel::L, 7),
+            (4, EcLevel::L, 10),
+        ] {
+            let version = Version::new(v).unwrap();
+            let meta = QrMeta {
+                version,
+                ec_level: level,
+                mask: Mask::new(3).unwrap(),
+            };
+            let symbol = Symbol::new(
+                Symbology::QrCode,
+                vec![Segment::byte(b"anyd".to_vec())],
+                SymbolMeta::Qr(meta),
+            );
+            let Encoding::Matrix(clean) = QrEncoder::new().encode(&symbol).unwrap() else {
+                panic!("expected a matrix");
+            };
+            // One RS block each: path module `8 * c` belongs to codeword `c`.
+            let mut storage = vec![0u8; Canvas::storage_len(version)];
+            let path: Vec<(usize, usize)> = Canvas::new(version, &mut storage)
+                .unwrap()
+                .data_path()
+                .collect();
+            let total = ec_blocks(version, level).total_codewords();
+            let damaged = |errors: usize| {
+                let mut m = clean.clone();
+                for k in 0..errors {
+                    let (x, y) = path[8 * (k * total / errors)];
+                    m.set(x, y, !clean.get(x, y));
+                }
+                QrDecoder::new().decode_matrix(&m)
+            };
+            for errors in 1..=r {
+                assert_eq!(
+                    damaged(errors).as_ref(),
+                    Ok(&symbol),
+                    "{v}-{level:?} {errors}"
+                );
+            }
+            assert_eq!(
+                damaged(r + 1),
+                Err(Error::ErrorCorrectionFailed),
+                "{v}-{level:?}"
+            );
         }
     }
 

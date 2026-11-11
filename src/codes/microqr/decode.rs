@@ -118,10 +118,12 @@ fn deinterleave_and_correct(
     }
 
     let corrected = gf::decode(&block, params.ec_cw).ok_or(Error::ErrorCorrectionFailed)?;
-    // M1's two EC codewords detect errors but must not correct them (ISO/IEC 18004
-    // Table 9: p = 2): with so little redundancy a "correction" of multi-codeword
-    // damage lands on a wrong codeword a few percent of the time.
-    if ec == MicroEcLevel::Detection && corrected != block {
+    // Micro QR holds EC codewords back as misdecode protection (ISO/IEC 18004
+    // Table 9, `p`): M1's two only detect errors, and M2, M3-L and M4-L correct
+    // fewer than half their EC count. With so little redundancy a "correction"
+    // beyond that lands on a wrong codeword too often to be believed.
+    let errors = block.iter().zip(&corrected).filter(|(a, b)| a != b).count();
+    if errors > params.max_errors() {
         return Err(Error::ErrorCorrectionFailed);
     }
 
@@ -340,6 +342,70 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// ISO/IEC 18004 Table 9 codes `(c, k, r)`: Micro QR corrects `r` codeword
+    /// errors, which for M2, M3-L and M4-L is less than half the EC count (the rest
+    /// is misdecode protection). `r` damaged codewords must be repaired and `r + 1`
+    /// reported; M2-L used to "correct" two errors on five EC codewords.
+    #[cfg(feature = "encode")]
+    #[test]
+    fn corrects_exactly_the_table_9_capacity() {
+        use crate::codes::microqr::MicroQrEncoder;
+        use crate::traits::Encode;
+        use MicroEcLevel::{Detection, L, M, Q};
+        use MicroVersion::{M1, M2, M3, M4};
+        use alloc::vec;
+        for (version, level, r) in [
+            (M1, Detection, 0),
+            (M2, L, 1),
+            (M2, M, 2),
+            (M3, L, 2),
+            (M3, M, 4),
+            (M4, L, 3),
+            (M4, M, 5),
+            (M4, Q, 7),
+        ] {
+            let meta = MicroQrMeta {
+                version,
+                ec_level: level,
+                mask: MicroMask::new(1).unwrap(),
+            };
+            let symbol = Symbol::new(
+                Symbology::MicroQrCode,
+                vec![Segment::numeric(b"271".to_vec())],
+                SymbolMeta::MicroQr(meta),
+            );
+            let Encoding::Matrix(clean) = MicroQrEncoder::new().encode(&symbol).unwrap() else {
+                panic!("expected a matrix");
+            };
+            let mut storage = [0u8; Canvas::storage_len(MicroVersion::M4)];
+            let path: Vec<(usize, usize)> = Canvas::new(version, &mut storage)
+                .unwrap()
+                .data_path()
+                .collect();
+            // Path module `8 * c` belongs to data codeword `c` (the leading, full ones).
+            let damaged = |errors: usize| {
+                let mut m = clean.clone();
+                for c in 0..errors {
+                    let (x, y) = path[8 * c];
+                    m.set(x, y, !clean.get(x, y));
+                }
+                MicroQrDecoder::new().decode_matrix(&m)
+            };
+            for errors in 1..=r {
+                assert_eq!(
+                    damaged(errors).as_ref(),
+                    Ok(&symbol),
+                    "{version:?}-{level:?}"
+                );
+            }
+            assert_eq!(
+                damaged(r + 1),
+                Err(Error::ErrorCorrectionFailed),
+                "{version:?}-{level:?}"
+            );
         }
     }
 

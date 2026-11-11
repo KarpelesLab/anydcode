@@ -279,7 +279,7 @@ fn real_bottle_photo_front_end() {
     use anyd::traits::Detect;
 
     let bytes = std::fs::read("testdata/real_qr_bottle.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     // ITU-R BT.601 luma, as the CLI does.
     let luma: Vec<u8> = rgba
@@ -341,7 +341,7 @@ fn real_scene_locate_then_decode_ean() {
     use anyd::detect::{LocateOptions, locate};
 
     let bytes = std::fs::read("testdata/real_scene_ean.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
@@ -414,7 +414,7 @@ fn real_scene_locator_precision() {
 
     let load = |path: &str| {
         let bytes = std::fs::read(path).expect("read fixture");
-        let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+        let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
         let (w, h) = (rgba.width as usize, rgba.height as usize);
         let luma: Vec<u8> = rgba
             .data
@@ -533,7 +533,7 @@ fn real_can_qr_curved_blurred_decode() {
     use anyd::GrayFrame;
 
     let bytes = std::fs::read("testdata/real_qr_can.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
@@ -564,7 +564,7 @@ fn real_scene_curved_ean_edge_decode() {
     use anyd::scan1d::ScanOptions;
 
     let bytes = std::fs::read("testdata/real_scene_ean_curved.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
@@ -599,7 +599,7 @@ fn real_scene_text_is_not_a_barcode() {
     use anyd::scan1d::ScanOptions;
 
     let bytes = std::fs::read("testdata/real_scene_text.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data
@@ -628,7 +628,7 @@ fn real_scene_qr_via_scan_all() {
     use anyd::GrayFrame;
 
     let bytes = std::fs::read("testdata/real_scene_qr.png").expect("read fixture");
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).expect("decode PNG");
+    let rgba = oxideav_png::decode_rgba8(&bytes).expect("decode PNG");
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data

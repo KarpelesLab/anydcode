@@ -30,14 +30,18 @@ fn main() {
         let mut rng = Rng::new(42);
         img = transform::add_noise(&img, noise, &mut rng);
     }
-    let png = oxideav_png::PngImage {
-        width: img.width() as u32,
-        height: img.height() as u32,
-        pixel_format: oxideav_png::PngPixelFormat::Gray8,
-        stride: img.width(),
-        data: img.pixels().to_vec(),
-        palette: Vec::new(),
-    };
-    std::fs::write(&out, oxideav_png::encode_png_image(&png).unwrap()).unwrap();
+    let png = oxideav_png::PngImage::packed(
+        img.width() as u32,
+        img.height() as u32,
+        oxideav_png::PixelFormat::Gray8,
+        img.width(),
+        img.pixels().to_vec(),
+    )
+    .unwrap();
+    std::fs::write(
+        &out,
+        oxideav_png::encode(&png, &oxideav_png::EncodeOptions::default()).unwrap(),
+    )
+    .unwrap();
     println!("wrote {out} {}x{}", img.width(), img.height());
 }

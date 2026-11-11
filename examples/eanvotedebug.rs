@@ -4,7 +4,7 @@ use anyd::scan1d::{ScanOptions, scan_edges};
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: eanvotedebug <png>");
-    let rgba = oxideav_png::decode_png_to_rgba(&std::fs::read(&path).unwrap()).unwrap();
+    let rgba = oxideav_png::decode_rgba8(&std::fs::read(&path).unwrap()).unwrap();
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data

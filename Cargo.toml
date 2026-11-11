@@ -89,11 +89,9 @@ cli = ["std", "encode", "decode", "scan", "all-codes", "dep:oxideav-png"]
 wasm = ["std", "encode", "decode", "scan", "all-codes"]
 
 [dependencies]
-# Pinned exactly: 0.1.9 made `PngImage` `#[non_exhaustive]` and 0.1.11 replaced its
-# fields, so every later 0.1.x fails to compile the `cli` front-end (and no
-# Cargo.lock is committed to hold the version back). Unpin when migrating to the
-# new `oxideav_png::encode` / `decode_rgba8` API.
-oxideav-png = { version = "=0.1.8", optional = true, default-features = false }
+# 0.1.12 is the first release with the stable image-crate API used here
+# (`decode_rgba8`, `encode`, `PngImage::packed`).
+oxideav-png = { version = "0.1.12", optional = true, default-features = false }
 
 # The library ships inside a per-frame video pipeline (and as the wasm demo, where the
 # browser cannot recover codegen quality after the fact) — trade compile time for the

@@ -348,15 +348,15 @@ fn render_png(encoding: &Encoding, scale: usize) -> Result<Vec<u8>, String> {
         ));
     }
     let img = render(encoding, scale);
-    let png = oxideav_png::PngImage {
-        width: img.width() as u32,
-        height: img.height() as u32,
-        pixel_format: oxideav_png::PngPixelFormat::Gray8,
-        stride: img.width(),
-        data: img.pixels().to_vec(),
-        palette: Vec::new(),
-    };
-    oxideav_png::encode_png_image(&png).map_err(|e| e.to_string())
+    let png = oxideav_png::PngImage::packed(
+        img.width() as u32,
+        img.height() as u32,
+        oxideav_png::PixelFormat::Gray8,
+        img.width(),
+        img.pixels().to_vec(),
+    )
+    .map_err(|e| e.to_string())?;
+    oxideav_png::encode(&png, &oxideav_png::EncodeOptions::default()).map_err(|e| e.to_string())
 }
 
 /// Render to the terminal using half-block characters (2 module rows per line).
@@ -518,7 +518,7 @@ fn decode_png_bytes(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
             "PNG is {w}x{h}, over the {MAX_DECODE_PIXELS}-pixel limit"
         ));
     }
-    let rgba = oxideav_png::decode_png_to_rgba(bytes).map_err(|e| format!("decoding PNG: {e}"))?;
+    let rgba = oxideav_png::decode_rgba8(bytes).map_err(|e| format!("decoding PNG: {e}"))?;
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma = rgba_to_luma(&rgba.data);
     let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;
@@ -666,15 +666,15 @@ mod tests {
             .iter()
             .flat_map(|&p| [0, 0, 0, if p < 128 { 255 } else { 0 }])
             .collect();
-        let png = oxideav_png::PngImage {
-            width: img.width() as u32,
-            height: img.height() as u32,
-            pixel_format: oxideav_png::PngPixelFormat::Rgba,
-            stride: img.width() * 4,
+        let png = oxideav_png::PngImage::packed(
+            img.width() as u32,
+            img.height() as u32,
+            oxideav_png::PixelFormat::Rgba,
+            img.width() * 4,
             data,
-            palette: Vec::new(),
-        };
-        let bytes = oxideav_png::encode_png_image(&png).unwrap();
+        )
+        .unwrap();
+        let bytes = oxideav_png::encode(&png, &oxideav_png::EncodeOptions::default()).unwrap();
         let found = decode_png_bytes(&bytes).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].text().as_deref(), Some("TRANSPARENT"));
@@ -815,15 +815,19 @@ mod tests {
         assert_eq!(found[0].text().as_deref(), Some("ROUND TRIP"));
         assert!(run(&args(&["decode", png])).is_ok());
         // A blank image holds no barcode: an error exit, not an empty success.
-        let blank = oxideav_png::PngImage {
-            width: 64,
-            height: 64,
-            pixel_format: oxideav_png::PngPixelFormat::Gray8,
-            stride: 64,
-            data: vec![255; 64 * 64],
-            palette: Vec::new(),
-        };
-        std::fs::write(png, oxideav_png::encode_png_image(&blank).unwrap()).unwrap();
+        let blank = oxideav_png::PngImage::packed(
+            64,
+            64,
+            oxideav_png::PixelFormat::Gray8,
+            64,
+            vec![255; 64 * 64],
+        )
+        .unwrap();
+        std::fs::write(
+            png,
+            oxideav_png::encode(&blank, &oxideav_png::EncodeOptions::default()).unwrap(),
+        )
+        .unwrap();
         assert!(run(&args(&["decode", png])).is_err());
         // Truncated file: an error, not a panic.
         let bytes = std::fs::read(png).unwrap();

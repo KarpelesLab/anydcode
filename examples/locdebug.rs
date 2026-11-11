@@ -18,7 +18,7 @@ fn main() {
         let h: usize = fields.next().unwrap().parse().unwrap();
         (bytes[header_end..].to_vec(), w, h)
     } else {
-        let rgba = oxideav_png::decode_png_to_rgba(&bytes).unwrap();
+        let rgba = oxideav_png::decode_rgba8(&bytes).unwrap();
         let (w, h) = (rgba.width as usize, rgba.height as usize);
         let luma: Vec<u8> = rgba
             .data

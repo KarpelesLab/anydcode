@@ -15,7 +15,7 @@ fn main() {
         });
     let mut args = raw_args.into_iter();
     let path = args.next().expect("usage: cropdecode <png> [x0 y0 x1 y1]");
-    let rgba = oxideav_png::decode_png_to_rgba(&std::fs::read(&path).unwrap()).unwrap();
+    let rgba = oxideav_png::decode_rgba8(&std::fs::read(&path).unwrap()).unwrap();
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data

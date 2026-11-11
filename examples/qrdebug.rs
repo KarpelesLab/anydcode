@@ -1,7 +1,7 @@
 fn main() {
     let path = std::env::args().nth(1).expect("usage: qrdebug <png>");
     let bytes = std::fs::read(&path).unwrap();
-    let rgba = oxideav_png::decode_png_to_rgba(&bytes).unwrap();
+    let rgba = oxideav_png::decode_rgba8(&bytes).unwrap();
     let (w, h) = (rgba.width as usize, rgba.height as usize);
     let luma: Vec<u8> = rgba
         .data

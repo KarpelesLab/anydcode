@@ -38,7 +38,7 @@
 //! For example, a Code 128 + QR encoder for a `no_std` + `alloc` target:
 //!
 //! ```toml
-//! anyd = { version = "0.1", default-features = false, features = ["alloc", "encode", "qr", "code128"] }
+//! anyd = { version = "0.2", default-features = false, features = ["alloc", "encode", "qr", "code128"] }
 //! ```
 //!
 //! [`Symbology::is_implemented`] reports which symbologies the current build carries.

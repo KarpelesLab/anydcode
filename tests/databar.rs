@@ -264,3 +264,81 @@ fn decode_rejects_corrupted_pattern() {
     }
     assert!(dec.decode(&Encoding::Linear(p)).is_err());
 }
+
+/// A data character is a specific (n, k) width set: fixed module total, bounded
+/// element widths. Damage that leaves a character outside its set must be rejected
+/// even when the weak modulo-79 / 89 / 211 checksum happens to agree — otherwise
+/// the decoder invents a value for widths no encoder can produce. Every one-module
+/// edge shift, insertion and deletion inside the symbol body (guards excluded) is
+/// tried on a seeded batch of symbols; whatever still decodes must re-encode to
+/// exactly the pattern that was read.
+#[test]
+fn damaged_data_characters_are_never_read() {
+    use anyd::output::LinearPattern;
+    use anyd::transform::Rng;
+
+    let enc = DataBarEncoder::new();
+    let dec = DataBarDecoder::new();
+    let mut rng = Rng::new(0xDA7A_BA12);
+    let digits = |rng: &mut Rng, n: usize| -> Vec<u8> {
+        (0..n).map(|_| b'0' + (rng.next_u64() % 10) as u8).collect()
+    };
+
+    let mut tried = 0usize;
+    for _ in 0..120 {
+        let gtin = digits(&mut rng, 13);
+        let mut limited = gtin.clone();
+        limited[0] = b'0' + (limited[0] & 1);
+        let mut expanded = b"10".to_vec();
+        expanded.extend(digits(&mut rng, 9));
+        expanded.extend_from_slice(b"AB");
+
+        // (symbol, trailing guard modules to leave alone).
+        let symbols = [
+            (enc.build_omni(&gtin).unwrap(), 2),
+            (enc.build_limited(&limited).unwrap(), 7),
+            (enc.build_expanded(&expanded).unwrap(), 2),
+        ];
+        for (symbol, right_guard) in symbols {
+            let Encoding::Linear(clean) = enc.encode(&symbol).unwrap() else {
+                panic!("expected linear");
+            };
+            let body = 2..clean.modules.len() - right_guard;
+            let mut check = |modules: Vec<bool>| {
+                if modules == clean.modules {
+                    return;
+                }
+                tried += 1;
+                let damaged = Encoding::Linear(LinearPattern {
+                    modules,
+                    quiet_zone: clean.quiet_zone,
+                });
+                if let Ok(read) = dec.decode(&damaged) {
+                    assert_eq!(
+                        enc.encode(&read).unwrap(),
+                        damaged,
+                        "read {:?} out of a pattern that is not its symbol",
+                        read.payload_bytes()
+                    );
+                }
+            };
+            for i in body.start + 1..body.end {
+                // Shift the edge between modules i-1 and i either way.
+                let mut m = clean.modules.clone();
+                m[i] = m[i - 1];
+                check(m);
+                let mut m = clean.modules.clone();
+                m[i - 1] = m[i];
+                check(m);
+                // Widen / narrow the element under module i.
+                let mut m = clean.modules.clone();
+                m.insert(i, m[i]);
+                check(m);
+                let mut m = clean.modules.clone();
+                m.remove(i);
+                check(m);
+            }
+        }
+    }
+    assert!(tried > 50_000, "only {tried} damaged patterns tried");
+}

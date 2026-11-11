@@ -336,6 +336,71 @@ fn decodes_third_party_eci_escape() {
     assert_eq!(decoded.payload_bytes(), "héllo wörld".as_bytes());
 }
 
+/// `zint -b AZTEC --structapp=1,3 -d ABC`: symbol 1 of 3 (header "AC").
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND: &[&str] = &[
+    "000010110110011",
+    "110000111001011",
+    "101100000100110",
+    "111111111111110",
+    "111100000001101",
+    "010101111101011",
+    "001101000101011",
+    "010101010101011",
+    "000101000101101",
+    "011101111101010",
+    "000100000001111",
+    "000111111111110",
+    "010011011110010",
+    "001010001111101",
+    "100100010011111",
+];
+
+/// `zint -b AZTEC --structapp=2,3,ID -d ABC`: symbol 2 of 3 of file "ID" (header
+/// " ID BC").
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND_WITH_ID: &[&str] = &[
+    "001001111101110",
+    "110101101001010",
+    "101100001000100",
+    "111111111111100",
+    "111100000001101",
+    "010101111101110",
+    "000101000101111",
+    "001101010101001",
+    "101101000101011",
+    "100101111101000",
+    "100100000001011",
+    "000111111111111",
+    "100001100010010",
+    "001010100100101",
+    "100001000000100",
+];
+
+#[test]
+fn structured_append_header_is_not_read_as_payload() {
+    // The message of a Structured Append symbol opens with M/L U/L and a header
+    // (optional file id, position letter, count letter). Nothing in `AztecMeta` can
+    // hold it, so the symbol is reported as unsupported rather than decoded with the
+    // header glued onto the data ("ACABC") and re-encoded as an ordinary symbol.
+    for rows in [ZINT_STRUCTURED_APPEND, ZINT_STRUCTURED_APPEND_WITH_ID] {
+        let reference = Encoding::Matrix(matrix_from_rows(rows));
+        assert!(matches!(
+            AztecDecoder::new().decode(&reference),
+            Err(anyd::Error::Unsupported { .. })
+        ));
+    }
+    // An ordinary message that merely uses Mixed and Upper characters is unaffected.
+    let enc = AztecEncoder::new();
+    for payload in [&b"\x01A"[..], b"@ABC", b"\x1b\x1bXY", b"AC ABC"] {
+        let symbol = enc.build(vec![Segment::byte(payload)]).unwrap();
+        let decoded = AztecDecoder::new()
+            .decode(&enc.encode(&symbol).unwrap())
+            .unwrap();
+        assert_eq!(decoded.payload_bytes(), payload);
+    }
+}
+
 #[test]
 fn unsupported_layer_counts_are_errors_not_panics() {
     // Hand-built metadata outside the supported sizes (compact 1-4, full 1-22 layers)

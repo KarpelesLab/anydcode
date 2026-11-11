@@ -15,6 +15,8 @@
 //! encoder/decoder. The decoder follows every high-level construct a third-party
 //! symbol may use (latched Punct mode, `FLG(0)` FNC1 reported as GS, `FLG(n)` ECI
 //! escapes reported as ECI segments); the encoder does not emit FLG escapes.
+//! Structured Append symbols (a message opening with M/L U/L and a sequence header)
+//! are reported as unsupported rather than read with the header as payload.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix

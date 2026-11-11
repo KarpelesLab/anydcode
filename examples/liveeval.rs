@@ -13,7 +13,9 @@
 //! * `ideal`    — decoding a ground-truth crop read it (decoder ceiling, no locator);
 //! * `false`    — reads whose text is not the planted payload.
 //!
-//! Run with `cargo run --release --example liveeval` (add `-- -v` to list every miss).
+//! Run with `cargo run --release --example liveeval` (add `-- -v` to list every miss,
+//! `--quality=<name>|all` for degraded captures, `--slow=<ms>` to list slow scenes and
+//! `--jobs=1` for timings undisturbed by the other trials).
 
 use anyd::codes::aztec::AztecEncoder;
 use anyd::codes::code39::Code39Encoder;
@@ -550,6 +552,12 @@ fn main() {
         .filter(|q| qarg == "all" || format!("{q:?}").to_lowercase() == qarg)
         .collect();
     assert!(!qualities.is_empty(), "unknown --quality={qarg}");
+    // `--slow=<ms>` lists every scene with a stage at least that slow.
+    let slow: Option<f64> =
+        std::env::args().find_map(|a| a.strip_prefix("--slow=").and_then(|v| v.parse().ok()));
+    // `--jobs=<n>` caps the worker threads (timings are only meaningful at 1).
+    let jobs: Option<usize> =
+        std::env::args().find_map(|a| a.strip_prefix("--jobs=").and_then(|v| v.parse().ok()));
     let only: Option<String> = std::env::args().skip(1).find(|a| !a.starts_with('-'));
     let codes = codes();
 
@@ -583,7 +591,8 @@ fn main() {
     // Trials are independent: fan them out over the available cores.
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<(usize, Outcome)>> = Mutex::new(Vec::new());
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let workers =
+        jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
     std::thread::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
@@ -627,6 +636,24 @@ fn main() {
         for (acc, s) in secs.iter_mut().zip(out.secs) {
             acc.0 += s;
             acc.1 = acc.1.max(s);
+        }
+        if let Some(ms) = slow
+            && out.secs.iter().any(|&s| 1000.0 * s >= ms)
+        {
+            println!(
+                "SLOW  {:<10} scale={} bg={:?} rot={} grad={} q={:?} cands={} locate={:.0}ms crops={:.0}ms frame2d={:.0}ms ideal={:.0}ms",
+                code.name,
+                t.scale,
+                t.bg,
+                t.deg,
+                t.gradient,
+                t.quality,
+                out.cands,
+                1000.0 * out.secs[0],
+                1000.0 * out.secs[1],
+                1000.0 * out.secs[2],
+                1000.0 * out.secs[3],
+            );
         }
         if verbose && (out.tally.live == 0 || !out.falses.is_empty()) {
             println!(

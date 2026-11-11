@@ -20,15 +20,16 @@
 //! | Gaussian blur        | σ ≤ 1.5 px                                                |
 //! | Additive noise       | σ ≤ 25 luminance                                          |
 //! | Brightness/contrast  | ±40 brightness, 0.6–1.4 contrast                          |
-//! | Perspective tilt     | ≤ 0.20 (dim ≤ 12) / ≤ 0.10 (dim ≤ 22) / ≤ 0.04 (larger)   |
+//! | Perspective tilt     | ≤ 0.30 on either axis, all sizes, at any rotation         |
 //! | Combined             | 8° rotation + σ1.0 blur + σ12 noise                       |
 //!
-//! Tilt tolerance shrinks with symbol size: a Data Matrix has no interior alignment
-//! anchor, so the fourth (timing-meeting) corner is recovered by fitting straight lines
-//! to the two timing borders and intersecting them. That is perspective-correct for a
-//! well-resolved edge but degrades as modules-per-edge grows, hence the size-graded
-//! tilt column. Magnitudes are set a comfortable margin inside the sampler's measured
-//! failure points; the `known_hard_edge_cases` test pins a few points near the edge.
+//! A Data Matrix has no interior alignment anchor, so the fourth (timing-meeting)
+//! corner is recovered from the two timing borders alone: seeded where the tangents
+//! from the L's ends to the symbol's ink meet, then refined by fitting straight lines
+//! to the borders and intersecting them (`steep_perspective`, and amid print in
+//! `perspective_amid_print`). Magnitudes are set a comfortable margin inside the
+//! sampler's measured failure points; the `known_hard_edge_cases` test pins a few
+//! points near the edge.
 #![cfg(all(feature = "encode", feature = "scan", feature = "datamatrix"))]
 
 use anyd::codes::datamatrix::{DataMatrixEncoder, DataMatrixScanner, sample_grid, scan};
@@ -159,9 +160,7 @@ fn brightness_and_contrast() {
 
 #[test]
 fn perspective_tilt() {
-    // Tilt tolerance is size-graded (see the module header): the fourth corner is
-    // recovered from the timing-border lines, which resolve more coarsely as the
-    // module count grows.
+    // The historical, size-graded tilt envelope; `steep_perspective` goes further.
     for payload in cases() {
         let (matrix, expected) = encode(&payload);
         let (base, dim) = base_image(&matrix);
@@ -190,6 +189,163 @@ fn combined_pipeline() {
         let blurred = transform::gaussian_blur(&rotated, 1.0);
         let noised = transform::add_noise(&blurred, 12.0, &mut rng);
         assert_decodes(&noised, &expected, &format!("dim{dim} combo"));
+    }
+}
+
+#[test]
+fn steep_perspective() {
+    // A symbol seen well off-axis: one side foreshortened by 15 % and by 30 %, about
+    // either axis (`tilt_right` shortens a timing border, `tilt_bottom` an arm of the
+    // L, which puts the far corner *beyond* the parallelogram of the other three), at
+    // every size, also turned in the frame and through a mildly soft, noisy capture.
+    for payload in cases() {
+        let (matrix, expected) = encode(&payload);
+        let (base, dim) = base_image(&matrix);
+        for amount in [0.15f32, 0.30] {
+            for (axis, tilted) in [
+                ("R", transform::tilt_right(&base, amount)),
+                ("B", transform::tilt_bottom(&base, amount)),
+            ] {
+                for (deg, soft) in [(0.0f32, false), (17.0, true), (45.0, false), (200.0, true)] {
+                    let mut img = tilted.clone();
+                    if deg != 0.0 {
+                        img = transform::rotate(&img, deg.to_radians());
+                    }
+                    if soft {
+                        let mut rng = Rng::new(7);
+                        img = transform::add_noise(
+                            &transform::gaussian_blur(&img, 1.0),
+                            6.0,
+                            &mut rng,
+                        );
+                    }
+                    let label = format!("dim{dim} tilt{axis}{amount} rot{deg} soft={soft}");
+                    assert_decodes(&img, &expected, &label);
+                }
+            }
+        }
+    }
+}
+
+/// Paste `sprite` onto a `w × h` page of luminance `paper` with its top-left at
+/// `(x0, y0)`, then scatter glyph-sized dark boxes — print — over the rest of the page,
+/// right up to the sprite's box.
+fn printed_page(sprite: &GrayImage, w: usize, h: usize, (x0, y0): (usize, usize)) -> GrayImage {
+    let mut page = GrayImage::filled(w, h, 235);
+    let mut rng = Rng::new(42);
+    let mut y = 6;
+    while y + 14 < h {
+        let mut x = 6;
+        while x + 10 < w {
+            let (gw, gh) = (
+                3 + (rng.next_f32() * 6.0) as usize,
+                8 + (rng.next_f32() * 5.0) as usize,
+            );
+            if rng.next_f32() > 0.2 {
+                for yy in y..y + gh {
+                    for xx in x..x + gw {
+                        page.set(xx, yy, 40);
+                    }
+                }
+            }
+            x += gw + 3;
+        }
+        y += 18;
+    }
+    for y in 0..sprite.height() {
+        for x in 0..sprite.width() {
+            page.set(x0 + x, y0 + y, sprite.get(x, y));
+        }
+    }
+    page
+}
+
+#[test]
+fn perspective_amid_print() {
+    // The tilted symbol's far corner has to be found from its timing borders, and
+    // print one quiet zone away from them must not be mistaken for more of the same.
+    let (matrix, expected) = encode(b"DM-LIVE-2026");
+    let (base, dim) = base_image(&matrix);
+    for (axis, tilted) in [
+        ("R", transform::tilt_right(&base, 0.3)),
+        ("B", transform::tilt_bottom(&base, 0.3)),
+    ] {
+        for deg in [0.0f32, 17.0, 45.0] {
+            // The warp's own margin is cropped back to the (foreshortened) quiet zone.
+            let turned = if deg == 0.0 {
+                tilted.clone()
+            } else {
+                transform::rotate(&tilted, deg.to_radians())
+            };
+            let page = printed_page(&turned, 320, 300, (70, 60));
+            let img = transform::gaussian_blur(&page, 0.8);
+            assert_decodes(
+                &img,
+                &expected,
+                &format!("dim{dim} tilt{axis} rot{deg} in print"),
+            );
+        }
+    }
+}
+
+#[test]
+fn grain_under_uneven_light() {
+    // A dark, grainy capture lit from one side: the frame-wide Otsu threshold is spent
+    // on telling the lit half of the page from the shaded one, so the grid has to be
+    // read against the symbol's own.
+    let (matrix, expected) = encode(b"DM-LIVE-2026");
+    let sprite = anyd::render::render_matrix(&matrix, 5);
+    for (deg, left) in [(0.0f32, 150usize), (0.0, 250), (45.0, 150), (45.0, 250)] {
+        let turned = if deg == 0.0 {
+            sprite.clone()
+        } else {
+            transform::rotate(&sprite, deg.to_radians())
+        };
+        let (w, h) = (640, 360);
+        let mut page = GrayImage::filled(w, h, 232);
+        for y in 0..turned.height() {
+            for x in 0..turned.width() {
+                page.set(left + x, 130 + y, turned.get(x, y));
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let lit = 0.59 + 0.27 * (x as f32 / w as f32);
+                page.set(x, y, (page.get(x, y) as f32 * lit) as u8);
+            }
+        }
+        let mut rng = Rng::new(99);
+        let dim = transform::brightness_contrast(&transform::gaussian_blur(&page, 0.8), -30.0, 0.6);
+        let img = transform::add_noise(&dim, 16.0, &mut rng);
+        assert_decodes(
+            &img,
+            &expected,
+            &format!("grain + falloff rot{deg} x{left}"),
+        );
+    }
+}
+
+#[test]
+fn other_ink_is_not_read() {
+    // The sampler runs on every frame, most of which show something else: neither a
+    // solid block, nor print, nor noise may come back as a symbol.
+    let mut rng = Rng::new(3);
+    let block = {
+        let mut img = GrayImage::filled(200, 160, 240);
+        for y in 30..130 {
+            for x in 40..150 {
+                img.set(x, y, 20);
+            }
+        }
+        img
+    };
+    let print = printed_page(&GrayImage::filled(1, 1, 235), 320, 240, (0, 0));
+    let noise = transform::add_noise(&GrayImage::filled(160, 160, 128), 60.0, &mut rng);
+    for (label, img) in [("block", block), ("print", print), ("noise", noise)] {
+        assert!(
+            scan(&img.as_frame()).is_err(),
+            "{label} read as a Data Matrix"
+        );
     }
 }
 

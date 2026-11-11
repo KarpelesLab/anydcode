@@ -50,17 +50,21 @@ impl HanXinEncoder {
     }
 
     /// Convenience: build a symbol from UTF-8 `text`, splitting it into the
-    /// cheapest mix of numeric / text / binary segments. (Text sub-mode switch
-    /// costs are not modeled — the split is near-optimal, and the exact bit
-    /// stream is always re-measured when choosing the version.)
+    /// cheapest mix of numeric / text / binary segments. The segmenter does not
+    /// model Text sub-mode switches (6 bits each), so its split is re-measured
+    /// against a single binary segment and the shorter bit stream wins: the
+    /// result never needs a larger version than plain binary would.
     pub fn build_text(&self, text: &str, level: EcLevel) -> Result<Symbol> {
         let bytes = text.as_bytes();
+        let binary = vec![Segment::byte(bytes.to_vec())];
         if bytes.is_empty() {
-            return self.build(vec![Segment::byte(Vec::new())], level);
+            return self.build(binary, level);
         }
         // Binary mode accepts everything, so the optimizer cannot fail.
-        let segs = optimize_segments(bytes, &mode_costs())
-            .unwrap_or_else(|| vec![Segment::byte(bytes.to_vec())]);
+        let segs = match optimize_segments(bytes, &mode_costs()) {
+            Some(segs) if segments_bit_len(&segs)? <= segments_bit_len(&binary)? => segs,
+            _ => binary,
+        };
         self.build(segs, level)
     }
 

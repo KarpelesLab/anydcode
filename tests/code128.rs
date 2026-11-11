@@ -636,3 +636,38 @@ fn decoder_rejects_malformed_rows() {
         assert!(undecodable(&Encoding::Linear(pattern)), "{symbols:?}");
     }
 }
+
+/// The check character is the position-weighted sum of the symbol values modulo
+/// 103. The weights grow with the length, so for a long enough symbol the plain sum
+/// no longer fits 32 bits; it must still come out as the true residue, not wrap (or,
+/// with overflow checks on, panic).
+#[test]
+fn check_character_of_a_very_long_symbol() {
+    let encoder = Code128Encoder::new();
+    let mut symbols = vec![104u8]; // Start B
+    symbols.extend((0..20_000u32).map(|i| (i * 7 % 96) as u8));
+    let expected = symbols
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| k.max(1) as u64 * v as u64)
+        .sum::<u64>();
+    assert!(expected > u32::MAX as u64);
+    let expected = (expected % 103) as u8;
+
+    let mut pattern = anyd::output::LinearPattern::new();
+    encoder.encode_into(&symbols, &mut pattern).unwrap();
+    // The check character sits just before the 13-module Stop; compare it with the
+    // same value rendered as the single data character of a short symbol.
+    let mut short = anyd::output::LinearPattern::new();
+    encoder.encode_into(&[104, expected], &mut short).unwrap();
+    let n = pattern.modules.len();
+    assert_eq!(pattern.modules[n - 24..n - 13], short.modules[11..22]);
+
+    let decoded = Code128Decoder::new()
+        .decode(&Encoding::Linear(pattern))
+        .unwrap();
+    let SymbolMeta::Code128(meta) = &decoded.meta else {
+        panic!("Code 128 meta");
+    };
+    assert_eq!(meta.symbols, symbols);
+}

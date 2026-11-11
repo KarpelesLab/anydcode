@@ -49,7 +49,16 @@ fn export(buf: Vec<u8>) -> u64 {
     (ptr << 32) | len
 }
 
+/// Borrow `len` bytes of wasm memory at `ptr`. An empty or null input is the empty
+/// slice whatever the pointer says: `slice::from_raw_parts` is undefined behaviour on a
+/// null pointer even for zero length, and a host may well pass `0` for "no bytes".
+///
+/// # Safety
+/// For `len > 0`, a non-null `ptr` must point to `len` readable bytes.
 unsafe fn input(ptr: *const u8, len: usize) -> &'static [u8] {
+    if ptr.is_null() || len == 0 {
+        return &[];
+    }
     unsafe { core::slice::from_raw_parts(ptr, len) }
 }
 
@@ -233,7 +242,11 @@ pub unsafe extern "C" fn decode2d(w: usize, h: usize, luma_ptr: *const u8) -> u6
         return export(b"[]".to_vec());
     };
 
-    let out = crate::pipeline::scan_2d(&frame);
+    export(symbols_boxed_json(&crate::pipeline::scan_2d(&frame)))
+}
+
+/// Serialize decoded symbols with their bounding boxes, as `decode2d` returns them.
+fn symbols_boxed_json(out: &[crate::Symbol]) -> Vec<u8> {
     let mut json = String::from("[");
     for (i, sym) in out.iter().enumerate() {
         if i > 0 {
@@ -261,7 +274,7 @@ pub unsafe extern "C" fn decode2d(w: usize, h: usize, luma_ptr: *const u8) -> u6
         json.push('}');
     }
     json.push(']');
-    export(json.into_bytes())
+    json.into_bytes()
 }
 
 /// Axis-aligned bounds `(x0, y0, x1, y1)` of a decoded symbol's outline, if it has one.
@@ -294,8 +307,11 @@ pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         downscale: if w.min(h) >= 800 { 2 } else { 1 },
         ..Default::default()
     };
-    let candidates = crate::detect::locate(&frame, &opts);
+    export(candidates_json(&crate::detect::locate(&frame, &opts)))
+}
 
+/// Serialize located candidates, as `locate` returns them.
+fn candidates_json(candidates: &[crate::pipeline::Candidate]) -> Vec<u8> {
     let mut json = String::from("[");
     for (i, c) in candidates.iter().enumerate() {
         if i > 0 {
@@ -328,14 +344,21 @@ pub unsafe extern "C" fn locate(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         json.push_str("]}");
     }
     json.push(']');
-    export(json.into_bytes())
+    json.into_bytes()
 }
 
 fn push_num(s: &mut String, v: f32) {
     // Integer-ish pixel coordinates; one decimal is plenty for the overlay. JSON has
     // no NaN/Infinity, and one unparseable number would cost the page the whole reply.
     let v = if v.is_finite() { v } else { 0.0 };
-    let r = (v * 10.0).round() / 10.0;
+    // A finite value above `f32::MAX / 10` overflows the scaling to infinity; it has no
+    // fractional part to round anyway.
+    let scaled = v * 10.0;
+    let r = if scaled.is_finite() {
+        scaled.round() / 10.0
+    } else {
+        v
+    };
     s.push_str(&r.to_string());
 }
 
@@ -890,5 +913,598 @@ fn msi_check(check: Option<&str>) -> Result<crate::codes::msi::MsiCheck, String>
         Some(o) => Err(format!(
             "MSI check must be none/mod10/mod11/mod1010/mod1110 (got '{o}')"
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Location, Point, Quad};
+    use crate::pipeline::Candidate;
+    use crate::symbol::{Symbol, SymbolMeta};
+    use crate::symbology::Symbology;
+
+    /// A parsed JSON value — just enough structure to check what the page will see.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Json {
+        Null,
+        Num(f64),
+        Str(String),
+        Arr(Vec<Json>),
+        Obj(Vec<(String, Json)>),
+    }
+
+    impl Json {
+        fn field(&self, key: &str) -> &Json {
+            match self {
+                Json::Obj(fields) => &fields.iter().find(|(k, _)| k == key).expect(key).1,
+                other => panic!("not an object: {other:?}"),
+            }
+        }
+        fn items(&self) -> &[Json] {
+            match self {
+                Json::Arr(items) => items,
+                other => panic!("not an array: {other:?}"),
+            }
+        }
+    }
+
+    /// A strict RFC 8259 parser for the subset the shim emits (no booleans, no
+    /// exponents): anything `JSON.parse` would reject — a raw control character, a bad
+    /// escape, `NaN`, a trailing comma — is an `Err`.
+    struct Parser<'a> {
+        s: &'a [u8],
+        i: usize,
+    }
+
+    impl Parser<'_> {
+        fn parse(bytes: &[u8]) -> Result<Json, String> {
+            core::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            let mut p = Parser { s: bytes, i: 0 };
+            let v = p.value()?;
+            if p.i != bytes.len() {
+                return Err(format!("trailing bytes at {}", p.i));
+            }
+            Ok(v)
+        }
+
+        fn eat(&mut self, c: u8) -> Result<(), String> {
+            if self.s.get(self.i) == Some(&c) {
+                self.i += 1;
+                Ok(())
+            } else {
+                Err(format!("expected '{}' at {}", c as char, self.i))
+            }
+        }
+
+        fn value(&mut self) -> Result<Json, String> {
+            match self.s.get(self.i).copied() {
+                Some(b'[') => {
+                    self.i += 1;
+                    let mut items = Vec::new();
+                    if self.eat(b']').is_ok() {
+                        return Ok(Json::Arr(items));
+                    }
+                    loop {
+                        items.push(self.value()?);
+                        if self.eat(b',').is_err() {
+                            self.eat(b']')?;
+                            return Ok(Json::Arr(items));
+                        }
+                    }
+                }
+                Some(b'{') => {
+                    self.i += 1;
+                    let mut fields = Vec::new();
+                    loop {
+                        let Json::Str(key) = self.value()? else {
+                            return Err("object key must be a string".into());
+                        };
+                        self.eat(b':')?;
+                        fields.push((key, self.value()?));
+                        if self.eat(b',').is_err() {
+                            self.eat(b'}')?;
+                            return Ok(Json::Obj(fields));
+                        }
+                    }
+                }
+                Some(b'"') => {
+                    self.i += 1;
+                    self.string().map(Json::Str)
+                }
+                Some(b'n') => {
+                    if self.s[self.i..].starts_with(b"null") {
+                        self.i += 4;
+                        Ok(Json::Null)
+                    } else {
+                        Err("bad literal".into())
+                    }
+                }
+                Some(b'-' | b'0'..=b'9') => {
+                    let start = self.i;
+                    while matches!(self.s.get(self.i), Some(b'-' | b'.' | b'0'..=b'9')) {
+                        self.i += 1;
+                    }
+                    let text = core::str::from_utf8(&self.s[start..self.i]).unwrap();
+                    let digits = text.strip_prefix('-').unwrap_or(text);
+                    let ok = !digits.is_empty()
+                        && !digits.starts_with('.')
+                        && !digits.ends_with('.')
+                        && !digits.contains('-')
+                        && digits.matches('.').count() <= 1
+                        && (digits == "0" || digits.starts_with("0.") || !digits.starts_with('0'));
+                    match text.parse() {
+                        Ok(v) if ok => Ok(Json::Num(v)),
+                        _ => Err(format!("bad number '{text}'")),
+                    }
+                }
+                other => Err(format!("unexpected {other:?} at {}", self.i)),
+            }
+        }
+
+        /// The rest of a string whose opening quote is already consumed.
+        fn string(&mut self) -> Result<String, String> {
+            let mut out = Vec::new();
+            loop {
+                let c = *self.s.get(self.i).ok_or("unterminated string")?;
+                self.i += 1;
+                match c {
+                    b'"' => break,
+                    b'\\' => {
+                        let e = *self.s.get(self.i).ok_or("dangling escape")?;
+                        self.i += 1;
+                        match e {
+                            b'"' | b'\\' | b'/' => out.push(e),
+                            b'n' => out.push(b'\n'),
+                            b'r' => out.push(b'\r'),
+                            b't' => out.push(b'\t'),
+                            b'b' => out.push(8),
+                            b'f' => out.push(12),
+                            b'u' => {
+                                let hex = self.s.get(self.i..self.i + 4).ok_or("short \\u")?;
+                                let hex = core::str::from_utf8(hex).map_err(|e| e.to_string())?;
+                                let cp = u32::from_str_radix(hex, 16).map_err(|e| e.to_string())?;
+                                self.i += 4;
+                                let ch = char::from_u32(cp).ok_or("surrogate escape")?;
+                                out.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
+                            }
+                            other => return Err(format!("bad escape \\{}", other as char)),
+                        }
+                    }
+                    c if c < 0x20 => return Err(format!("raw control byte {c:#04x}")),
+                    c => out.push(c),
+                }
+            }
+            String::from_utf8(out).map_err(|e| e.to_string())
+        }
+    }
+
+    fn symbol(payload: &[u8]) -> Symbol {
+        Symbol::new(
+            Symbology::Code128,
+            vec![Segment::byte(payload.to_vec())],
+            SymbolMeta::Generic,
+        )
+    }
+
+    fn quad(corners: [(f32, f32); 4]) -> Quad {
+        Quad::new(corners.map(|(x, y)| Point::new(x, y)))
+    }
+
+    fn located(mut sym: Symbol, corners: [(f32, f32); 4]) -> Symbol {
+        sym.location = Some(Location {
+            outline: quad(corners),
+            rotation: None,
+            module_size: None,
+        });
+        sym
+    }
+
+    #[test]
+    fn the_test_parser_is_strict() {
+        for bad in [
+            "",
+            "[",
+            "[1,]",
+            "[NaN]",
+            "[inf]",
+            "[01]",
+            "[1.]",
+            "[.5]",
+            "[+1]",
+            "\"\n\"",
+            "\"\\x\"",
+            "{\"a\"}",
+            "[1] ",
+            "\"\\ud800\"",
+            "[1e5]",
+        ] {
+            assert!(Parser::parse(bad.as_bytes()).is_err(), "{bad:?} parsed");
+        }
+        assert_eq!(
+            Parser::parse(b"[{\"a\":-0.5,\"b\":null},\"\\u0001\"]").unwrap(),
+            Json::Arr(vec![
+                Json::Obj(vec![
+                    ("a".into(), Json::Num(-0.5)),
+                    ("b".into(), Json::Null)
+                ]),
+                Json::Str("\u{1}".into()),
+            ])
+        );
+    }
+
+    /// Decoded text is attacker-controlled: whatever a symbol carries, the reply must
+    /// parse, and parse back to the same text.
+    #[test]
+    fn decoded_text_survives_json_escaping() {
+        let every_control: String = (0u8..0x20).map(char::from).collect();
+        let texts = [
+            "",
+            "plain",
+            "quote \" backslash \\ slash / end",
+            "\\u0041 is not an escape",
+            "\"},{\"symbology\":\"injected\"",
+            "line\r\nbreak\ttab\u{8}\u{c}\0nul",
+            every_control.as_str(),
+            "del \u{7f} c1 \u{80}\u{9f} seps \u{2028}\u{2029} bom \u{feff}",
+            "caf\u{e9} \u{65e5}\u{672c}\u{8a9e} \u{1f600} \u{10ffff} \u{fffd}",
+            "</script><!--",
+        ];
+        let symbols: Vec<Symbol> = texts.iter().map(|t| symbol(t.as_bytes())).collect();
+        for bytes in [symbols_json(&symbols), symbols_boxed_json(&symbols)] {
+            let json = Parser::parse(&bytes).expect("valid JSON");
+            assert_eq!(json.items().len(), texts.len());
+            for (item, text) in json.items().iter().zip(texts) {
+                assert_eq!(item.field("text"), &Json::Str(text.into()));
+                assert_eq!(item.field("symbology"), &Json::Str("Code 128".into()));
+            }
+        }
+        // Every symbology name is itself a clean JSON string.
+        let all: Vec<Symbol> = Symbology::ALL
+            .iter()
+            .map(|&s| Symbol::new(s, Vec::new(), SymbolMeta::Generic))
+            .collect();
+        let json = Parser::parse(&symbols_json(&all)).unwrap();
+        for (item, s) in json.items().iter().zip(Symbology::ALL) {
+            assert_eq!(item.field("symbology"), &Json::Str(s.name().into()));
+        }
+        assert_eq!(symbols_json(&[]), b"[]");
+        assert_eq!(symbols_boxed_json(&[]), b"[]");
+    }
+
+    /// A payload that is not UTF-8 (raw bytes, Latin-1, a lone surrogate's encoding, a
+    /// truncated or overlong sequence) reports empty text — never invalid output.
+    #[test]
+    fn non_utf8_payloads_still_emit_valid_json() {
+        let payloads: [&[u8]; 6] = [
+            b"\xff\xfe",
+            b"caf\xe9",
+            b"\xed\xa0\x80",
+            b"\xf0\x9f\x98",
+            b"\xc0\xaf",
+            b"ok\x00\x80",
+        ];
+        let symbols: Vec<Symbol> = payloads.iter().map(|p| symbol(p)).collect();
+        for bytes in [symbols_json(&symbols), symbols_boxed_json(&symbols)] {
+            let json = Parser::parse(&bytes).expect("valid JSON");
+            assert_eq!(json.items().len(), payloads.len());
+            for item in json.items() {
+                assert_eq!(item.field("text"), &Json::Str(String::new()));
+            }
+        }
+    }
+
+    #[test]
+    fn boxes_and_corners_are_always_json_numbers() {
+        let nan = f32::NAN;
+        let inf = f32::INFINITY;
+        let symbols = [
+            symbol(b"no location"),
+            located(
+                symbol(b"a"),
+                [(1.0, 2.0), (30.26, 2.0), (30.0, 41.04), (-0.04, 40.0)],
+            ),
+            located(symbol(b"b"), [(nan, nan); 4]),
+            located(
+                symbol(b"c"),
+                [
+                    (inf, -inf),
+                    (nan, 5.0),
+                    (f32::MAX, f32::MIN),
+                    (1e-30, -1e-30),
+                ],
+            ),
+        ];
+        let json = Parser::parse(&symbols_boxed_json(&symbols)).expect("valid JSON");
+        let items = json.items();
+        assert_eq!(items[0].field("box"), &Json::Null);
+        let b = items[1].field("box");
+        for (key, want) in [("x0", 0.0), ("y0", 2.0), ("x1", 30.3), ("y1", 41.0)] {
+            let Json::Num(got) = b.field(key) else {
+                panic!("{key} is not a number")
+            };
+            assert!((got - want).abs() < 1e-4, "{key}: {got} vs {want}");
+        }
+        for item in &items[2..] {
+            for key in ["x0", "y0", "x1", "y1"] {
+                assert!(matches!(item.field("box").field(key), Json::Num(v) if v.is_finite()));
+            }
+        }
+
+        let candidate = |outline, rotation, symbology| Candidate {
+            symbology,
+            ..Candidate::at(Location {
+                outline,
+                rotation,
+                module_size: None,
+            })
+        };
+        let square = quad([(0.0, 0.0), (9.96, 0.0), (10.0, 10.0), (0.0, 10.0)]);
+        let wild = quad([(nan, inf), (-inf, nan), (f32::MAX, f32::MIN), (-0.0, 1e-40)]);
+        let candidates = [
+            candidate(square, Some(0.5), Some(Symbology::QrCode)),
+            candidate(square, None, Some(Symbology::Pdf417)),
+            candidate(wild, Some(nan), Some(Symbology::Postnet)),
+            candidate(wild, Some(inf), None),
+            candidate(square, Some(-1e-7), Some(Symbology::Ean13)),
+            candidate(square, Some(f32::MAX), None),
+        ];
+        let json = Parser::parse(&candidates_json(&candidates)).expect("valid JSON");
+        let items = json.items();
+        let expect = ["matrix", "stacked", "postal", "linear", "linear", "linear"];
+        for (c, family) in items.iter().zip(expect) {
+            assert_eq!(c.field("family"), &Json::Str(family.into()));
+            let corners = c.field("corners").items();
+            assert_eq!(corners.len(), 4);
+            for p in corners {
+                assert_eq!(p.items().len(), 2);
+                assert!(
+                    p.items()
+                        .iter()
+                        .all(|v| matches!(v, Json::Num(n) if n.is_finite()))
+                );
+            }
+        }
+        assert_eq!(items[0].field("axis"), &Json::Num(0.5));
+        for item in &items[1..=3] {
+            assert_eq!(item.field("axis"), &Json::Null);
+        }
+        assert!(matches!(items[4].field("axis"), Json::Num(v) if *v < 0.0 && *v > -1e-6));
+        assert!(matches!(items[5].field("axis"), Json::Num(v) if *v > 1e38));
+        assert_eq!(
+            items[0].field("corners").items()[1].items()[0],
+            Json::Num(10.0)
+        );
+        assert_eq!(candidates_json(&[]), b"[]");
+    }
+
+    /// `slice::from_raw_parts(null, 0)` is undefined behaviour (and aborts a debug
+    /// build); a host passing `0` for an empty string must simply get the empty slice.
+    #[test]
+    fn null_and_empty_inputs_are_empty_slices() {
+        assert!(unsafe { input(core::ptr::null(), 0) }.is_empty());
+        assert!(unsafe { input(core::ptr::null(), 7) }.is_empty());
+        let bytes = [1u8, 2, 3];
+        assert!(unsafe { input(bytes.as_ptr(), 0) }.is_empty());
+        assert_eq!(unsafe { input(bytes.as_ptr(), 3) }, &bytes);
+    }
+
+    #[test]
+    fn frames_that_are_not_frames_are_refused() {
+        let luma = [0u8; 12];
+        let p = luma.as_ptr();
+        let side = 1usize << (usize::BITS / 2);
+        for (w, h, ptr) in [
+            (0, 0, p),
+            (0, 3, p),
+            (4, 0, p),
+            (4, 3, core::ptr::null()),
+            (side, side, p),
+            (usize::MAX, 2, p),
+            (usize::MAX, usize::MAX, p),
+        ] {
+            assert!(unsafe { frame_input(w, h, ptr) }.is_none(), "{w}x{h}");
+        }
+        let frame = unsafe { frame_input(4, 3, p) }.unwrap();
+        assert_eq!((frame.width(), frame.height()), (4, 3));
+    }
+
+    #[test]
+    fn alloc_and_dealloc_tolerate_empty_buffers() {
+        let empty = alloc(0);
+        assert!(!empty.is_null());
+        unsafe { dealloc(empty, 0) };
+        unsafe { dealloc(core::ptr::null_mut(), 0) };
+        unsafe { dealloc(core::ptr::null_mut(), 16) };
+        let p = alloc(64);
+        assert!(
+            unsafe { core::slice::from_raw_parts(p, 64) }
+                .iter()
+                .all(|&b| b == 0)
+        );
+        unsafe { dealloc(p, 64) };
+    }
+
+    #[test]
+    fn options_string_parsing() {
+        assert_eq!(opt("ec=H;size=min", "ec"), Some("H"));
+        assert_eq!(opt("ec=H&size=min", "size"), Some("min"));
+        assert_eq!(opt(" ec = H ; size= min ", "ec"), Some("H"));
+        assert_eq!(opt("ec=H;ec=L", "ec"), Some("H"), "first wins");
+        assert_eq!(opt("url=a=b", "url"), Some("a=b"));
+        assert_eq!(opt("ec", "ec"), None);
+        assert_eq!(opt("", "ec"), None);
+        assert_eq!(opt("ec=", "ec"), Some(""));
+        assert_eq!(opt("spec=H", "ec"), None);
+        assert!(opt_bool("check=on", "check", false));
+        assert!(opt_bool("check=1;x=y", "check", false));
+        assert!(!opt_bool("check=off", "check", true));
+        assert!(!opt_bool("check=", "check", true));
+        assert!(opt_bool("", "check", true));
+        assert!(is_auto(None) && is_auto(Some("")) && is_auto(Some("auto")));
+        assert!(!is_auto(Some("12")));
+    }
+
+    #[test]
+    fn encoding_wire_format() {
+        let mut m = crate::output::BitMatrix::new(3, 2, 4);
+        m.set(0, 0, true);
+        m.set(2, 1, true);
+        assert_eq!(
+            serialize_encoding(&Encoding::Matrix(m)),
+            [0, 3, 0, 0, 0, 2, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+        );
+        let p = crate::output::LinearPattern {
+            modules: vec![true, false, true],
+            quiet_zone: 10,
+        };
+        assert_eq!(
+            serialize_encoding(&Encoding::Linear(p)),
+            [1, 3, 0, 0, 0, 1, 0, 0, 0, 10, 0, 0, 0, 1, 0, 1]
+        );
+    }
+
+    /// Every symbology name the demo page can send, with data it accepts.
+    const NAMES: &[(&str, &str)] = &[
+        ("qr", "HELLO"),
+        ("microqr", "12345"),
+        ("rmqr", "HELLO"),
+        ("aztec", "HELLO"),
+        ("aztecrunes", "42"),
+        ("datamatrix", "HELLO"),
+        ("maxicode", "HELLO"),
+        ("hanxin", "HELLO"),
+        ("dotcode", "HELLO"),
+        ("gridmatrix", "HELLO"),
+        ("pdf417", "HELLO"),
+        ("micropdf417", "HELLO"),
+        ("code16k", "HELLO"),
+        ("code49", "HELLO"),
+        ("codablockf", "HELLO"),
+        ("ean13", "5901234123457"),
+        ("ean8", "96385074"),
+        ("upca", "036000291452"),
+        ("upce", "01234565"),
+        ("ean2", "12"),
+        ("ean5", "12345"),
+        ("code128", "HELLO"),
+        ("gs1_128", "0109501101530003"),
+        ("code39", "HELLO"),
+        ("code93", "HELLO"),
+        ("code11", "1234"),
+        ("itf", "1234"),
+        ("std2of5", "1234"),
+        ("iata2of5", "1234"),
+        ("matrix2of5", "1234"),
+        ("codabar", "1234"),
+        ("msi", "1234"),
+        ("plessey", "1234"),
+        ("telepen", "HELLO"),
+        ("pharmacode", "1234"),
+        ("pharmacode2", "1234"),
+        ("dxfilm", "115-10"),
+        ("databar_omni", "0950110153000"),
+        ("databar_limited", "0950110153000"),
+        ("databar_stacked", "0950110153000"),
+        ("databar_stacked_omni", "0950110153000"),
+        ("databar_expanded", "0109501101530003"),
+        ("databar_expanded_stacked", "0109501101530003"),
+        ("postnet", "12345"),
+        ("planet", "12345678901"),
+        ("imb", "01234567094987654321 01234567891"),
+        ("rm4scc", "SN34RD1A"),
+        ("kix", "1231FZ13XHS"),
+        ("japanpost", "1234567"),
+        ("mailmark", "41038422416563762EF61AH8T"),
+        ("auspost", "12345678"),
+    ];
+
+    #[test]
+    fn every_symbology_name_builds() {
+        for &(name, data) in NAMES {
+            let enc = build(name, data, "").unwrap_or_else(|e| panic!("{name} {data:?}: {e}"));
+            let bytes = serialize_encoding(&enc);
+            let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            let (w, h) = (word(1) as usize, word(5) as usize);
+            assert!(bytes[0] <= 1 && w > 0 && h > 0, "{name}");
+            assert_eq!(bytes.len(), 13 + w * h, "{name}");
+            assert!(bytes[13..].iter().all(|&b| b <= 1), "{name}");
+            assert!(bytes[13..].contains(&1), "{name} has no dark module");
+        }
+        assert_eq!(
+            build("nope", "x", "").unwrap_err(),
+            "unknown symbology 'nope'"
+        );
+        assert!(build("", "", "").is_err());
+    }
+
+    /// A panic is a wasm trap that takes the whole page down, so whatever the form
+    /// fields hold — empty, huge, non-ASCII, nonsense options — `build` must return.
+    #[test]
+    fn hostile_form_input_never_panics() {
+        let long_digits = "7".repeat(5000);
+        let long_text = "Az9 ".repeat(2000);
+        let datas = [
+            "",
+            " ",
+            "0",
+            "-1",
+            "99999999999999999999999999",
+            "|||",
+            "a|b|c|d",
+            "12345|840|001|x",
+            "\u{0}\u{1d}\u{7f}",
+            "caf\u{e9} \u{65e5}\u{672c} \u{1f600}",
+            long_digits.as_str(),
+            long_text.as_str(),
+        ];
+        let options = [
+            "",
+            "ec=;size=;cols=;rows=;mode=;version=;check=;start=;stop=",
+            "ec=Z;size=zz;cols=x;rows=x;mode=x;version=x;check=x;start=E;stop=E",
+            "ec=H;size=0;cols=0;rows=0;mode=0;version=0;check=0",
+            "ec=8;size=1;cols=1;rows=1;mode=2;version=1;check=2",
+            "ec=L5;size=max;cols=99;rows=99;mode=6;version=13;check=mod1110",
+            "ec=L1;size=4294967295;cols=18446744073709551615;rows=18446744073709551615;\
+             mode=255;version=255;check=255",
+            "mode=gs1;fullascii=off;check=on;start=D;stop=B",
+            "mode=3;size=144;cols=30;rows=16",
+            "=;;==;&&;ec",
+        ];
+        for &(name, _) in NAMES {
+            for data in datas {
+                for opts in options {
+                    // Ok or Err are both fine; the point is that it returns.
+                    if let Ok(enc) = build(name, data, opts) {
+                        assert!(serialize_encoding(&enc).len() > 13, "{name}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "appclip")]
+    #[test]
+    fn appclip_options() {
+        let url = "https://example.com";
+        let svg = appclip_svg(url, "").unwrap();
+        assert!(svg.contains("<svg") && svg.trim_end().ends_with("</svg>"));
+        assert_eq!(appclip_svg(url, "template=auto").unwrap(), svg);
+        assert_eq!(appclip_svg(url, "template=1").unwrap(), svg);
+        assert_ne!(appclip_svg(url, "template=0;logo=nfc").unwrap(), svg);
+        assert!(appclip_svg(url, "fg=000000;bg=ffffff").is_ok());
+        for bad in [
+            "template=18",
+            "template=-1",
+            "template=x",
+            "fg=zzzzzz;bg=ffffff",
+            "fg=000000;bg=12",
+            "fg=\u{e9}\u{e9}\u{e9};bg=\u{1f600}",
+        ] {
+            assert!(appclip_svg(url, bad).is_err(), "{bad}");
+        }
+        for bad_url in ["", "ftp://x", "not a url", "https://"] {
+            let _ = appclip_svg(bad_url, "");
+        }
     }
 }

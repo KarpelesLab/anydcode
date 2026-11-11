@@ -293,6 +293,114 @@ mod tests {
         let _ = GrayImage::from_raw(side, side, Vec::new());
     }
 
+    /// A frame may be a window into a larger buffer: rows start `stride` apart, and
+    /// neither the padding nor bytes past the last row's `width` are ever read.
+    #[test]
+    fn frame_rows_are_stride_apart() {
+        // 2x3 window, stride 4, the minimal 2*4 + 2 = 10 bytes; padding is 9.
+        let data = [1u8, 2, 9, 9, 3, 4, 9, 9, 5, 6];
+        let f = GrayFrame::with_stride(&data, 2, 3, 4).unwrap();
+        assert_eq!((f.width(), f.height()), (2, 3));
+        let rows = [f.row(0), f.row(1), f.row(2), f.row(3)];
+        assert_eq!(
+            rows,
+            [
+                Some(&[1u8, 2][..]),
+                Some(&[3, 4][..]),
+                Some(&[5, 6][..]),
+                None
+            ]
+        );
+        for y in 0..3 {
+            for x in 0..2 {
+                let want = (y * 2 + x + 1) as u8;
+                assert_eq!(f.get(x, y), Some(want));
+                assert_eq!(f.get_unchecked(x, y), want);
+            }
+        }
+        assert!(GrayFrame::with_stride(&data[..9], 2, 3, 4).is_err());
+        // A single row needs `width` bytes whatever the stride claims.
+        let wide = GrayFrame::with_stride(&data[..2], 2, 1, usize::MAX).unwrap();
+        assert_eq!(wide.row(0), Some(&[1u8, 2][..]));
+        // Extra trailing bytes are fine; the copy is a view of the same pixels.
+        let copy = f;
+        assert_eq!(copy.row(2), f.row(2));
+        assert!(GrayFrame::new(&data, 5, 2).is_ok());
+        assert!(GrayFrame::new(&data, 2, 5).is_ok());
+        assert!(GrayFrame::new(&data, 11, 1).is_err());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn image_construction_and_pixel_access() {
+        let mut img = GrayImage::new(3, 2);
+        assert_eq!((img.width(), img.height()), (3, 2));
+        assert_eq!(img.pixels(), [0; 6]);
+        img.set(2, 1, 200);
+        img.set(0, 0, 7);
+        assert_eq!(img.pixels(), [7, 0, 0, 0, 0, 200]);
+        assert_eq!((img.get(2, 1), img.get(1, 2), img.get(3, 1)), (200, 0, 0));
+        assert_eq!(img.get(usize::MAX, usize::MAX), 0);
+        assert_eq!(img, GrayImage::from_raw(3, 2, vec![7, 0, 0, 0, 0, 200]));
+        assert_ne!(img, GrayImage::from_raw(2, 3, vec![7, 0, 0, 0, 0, 200]));
+        assert_eq!(GrayImage::filled(2, 2, 255).pixels(), [255; 4]);
+        let frame = img.as_frame();
+        assert_eq!((frame.width(), frame.height()), (3, 2));
+        assert_eq!(frame.row(1), Some(&[0u8, 0, 200][..]));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "GrayImage dimensions must be nonzero")]
+    fn image_rejects_zero_width() {
+        let _ = GrayImage::new(0, 4);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "GrayImage dimensions must be nonzero")]
+    fn image_from_raw_rejects_zero_height() {
+        let _ = GrayImage::from_raw(4, 0, Vec::new());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "buffer size mismatch")]
+    fn image_from_raw_rejects_wrong_length() {
+        let _ = GrayImage::from_raw(2, 2, vec![0; 5]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "GrayImage dimensions overflow")]
+    fn image_filled_rejects_overflowing_dimensions() {
+        let side = 1usize << (usize::BITS / 2);
+        let _ = GrayImage::filled(side, side, 0);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "GrayImage::set out of bounds")]
+    fn image_set_out_of_bounds_panics() {
+        // (2, 0) would alias (0, 1) in the row-major buffer if it were not rejected.
+        GrayImage::new(2, 2).set(2, 0, 1);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn bilinear_interpolates_in_both_axes() {
+        let img = GrayImage::from_raw(2, 2, vec![0, 100, 200, 60]);
+        assert_eq!(img.sample_bilinear(0.0, 0.0), Some(0.0));
+        assert_eq!(img.sample_bilinear(0.25, 0.0), Some(25.0));
+        assert_eq!(img.sample_bilinear(0.0, 0.5), Some(100.0));
+        assert_eq!(img.sample_bilinear(0.5, 0.5), Some(90.0));
+        assert_eq!(img.sample_bilinear(1.0, 1.0), Some(60.0));
+        assert_eq!(img.sample_bilinear(1.9, 1.9), Some(60.0));
+        assert_eq!(img.sample_bilinear(-0.0, -0.0), Some(0.0));
+        assert_eq!(img.sample_bilinear(2.0, 1.0), None);
+        assert_eq!(img.sample_bilinear(1.0, f32::NEG_INFINITY), None);
+    }
+
     #[cfg(feature = "std")]
     #[test]
     fn image_accessors_at_the_edges() {

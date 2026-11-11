@@ -37,11 +37,19 @@ pub struct BitMatrix {
 #[cfg(feature = "alloc")]
 impl BitMatrix {
     /// A new all-light matrix of the given size.
+    ///
+    /// # Panics
+    /// Panics if `width * height` overflows `usize`.
     pub fn new(width: usize, height: usize, quiet_zone: usize) -> Self {
+        // Unchecked, a release build wraps the product and hands back a grid whose
+        // storage is smaller than its dimensions claim.
+        let modules = width
+            .checked_mul(height)
+            .expect("BitMatrix dimensions overflow usize");
         BitMatrix {
             width,
             height,
-            bits: vec![false; width * height],
+            bits: vec![false; modules],
             quiet_zone,
         }
     }
@@ -478,5 +486,219 @@ impl PartialEq<BitMatrix> for MatrixBuf<'_> {
 impl PartialEq<LinearPattern> for LinearBuf<'_> {
     fn eq(&self, other: &LinearPattern) -> bool {
         self.quiet_zone == other.quiet_zone && self.iter().eq(other.modules.iter().copied())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_buf_tracks_length_capacity_and_stale_storage() {
+        assert_eq!(LinearBuf::bytes_for(0), 0);
+        assert_eq!(LinearBuf::bytes_for(1), 1);
+        assert_eq!(LinearBuf::bytes_for(8), 1);
+        assert_eq!(LinearBuf::bytes_for(9), 2);
+
+        // Storage arrives dirty: every module written must still read back exactly.
+        let mut storage = [0xffu8; 2];
+        let mut row = LinearBuf::new(&mut storage);
+        assert!(row.is_empty());
+        assert_eq!((row.len(), row.capacity(), row.quiet_zone), (0, 16, 0));
+        assert!(
+            !row.get(0),
+            "nothing written yet, whatever the storage holds"
+        );
+        row.begin(7).unwrap();
+        row.push_run(false, 5).unwrap();
+        row.push(true).unwrap();
+        row.push_run(true, 0).unwrap();
+        row.push_run(false, 10).unwrap();
+        assert_eq!((row.len(), row.quiet_zone, row.is_empty()), (16, 7, false));
+        assert_eq!(row.iter().filter(|&b| b).count(), 1);
+        assert!(row.get(5) && !row.get(4) && !row.get(6) && !row.get(16));
+        assert!(!row.get(usize::MAX));
+
+        // Full: one more module is a capacity error and changes nothing.
+        assert!(matches!(row.push(true), Err(Error::Capacity { .. })));
+        assert!(matches!(
+            row.push_run(false, usize::MAX),
+            Err(Error::Capacity { .. })
+        ));
+        assert_eq!(row.len(), 16);
+
+        row.clear();
+        assert!(row.is_empty() && !row.get(5));
+        row.push_run(true, 3).unwrap();
+        // `begin` restarts the row.
+        row.begin(2).unwrap();
+        assert_eq!((row.len(), row.quiet_zone), (0, 2));
+
+        let mut none = [0u8; 0];
+        let mut empty = LinearBuf::new(&mut none);
+        assert_eq!(empty.capacity(), 0);
+        assert!(empty.push_run(true, 0).is_ok());
+        assert!(empty.push(true).is_err());
+    }
+
+    #[test]
+    fn matrix_buf_set_toggle_and_count() {
+        assert_eq!(MatrixBuf::bytes_for(0, 5), 0);
+        assert_eq!(MatrixBuf::bytes_for(3, 3), 2);
+        assert_eq!(MatrixBuf::bytes_for(4, 4), 2);
+
+        // Dirty storage is cleared, and only the bytes the grid needs are borrowed.
+        let mut storage = [0xffu8; 4];
+        let mut grid = MatrixBuf::new(&mut storage, 3, 3, 2).unwrap();
+        assert_eq!((grid.width(), grid.height(), grid.quiet_zone), (3, 3, 2));
+        assert_eq!((grid.count_dark(), grid.as_bytes()), (0, &[0u8, 0][..]));
+        grid.set(0, 0, true);
+        grid.set(2, 2, true);
+        grid.toggle(1, 1);
+        assert_eq!(grid.count_dark(), 3);
+        assert_eq!(grid.as_bytes(), [0b0001_0001, 0b0000_0001]);
+        grid.toggle(1, 1);
+        grid.set(0, 0, false);
+        assert_eq!(grid.count_dark(), 1);
+        assert!(grid.get(2, 2) && !grid.get(0, 0) && !grid.get(1, 1));
+        assert!(!grid.get(3, 0) && !grid.get(0, 3) && !grid.get(usize::MAX, usize::MAX));
+
+        let mut short = [0u8; 1];
+        assert!(matches!(
+            MatrixBuf::new(&mut short, 3, 3, 0),
+            Err(Error::Capacity { .. })
+        ));
+        assert!(MatrixBuf::new(&mut short, usize::MAX, 2, 0).is_err());
+        // A zero-area grid needs no storage and has no modules.
+        let empty = MatrixBuf::new(&mut short, 0, 9, 0).unwrap();
+        assert!(empty.as_bytes().is_empty() && !empty.get(0, 0));
+    }
+
+    #[test]
+    #[should_panic(expected = "MatrixBuf::set out of bounds")]
+    fn matrix_buf_set_out_of_bounds_panics() {
+        let mut storage = [0u8; 2];
+        // (3, 0) would alias (0, 1) in the packed bits if it were not rejected.
+        MatrixBuf::new(&mut storage, 3, 3, 0)
+            .unwrap()
+            .set(3, 0, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "MatrixBuf::toggle out of bounds")]
+    fn matrix_buf_toggle_out_of_bounds_panics() {
+        let mut storage = [0u8; 2];
+        MatrixBuf::new(&mut storage, 3, 3, 0).unwrap().toggle(0, 3);
+    }
+
+    #[test]
+    fn sinks_forward_through_mutable_references() {
+        fn fill<S: LinearSink>(mut sink: S) -> Result<()> {
+            sink.begin(3)?;
+            sink.push_run(true, 2)?;
+            sink.push(false)
+        }
+        let mut storage = [0u8; 1];
+        let mut row = LinearBuf::new(&mut storage);
+        fill(&mut row).unwrap();
+        assert_eq!((row.len(), row.quiet_zone), (3, 3));
+        assert!(row.get(0) && row.get(1) && !row.get(2));
+
+        // The provided methods: `begin` defaults to a no-op, `push` to a run of one.
+        struct Count(usize);
+        impl LinearSink for Count {
+            fn push_run(&mut self, _bar: bool, count: usize) -> Result<()> {
+                self.0 += count;
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        fill(&mut count).unwrap();
+        assert_eq!(count.0, 3);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn owned_and_borrowed_outputs_convert_and_compare() {
+        use std::format;
+
+        let mut storage = [0u8; 2];
+        let mut grid = MatrixBuf::new(&mut storage, 3, 2, 4).unwrap();
+        grid.set(1, 0, true);
+        grid.set(2, 1, true);
+        let owned = BitMatrix::from(&grid);
+        assert_eq!((owned.width(), owned.height(), owned.quiet_zone), (3, 2, 4));
+        assert!(owned.get(1, 0) && owned.get(2, 1) && !owned.get(0, 0));
+        assert!(!owned.get(3, 0) && !owned.get(0, 2));
+        assert!(grid == owned);
+        let mut other = owned.clone();
+        other.set(0, 0, true);
+        assert!(grid != other);
+        let mut margin = owned.clone();
+        margin.quiet_zone = 1;
+        assert!(grid != margin, "the quiet zone is part of the symbol");
+        assert!(grid != BitMatrix::new(2, 3, 4));
+        assert_eq!(
+            format!("{owned:?}")
+                .lines()
+                .skip(1)
+                .collect::<std::vec::Vec<_>>(),
+            format!("{grid:?}")
+                .lines()
+                .skip(1)
+                .collect::<std::vec::Vec<_>>(),
+        );
+        assert!(
+            format!("{owned:?}")
+                .starts_with("BitMatrix 3x2 (quiet_zone 4):\n  \u{2588}\u{2588}  \n")
+        );
+
+        let mut bits = [0u8; 1];
+        let mut row = LinearBuf::new(&mut bits);
+        row.begin(9).unwrap();
+        row.push_run(true, 2).unwrap();
+        row.push(false).unwrap();
+        let pattern = LinearPattern::from(&row);
+        assert_eq!(pattern.modules, [true, true, false]);
+        assert_eq!(pattern.quiet_zone, 9);
+        assert!(row == pattern);
+        assert_eq!(
+            format!("{pattern:?}"),
+            "LinearPattern[3 modules, quiet_zone 9] \u{2588}\u{2588} "
+        );
+        assert_eq!(
+            format!("{row:?}"),
+            "LinearBuf[3 modules, quiet_zone 9] \u{2588}\u{2588} "
+        );
+
+        // The owned pattern is a sink too, and `begin` discards what it held.
+        let mut sink = pattern.clone();
+        sink.begin(1).unwrap();
+        sink.push_run(false, 2).unwrap();
+        sink.push(true).unwrap();
+        assert_eq!(
+            (sink.modules.as_slice(), sink.quiet_zone),
+            (&[false, false, true][..], 1)
+        );
+        assert!(row != sink);
+        assert_eq!(LinearPattern::default(), LinearPattern::new());
+        assert!(LinearPattern::new().modules.is_empty());
+        assert_ne!(Encoding::Linear(pattern), Encoding::Matrix(owned));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "BitMatrix dimensions overflow")]
+    fn bit_matrix_rejects_overflowing_dimensions() {
+        // 2^32 x 2^32 (2^16 x 2^16 on wasm32) wraps to zero modules.
+        let side = 1usize << (usize::BITS / 2);
+        let _ = BitMatrix::new(side, side, 0);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[should_panic(expected = "BitMatrix::set out of bounds")]
+    fn bit_matrix_set_out_of_bounds_panics() {
+        BitMatrix::new(3, 3, 0).set(3, 0, true);
     }
 }

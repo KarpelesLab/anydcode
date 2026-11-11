@@ -79,3 +79,50 @@ pub struct Location {
     /// Estimated module (smallest bar/cell) size in pixels, if known.
     pub module_size: Option<f32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn quad(corners: [(f32, f32); 4]) -> Quad {
+        Quad::new(corners.map(|(x, y)| Point::new(x, y)))
+    }
+
+    #[test]
+    fn bounds_and_center_of_a_rotated_quad() {
+        // A diamond: no corner is the bounding box's corner.
+        let q = quad([(5.0, -1.0), (9.0, 4.0), (5.0, 9.0), (1.0, 4.0)]);
+        assert_eq!(q.bounds(), (Point::new(1.0, -1.0), Point::new(9.0, 9.0)));
+        assert_eq!(q.center(), Point::new(5.0, 4.0));
+        // Degenerate (all corners equal) and negative coordinates.
+        let dot = quad([(-2.5, -3.5); 4]);
+        assert_eq!(
+            dot.bounds(),
+            (Point::new(-2.5, -3.5), Point::new(-2.5, -3.5))
+        );
+        assert_eq!(dot.center(), Point::new(-2.5, -3.5));
+        // The extreme may sit in any corner slot, the first included.
+        let q = quad([(9.0, 9.0), (0.0, 0.0), (3.0, 4.0), (1.0, 2.0)]);
+        assert_eq!(q.bounds(), (Point::new(0.0, 0.0), Point::new(9.0, 9.0)));
+    }
+
+    /// A non-finite corner must not poison the box of the finite ones: `f32::min` /
+    /// `max` skip NaN, so the bounds stay usable for cropping.
+    #[test]
+    fn bounds_skip_nan_corners() {
+        let q = quad([(f32::NAN, 2.0), (4.0, f32::NAN), (6.0, 8.0), (1.0, 3.0)]);
+        let (min, max) = q.bounds();
+        assert_eq!((min.x, min.y, max.x, max.y), (1.0, 2.0, 6.0, 8.0));
+        assert!(q.center().x.is_nan() && q.center().y.is_nan());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn distance_is_euclidean_and_symmetric() {
+        let (a, b) = (Point::new(1.0, 2.0), Point::new(4.0, 6.0));
+        assert_eq!(a.distance(b), 5.0);
+        assert_eq!(b.distance(a), 5.0);
+        assert_eq!(a.distance(a), 0.0);
+        assert!(a.distance(Point::new(f32::NAN, 0.0)).is_nan());
+    }
+}

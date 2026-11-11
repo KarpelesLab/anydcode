@@ -29,10 +29,16 @@ pub struct Rng {
 }
 
 impl Rng {
-    /// Seed the generator. Any seed is valid; `0` is remapped to a nonzero state.
+    /// Seed the generator. Any seed is valid, and distinct seeds give distinct
+    /// streams: the seed is whitened into the state, and the one seed that would
+    /// whiten to xorshift's fixed point `0` is remapped to a nonzero state.
     pub fn new(seed: u64) -> Self {
+        const WHITEN: u64 = 0x9E37_79B9_7F4A_7C15;
+        // Not `(seed ^ WHITEN) | 1`: forcing the low bit made seeds `2k` and `2k + 1`
+        // the same generator, so a sweep over `0..n` ran only `n / 2` distinct trials.
+        let state = seed ^ WHITEN;
         Rng {
-            state: seed ^ 0x9E37_79B9_7F4A_7C15 | 1,
+            state: if state == 0 { WHITEN } else { state },
         }
     }
 
@@ -306,9 +312,11 @@ pub fn tilt_bottom(img: &GrayImage, amount: f32) -> GrayImage {
 }
 
 /// Separable Gaussian blur with standard deviation `sigma` (in pixels). A `sigma` of
-/// `0` returns a copy.
+/// `0` returns a copy, as does any `sigma` too small to spread a pixel (or `NaN`).
 pub fn gaussian_blur(img: &GrayImage, sigma: f32) -> GrayImage {
-    if sigma <= 0.0 {
+    // `!(.. > ..)` also catches NaN. A sigma whose square underflows to zero would make
+    // the kernel's centre weight `exp(-0 / 0)` = NaN and blacken the whole image.
+    if !(sigma > 0.0 && 2.0 * sigma * sigma > 0.0) {
         return img.clone();
     }
     let radius = (sigma * 3.0).ceil() as isize;
@@ -597,6 +605,7 @@ pub fn bulge(img: &GrayImage, strength: f32, center: (f32, f32)) -> GrayImage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn rng_is_reproducible() {
@@ -604,6 +613,34 @@ mod tests {
         let mut b = Rng::new(42);
         for _ in 0..100 {
             assert_eq!(a.next_u64(), b.next_u64());
+        }
+    }
+
+    /// Neighbouring seeds used to collapse onto one stream (`2k` and `2k + 1`).
+    #[test]
+    fn rng_distinct_seeds_give_distinct_streams() {
+        let firsts: std::collections::HashSet<u64> =
+            (0..64).map(|seed| Rng::new(seed).next_u64()).collect();
+        assert_eq!(firsts.len(), 64);
+        assert_ne!(Rng::new(0).next_u64(), Rng::new(1).next_u64());
+        // The seed that whitens to zero must not freeze the generator at 0.
+        let mut stuck = Rng::new(0x9E37_79B9_7F4A_7C15);
+        assert!((0..8).all(|_| stuck.next_u64() != 0));
+    }
+
+    #[test]
+    fn rng_outputs_are_in_range() {
+        for seed in [0, 1, 42, u64::MAX, 0x9E37_79B9_7F4A_7C15] {
+            let mut rng = Rng::new(seed);
+            let mut sum = 0.0f64;
+            for _ in 0..4000 {
+                let f = rng.next_f32();
+                assert!((0.0..1.0).contains(&f), "{f}");
+                let g = rng.next_gaussian();
+                assert!(g.is_finite() && g.abs() < 12.0, "{g}");
+                sum += f64::from(g);
+            }
+            assert!((sum / 4000.0).abs() < 0.1, "gaussian mean {}", sum / 4000.0);
         }
     }
 
@@ -643,6 +680,228 @@ mod tests {
                 "factor {factor} lightened the border"
             );
         }
+    }
+
+    #[test]
+    fn quad_to_quad_maps_corners_and_composes_with_its_inverse() {
+        let src = [(0.0, 0.0), (20.0, 0.0), (20.0, 10.0), (0.0, 10.0)];
+        let dst = [(3.0, 4.0), (40.0, 9.0), (36.0, 31.0), (1.0, 28.0)];
+        let p = Projection::quad_to_quad(src, dst);
+        for (s, d) in src.iter().zip(dst) {
+            let (x, y) = p.map(s.0, s.1);
+            assert!((x - d.0).abs() < 1e-9 && (y - d.1).abs() < 1e-9, "{s:?}");
+        }
+        let back = Projection::quad_to_quad(dst, src);
+        let (x, y) = back.map(p.map(7.0, 3.0).0, p.map(7.0, 3.0).1);
+        assert!((x - 7.0).abs() < 1e-9 && (y - 3.0).abs() < 1e-9);
+        // The affine special case (a parallelogram) keeps midpoints.
+        let shear = Projection::square_to_quad([(0.0, 0.0), (4.0, 0.0), (6.0, 2.0), (2.0, 2.0)]);
+        assert_eq!(shear.map(0.5, 0.5), (3.0, 1.0));
+    }
+
+    #[test]
+    fn scale_rounds_dimensions_and_never_reaches_zero() {
+        let img = GrayImage::filled(10, 6, 77);
+        for (factor, w, h) in [
+            (2.0, 20, 12),
+            (0.5, 5, 3),
+            (1.0, 10, 6),
+            (0.26, 3, 2),
+            (0.01, 1, 1),
+        ] {
+            let out = scale(&img, factor);
+            assert_eq!((out.width(), out.height()), (w, h), "factor {factor}");
+            assert!(out.pixels().iter().all(|&p| p == 77), "factor {factor}");
+        }
+        assert_eq!(scale(&img, 1.0), img);
+        let one = GrayImage::filled(1, 1, 9);
+        assert_eq!(scale(&one, 3.0), GrayImage::filled(3, 3, 9));
+    }
+
+    #[test]
+    #[should_panic(expected = "scale factor must be positive")]
+    fn scale_rejects_nan() {
+        let _ = scale(&GrayImage::filled(2, 2, 0), f32::NAN);
+    }
+
+    #[test]
+    fn rotation_grows_the_canvas_and_fills_with_background() {
+        let img = GrayImage::filled(30, 10, 0);
+        let quarter = rotate(&img, core::f32::consts::FRAC_PI_2);
+        // Width and height swap (cos(pi/2) is not exactly 0, so allow a pixel of slack).
+        assert!(quarter.width().abs_diff(10 + 2 * PAD) <= 1);
+        assert!(quarter.height().abs_diff(30 + 2 * PAD) <= 1);
+        assert_eq!(quarter.get(0, 0), 255);
+        assert_eq!(quarter.get(quarter.width() / 2, quarter.height() / 2), 0);
+        let dark = |i: &GrayImage| i.pixels().iter().filter(|&&p| p < 128).count();
+        // Area is preserved to within the resampled border.
+        assert!(dark(&quarter).abs_diff(300) <= 80, "{}", dark(&quarter));
+        let tilted = rotate(&img, 0.5);
+        assert!(tilted.width() > img.width() && tilted.height() > img.height());
+        assert!(dark(&tilted).abs_diff(300) <= 80, "{}", dark(&tilted));
+        // A non-finite angle has no geometry: all background, no panic.
+        for bad in [f32::NAN, f32::INFINITY] {
+            assert!(rotate(&img, bad).pixels().iter().all(|&p| p == 255));
+        }
+    }
+
+    #[test]
+    fn perspective_places_the_image_on_the_destination_quad() {
+        let img = GrayImage::filled(20, 20, 0);
+        // An axis-aligned destination twice the size: a padded, scaled copy.
+        let out = perspective(&img, [(0.0, 0.0), (40.0, 0.0), (40.0, 40.0), (0.0, 40.0)]);
+        assert_eq!((out.width(), out.height()), (40 + 2 * PAD, 40 + 2 * PAD));
+        assert_eq!(out.get(PAD + 20, PAD + 20), 0);
+        assert_eq!(out.get(PAD - 2, PAD + 20), 255);
+        assert_eq!(out.get(PAD + 42, PAD + 20), 255);
+        // Tilts foreshorten the far edge: the canvas keeps its size, dark area shrinks.
+        let dark = |i: &GrayImage| i.pixels().iter().filter(|&&p| p < 128).count();
+        let right = tilt_right(&img, 0.4);
+        assert_eq!(
+            (right.width(), right.height()),
+            (20 + 2 * PAD, 20 + 2 * PAD)
+        );
+        assert!(dark(&right) < 400 && dark(&right) > 250, "{}", dark(&right));
+        assert_eq!(right.get(PAD + 18, PAD + 1), 255, "far corner is cut away");
+        assert_eq!(right.get(PAD + 1, PAD + 1), 0, "near corner stays");
+        let bottom = tilt_bottom(&img, 0.4);
+        assert_eq!(bottom.get(PAD + 1, PAD + 18), 255);
+        assert_eq!(bottom.get(PAD + 1, PAD + 1), 0);
+        assert_eq!(dark(&tilt_right(&img, 0.0)), dark(&tilt_bottom(&img, 0.0)));
+        // A collapsed or non-finite quad is all background rather than a panic.
+        let flat = perspective(&img, [(0.0, 0.0), (10.0, 0.0), (10.0, 0.0), (0.0, 0.0)]);
+        assert!(flat.pixels().iter().all(|&p| p == 255));
+        let nan = perspective(&img, [(f32::NAN, f32::NAN); 4]);
+        assert!(nan.pixels().iter().all(|&p| p == 255));
+    }
+
+    #[test]
+    fn blur_preserves_flat_areas_and_spreads_edges() {
+        let flat = GrayImage::filled(12, 9, 200);
+        assert_eq!(gaussian_blur(&flat, 2.0), flat);
+        let mut img = GrayImage::filled(21, 21, 255);
+        img.set(10, 10, 0);
+        let out = gaussian_blur(&img, 1.5);
+        assert_eq!((out.width(), out.height()), (21, 21));
+        assert!(out.get(10, 10) > 0 && out.get(10, 10) < 255);
+        assert!(out.get(11, 10) < 255 && out.get(10, 11) < 255);
+        assert_eq!(out.get(11, 10), out.get(9, 10), "kernel is symmetric");
+        assert_eq!(out.get(10, 12), out.get(12, 10), "and isotropic");
+        assert_eq!(out.get(0, 0), 255);
+        // A kernel wider than the image clamps at the border instead of indexing past it.
+        let tiny = GrayImage::from_raw(2, 1, vec![0, 255]);
+        let wide = gaussian_blur(&tiny, 5.0);
+        assert!(wide.get(0, 0) < wide.get(1, 0));
+    }
+
+    /// A sigma that cannot spread a pixel is the identity. `NaN`, and a sigma whose
+    /// square underflows, used to turn the whole image black (a NaN kernel).
+    #[test]
+    fn blur_with_degenerate_sigma_is_a_copy() {
+        let img = feature_image();
+        for sigma in [
+            0.0,
+            -1.0,
+            f32::NAN,
+            1e-30,
+            f32::MIN_POSITIVE,
+            -f32::INFINITY,
+        ] {
+            assert_eq!(gaussian_blur(&img, sigma), img, "sigma {sigma}");
+        }
+        // The smallest sigmas that still have a kernel leave the image unchanged too.
+        assert_eq!(gaussian_blur(&img, 1e-3), img);
+        assert_eq!(gaussian_blur(&img, 1e-20), img);
+    }
+
+    #[test]
+    fn noise_is_seeded_bounded_and_centred() {
+        let img = GrayImage::filled(64, 64, 128);
+        let a = add_noise(&img, 10.0, &mut Rng::new(9));
+        assert_eq!(a, add_noise(&img, 10.0, &mut Rng::new(9)));
+        assert_ne!(a, add_noise(&img, 10.0, &mut Rng::new(10)));
+        assert_ne!(a, img);
+        let mean = a.pixels().iter().map(|&p| p as f64).sum::<f64>() / 4096.0;
+        assert!((mean - 128.0).abs() < 1.0, "mean {mean}");
+        assert_eq!(add_noise(&img, 0.0, &mut Rng::new(9)), img);
+        // Saturated inputs clamp instead of wrapping around.
+        let white = add_noise(&GrayImage::filled(32, 32, 255), 40.0, &mut Rng::new(1));
+        assert!(white.pixels().iter().all(|&p| p >= 100));
+        let black = add_noise(&GrayImage::filled(32, 32, 0), 40.0, &mut Rng::new(1));
+        assert!(black.pixels().iter().all(|&p| p <= 155));
+    }
+
+    #[test]
+    fn brightness_and_contrast_pivot_on_mid_gray_and_clamp() {
+        let img = GrayImage::from_raw(5, 1, vec![0, 64, 128, 192, 255]);
+        assert_eq!(brightness_contrast(&img, 0.0, 1.0), img);
+        assert_eq!(
+            brightness_contrast(&img, 20.0, 1.0).pixels(),
+            [20, 84, 148, 212, 255]
+        );
+        assert_eq!(
+            brightness_contrast(&img, -70.0, 1.0).pixels(),
+            [0, 0, 58, 122, 185]
+        );
+        assert_eq!(
+            brightness_contrast(&img, 0.0, 2.0).pixels(),
+            [0, 0, 128, 255, 255]
+        );
+        assert_eq!(
+            brightness_contrast(&img, 0.0, 0.5).pixels(),
+            [64, 96, 128, 160, 192]
+        );
+        assert_eq!(
+            brightness_contrast(&img, 0.0, -1.0).pixels(),
+            [255, 192, 128, 64, 1]
+        );
+        assert_eq!(brightness_contrast(&img, 0.0, 0.0).pixels(), [128; 5]);
+    }
+
+    #[test]
+    fn curved_transforms_survive_degenerate_parameters() {
+        let img = feature_image();
+        let one = GrayImage::filled(1, 1, 0);
+        for i in [&img, &one] {
+            for axis in [Axis::Horizontal, Axis::Vertical] {
+                for v in [
+                    f32::NAN,
+                    f32::INFINITY,
+                    -3.0,
+                    1e9,
+                    core::f32::consts::FRAC_PI_2,
+                ] {
+                    let c = cylinder(i, v, axis);
+                    assert_eq!((c.width(), c.height()), (i.width(), i.height()));
+                    let f = fold(i, v, v, axis);
+                    assert_eq!(f.width(), i.width() + 2 * PAD);
+                    let _ = wave(i, 2.0, v, axis);
+                }
+                let _ = wave(i, f32::NAN, 10.0, axis);
+                assert_eq!(
+                    wave(i, 0.0, 0.0, axis).width(),
+                    i.width() + 2 * PAD,
+                    "zero wavelength re-pads"
+                );
+                assert_eq!(cylinder(i, -0.6, axis), cylinder(i, 0.6, axis));
+                assert_eq!(fold(i, 0.5, -30.0, axis), fold(i, 0.5, 30.0, axis));
+            }
+            for v in [f32::NAN, f32::INFINITY, -50.0, 50.0] {
+                let b = bulge(i, v, (v, v));
+                assert_eq!((b.width(), b.height()), (i.width(), i.height()));
+            }
+        }
+        // Horizontal variants mirror the vertical ones on a transposed image.
+        let out = cylinder(&img, 0.8, Axis::Horizontal);
+        assert!(out.pixels().iter().any(|&p| p < 128));
+        let out = fold(&img, 0.5, 45.0, Axis::Horizontal);
+        assert!(out.pixels().iter().any(|&p| p < 128));
+        let out = wave(&img, 4.0, 20.0, Axis::Vertical);
+        assert!(out.pixels().iter().any(|&p| p < 128));
+        // Padding without distortion is an exact copy at the padded offset.
+        let padded = wave(&img, 0.0, 20.0, Axis::Horizontal);
+        assert_eq!(padded.get(PAD + 12, PAD + 12), img.get(12, 12));
+        assert_eq!(padded.get(PAD + 13, PAD + 12), img.get(13, 12));
     }
 
     /// A checkerboard-ish test pattern with distinct dark features to track.

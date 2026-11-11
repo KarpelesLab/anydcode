@@ -167,3 +167,29 @@ fn zint_numeric_encodation_decodes() {
         b"X12345Y678",
     );
 }
+
+/// The Shift characters act on the code-character stream, of which a Numeric
+/// Encodation run is just a compacted stretch: `\` is Shift 2 + `8`, and when digits
+/// follow, an encoder compacts that `8` together with them, leaving the Shift directly
+/// before the numeric shift. Reference symbol from zint 2.16.0
+/// (`zint -b CODE49 --esc -d 'A\\12345' --dump`), code characters
+/// `10 44 48 35 12 18 5`: `A`, Shift 2, numeric shift, then `812345`.
+#[test]
+fn zint_shift_pair_completed_by_a_numeric_run() {
+    assert_zint_decodes(
+        &["B0 B6 31 91 28 9C 23 CE BC", "B3 CB A3 7A 24 FB A8 B8 3C"],
+        b"A\\12345",
+    );
+}
+
+/// FNC1 (code character 45): in the first position it flags GS1 data and carries no
+/// payload; later it separates variable-length fields and is transmitted as GS.
+/// Reference symbol from zint 2.16.0 (`zint -b CODE49 --gs1 -d '[10]AB[21]X' --dump`),
+/// code characters `45 1 0 10 11 45 2 1 33`.
+#[test]
+fn zint_gs1_fnc1_decodes() {
+    assert_zint_decodes(
+        &["A4 4F 20 91 20 B7 B7 74 3C", "BC B9 A2 42 39 ED 20 B3 3C"],
+        b"10AB\x1d21X",
+    );
+}

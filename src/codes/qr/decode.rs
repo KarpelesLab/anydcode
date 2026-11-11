@@ -60,7 +60,13 @@ impl QrDecoder {
         if timing_score(&canvas, version) < 0.75 {
             return Err(last);
         }
-        for (level, mask) in [EcLevel::L, EcLevel::M, EcLevel::Q, EcLevel::H]
+        // Strongest level first. Where a version has one RS block at several levels
+        // (1 and 2 at all four, 3 at L/M) the block of a higher level is also a valid
+        // codeword of every lower one — its generator has the same leading roots — so
+        // trying L first would "succeed" on an M, Q or H symbol and read its EC
+        // codewords as data. The reverse cannot happen: the extra syndromes of a
+        // higher level are nonzero on a lower-level block.
+        for (level, mask) in [EcLevel::H, EcLevel::Q, EcLevel::M, EcLevel::L]
             .into_iter()
             .flat_map(|level| (0..8).filter_map(move |m| Mask::new(m).map(|mk| (level, mk))))
             .filter(|&combo| Some(combo) != read)

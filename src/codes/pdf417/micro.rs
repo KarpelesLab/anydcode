@@ -201,23 +201,34 @@ impl Encode for MicroPdf417Encoder {
                 "MicroPdf417Encoder given a non-MicroPDF417 symbol",
             ));
         }
-        let variant = match &symbol.meta {
-            SymbolMeta::Pdf417(m) => match m.variant {
-                Pdf417Variant::Micro(v) => v as usize,
-                Pdf417Variant::Standard => {
-                    return Err(Error::invalid_parameter(
-                        "MicroPDF417 symbol carries a standard PDF417 variant",
-                    ));
-                }
-            },
+        let meta = match &symbol.meta {
+            SymbolMeta::Pdf417(m) => m,
             _ => {
                 return Err(Error::invalid_parameter(
                     "MicroPDF417 symbol missing Pdf417Meta",
                 ));
             }
         };
+        let variant = match meta.variant {
+            Pdf417Variant::Micro(v) => v as usize,
+            Pdf417Variant::Standard => {
+                return Err(Error::invalid_parameter(
+                    "MicroPDF417 symbol carries a standard PDF417 variant",
+                ));
+            }
+        };
         if variant >= NUM_VARIANTS {
             return Err(Error::invalid_parameter("MicroPDF417 variant out of range"));
+        }
+        // The variant alone fixes the geometry and the error correction. Metadata
+        // that says otherwise describes no symbol, and would not survive a decode.
+        if meta.rows != VAR_ROWS[variant] as usize
+            || meta.columns != VAR_COLS[variant] as usize
+            || meta.ec_level.level() != 0
+        {
+            return Err(Error::invalid_parameter(
+                "MicroPDF417 rows/columns/EC level disagree with the size variant",
+            ));
         }
         let matrix = render(&symbol.segments, variant)?;
         Ok(Encoding::Matrix(matrix))

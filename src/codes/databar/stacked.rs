@@ -241,6 +241,9 @@ fn decode_stacked_family(
 
 /// A codeblock spans 49 modules (17 + 15 finder + 17); guards add 4 modules per row.
 const CODEBLOCK_MODULES: usize = 49;
+/// The most codeblocks (finder + two symbol characters) an Expanded symbol can hold:
+/// 22 symbol characters (ISO/IEC 24724:2011 §7.2).
+const MAX_CODEBLOCKS: usize = 11;
 
 /// Encode an Expanded Stacked symbol from its `Symbol` (payload + column metadata).
 pub(super) fn encode_expanded_stacked(symbol: &Symbol) -> Result<Encoding> {
@@ -494,6 +497,14 @@ fn decode_expanded_stacked(m: &BitMatrix) -> Result<Symbol> {
     let cols_per_row = (width - 4) / CODEBLOCK_MODULES;
     if cols_per_row == 0 {
         return Err(Error::undecodable("DataBar Expanded Stacked: bad width"));
+    }
+    // An Expanded symbol has at most 22 symbol characters, i.e. 11 codeblocks; every
+    // row but the last is full and the last holds at least one. Larger grids are not
+    // symbols, and must not reach the per-column search below.
+    if (stack_rows - 1) * cols_per_row + 1 > MAX_CODEBLOCKS {
+        return Err(Error::undecodable(
+            "DataBar Expanded Stacked: more than 11 codeblocks",
+        ));
     }
 
     // Extract the codeblocks of the full (non-final) rows once.

@@ -298,3 +298,37 @@ fn single_row_expanded_stacked_is_the_linear_symbol() {
     };
     assert_eq!(matrix_rows(&zint)[0].len(), p.modules.len());
 }
+
+/// ISO/IEC 24724 caps an Expanded symbol at 22 symbol characters — 11 codeblocks —
+/// so a stacked matrix has at most 11 codeblock columns and 11 rows. Anything
+/// larger is rejected on its dimensions alone; the decoder must not go looking for
+/// a last-row layout among thousands of candidate column counts.
+#[test]
+fn expanded_stacked_rejects_impossible_dimensions() {
+    use anyd::output::BitMatrix;
+
+    let dec = DataBarDecoder::new();
+    for (columns, stack_rows) in [(12usize, 2usize), (3000, 3), (2, 12), (11, 400), (200, 200)] {
+        let (width, height) = (columns * 49 + 4, stack_rows * 4 - 3);
+        let mut m = BitMatrix::new(width, height, 1);
+        // Finely striped rows: the worst case for a run-length based search.
+        for y in (0..height).step_by(4) {
+            for x in (1..width).step_by(2) {
+                m.set(x, y, true);
+            }
+        }
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{columns} columns x {stack_rows} rows"
+        );
+    }
+    // The largest real symbol still reads: 21 data characters, one codeblock per row.
+    let enc = DataBarEncoder::new();
+    let mut reduced = b"0109501101530003".to_vec();
+    reduced.extend((0..58).map(|i| b'0' + (i % 10) as u8));
+    for columns in [1, 11] {
+        let symbol = enc.build_expanded_stacked(&reduced, columns).unwrap();
+        let encoding = enc.encode(&symbol).unwrap();
+        assert_eq!(dec.decode(&encoding).unwrap(), symbol, "{columns} columns");
+    }
+}

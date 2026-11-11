@@ -148,3 +148,7 @@ required-features = ["cli"]
 [[example]]
 name = "liveeval"
 required-features = ["scan", "encode", "all-codes"]
+
+[[example]]
+name = "linedebug"
+required-features = ["scan", "encode", "all-codes"]

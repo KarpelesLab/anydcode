@@ -371,3 +371,231 @@ fn try_decode_dispatches_to_generic_decoder() {
     // The front-end attaches its scanline location.
     assert!(symbol.location.is_some());
 }
+
+// --- Low-quality captures: blur, faint print, perspective ---------------------
+
+/// A Code 128-like pattern: every element width 1..=4, many single modules between
+/// wide neighbours — the elements blur displaces most.
+fn dense_pattern() -> LinearPattern {
+    pattern_from_widths(
+        &[
+            2, 1, 1, 2, 1, 4, 1, 1, 1, 3, 2, 3, 1, 1, 3, 3, 2, 1, 3, 1, 2, 1, 1, 3, 1, 1, 2, 3, 1,
+            3, 1, 2, 2, 1, 3, 2, 1, 2, 3, 1, 1, 1, 4, 1, 2, 1, 1, 2, 3, 3, 1, 1, 1, 2, 3,
+        ],
+        10,
+    )
+}
+
+/// Gaussian blur + sensor noise, as a camera would add them.
+fn degrade(buf: &[u8], w: usize, h: usize, sigma: f32, noise: f32, seed: u64) -> Vec<u8> {
+    let img = crate::image::GrayImage::from_raw(w, h, buf.to_vec());
+    let mut rng = crate::transform::Rng::new(seed);
+    let out = crate::transform::add_noise(
+        &crate::transform::gaussian_blur(&img, sigma),
+        noise,
+        &mut rng,
+    );
+    out.pixels().to_vec()
+}
+
+#[test]
+fn normal_cdf_matches_known_values() {
+    for (u, want) in [
+        (-3.0f32, 0.001_349_9f32),
+        (-1.0, 0.158_655_3),
+        (0.0, 0.5),
+        (0.5, 0.691_462_5),
+        (2.0, 0.977_249_9),
+    ] {
+        assert!((normal_cdf(u) - want).abs() < 1e-5, "Φ({u})");
+    }
+    assert!(normal_cdf(-40.0) >= 0.0 && normal_cdf(40.0) <= 1.0);
+}
+
+#[test]
+fn solve3_solves_and_detects_singular() {
+    let x = solve3(
+        [[2.0, 1.0, -1.0], [-3.0, -1.0, 2.0], [-2.0, 1.0, 2.0]],
+        [8.0, -11.0, -3.0],
+    )
+    .expect("regular system");
+    for (got, want) in x.iter().zip([2.0, 3.0, -1.0]) {
+        assert!((got - want).abs() < 1e-9);
+    }
+    assert!(
+        solve3(
+            [[1.0, 2.0, 3.0], [2.0, 4.0, 6.0], [1.0, 0.0, 1.0]],
+            [1.0, 2.0, 3.0]
+        )
+        .is_none()
+    );
+}
+
+/// Blur as wide as half a module displaces every edge that has a close neighbour. The
+/// threshold-crossing extractor alone then mis-sizes the narrow elements (it reads the
+/// module a third too large); the gradient extractor with the blur model recovers the
+/// pattern exactly.
+#[test]
+fn recovers_under_gaussian_blur_half_a_module_wide() {
+    let pattern = dense_pattern();
+    let (buf, w, h) = render(&pattern, 3, 40);
+    for (sigma, seed) in [(1.2f32, 1u64), (1.6, 2)] {
+        let img = degrade(&buf, w, h, sigma, 6.0, seed);
+        let frame = GrayFrame::new(&img, w, h).unwrap();
+        let cands = scan_spans(&frame, &ScanOptions::default());
+        assert!(
+            recovers_modules(&cands, &pattern),
+            "sigma {sigma}: pattern not recovered"
+        );
+    }
+}
+
+/// The blur model puts edges back where they were printed, to a fraction of a pixel.
+#[test]
+fn deblurred_edges_are_within_a_third_of_a_pixel() {
+    let pattern = dense_pattern();
+    let (buf, w, h) = render(&pattern, 3, 40);
+    let img = degrade(&buf, w, h, 1.6, 0.0, 3);
+    let frame = GrayFrame::new(&img, w, h).unwrap();
+    let line = scan_lines_of(
+        w,
+        h,
+        &ScanOptions {
+            scan_count: 1,
+            angles_deg: vec![0.0],
+            ..ScanOptions::default()
+        },
+    )[0];
+    let runs = extract_runs_grad(&sample_profile(&frame, &line, 0)).expect("edges");
+    // True edge k sits on the boundary between two pixels: (30 + cumulative modules·3)
+    // − 0.5 in sample coordinates.
+    let mut truth = vec![30.0f32 - 0.5];
+    for (run, pair) in (1..).zip(pattern.modules.windows(2)) {
+        if pair[0] != pair[1] {
+            truth.push(truth[0] + 3.0 * run as f32);
+        }
+    }
+    truth.push(truth[0] + 3.0 * pattern.modules.len() as f32);
+    assert_eq!(runs.edges.len(), truth.len(), "every edge found once");
+    for (got, want) in runs.edges.iter().zip(&truth) {
+        assert!(
+            (got - want).abs() < 0.34,
+            "edge at {got}, printed at {want}"
+        );
+    }
+}
+
+/// Faint print: 25 grey levels between bar and space, below the absolute contrast the
+/// threshold extractor demands. Contrast is only meaningful relative to noise.
+#[test]
+fn recovers_faint_print() {
+    let pattern = dense_pattern();
+    let (buf, w, h) = render(&pattern, 3, 40);
+    // Remap 30..225 onto 110..135.
+    let faint: Vec<u8> = buf
+        .iter()
+        .map(|&v| if v == DARK { 110 } else { 135 })
+        .collect();
+    let img = degrade(&faint, w, h, 0.7, 1.5, 4);
+    let frame = GrayFrame::new(&img, w, h).unwrap();
+    let cands = scan_spans(&frame, &ScanOptions::default());
+    assert!(recovers_modules(&cands, &pattern), "faint pattern lost");
+}
+
+/// A flat field of sensor noise holds no edges for the gradient extractor either: its
+/// floor is set by the noise it measures across the band.
+#[test]
+fn noise_alone_yields_no_long_candidates() {
+    let (w, h) = (400usize, 40usize);
+    for (level, seed) in [(128u8, 5u64), (40, 6), (230, 7)] {
+        let img = degrade(&vec![level; w * h], w, h, 0.0, 14.0, seed);
+        let frame = GrayFrame::new(&img, w, h).unwrap();
+        let longest = scan_spans(&frame, &ScanOptions::default())
+            .iter()
+            .map(|c| c.pattern.modules.len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            longest < 20,
+            "level {level}: {longest}-module span from noise"
+        );
+    }
+}
+
+/// A symbol turned away from the camera: the module pitch shrinks steadily along it
+/// (here from 4.6 to 3.0 px). A single pitch mis-counts the wide runs at both ends.
+#[test]
+fn recovers_a_foreshortened_pattern() {
+    let pattern = dense_pattern();
+    let n = pattern.modules.len();
+    let (p0, p1) = (4.6f32, 3.0f32);
+    // Position of module boundary j: pitch falls linearly along the symbol.
+    let edge = |j: usize| {
+        let t = j as f32 / n as f32;
+        40.0 + n as f32 * (p0 * t + (p1 - p0) * t * t / 2.0)
+    };
+    let w = edge(n) as usize + 40;
+    let h = 30usize;
+    let mut buf = vec![LIGHT; w * h];
+    for (j, &dark) in pattern.modules.iter().enumerate() {
+        if !dark {
+            continue;
+        }
+        // Anti-aliased bar from edge(j) to edge(j + 1).
+        let (a, b) = (edge(j), edge(j + 1));
+        for x in a.floor() as usize..=b.floor() as usize {
+            let cover = (b.min(x as f32 + 1.0) - a.max(x as f32)).clamp(0.0, 1.0);
+            for y in 0..h {
+                let v = buf[y * w + x] as f32 - cover * (LIGHT - DARK) as f32;
+                buf[y * w + x] = v.max(DARK as f32) as u8;
+            }
+        }
+    }
+    let img = degrade(&buf, w, h, 0.6, 3.0, 8);
+    let frame = GrayFrame::new(&img, w, h).unwrap();
+    let cands = scan_spans(&frame, &ScanOptions::default());
+    assert!(
+        recovers_modules(&cands, &pattern),
+        "foreshortened pattern not recovered"
+    );
+}
+
+/// `scan_lines` puts a pattern many lines agree on ahead of the cleanly quantized
+/// fragments single lines produce, so the truncated list still holds the symbol.
+#[test]
+fn scan_lines_ranks_by_line_agreement() {
+    let pattern = dense_pattern();
+    let (buf, w, h) = render(&pattern, 3, 60);
+    let img = degrade(&buf, w, h, 1.0, 5.0, 9);
+    let frame = GrayFrame::new(&img, w, h).unwrap();
+    let top = scan_lines(
+        &frame,
+        &ScanOptions {
+            max_candidates: 1,
+            ..ScanOptions::default()
+        },
+    );
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].pattern.modules, pattern.modules);
+}
+
+/// Every candidate of the tagged scans names a real line, and one line contributes
+/// candidates from more than one extractor.
+#[test]
+fn tagged_scans_report_their_line() {
+    let pattern = dense_pattern();
+    let (buf, w, h) = render(&pattern, 3, 40);
+    let frame = GrayFrame::new(&buf, w, h).unwrap();
+    let opts = ScanOptions::default();
+    let lines = opts.scan_count * opts.angles_deg.len();
+    let analysis = analyze(&frame, &opts);
+    for tagged in [analysis.spans(), analysis.edge_candidates()] {
+        assert!(!tagged.is_empty());
+        assert!(tagged.iter().all(|(line, _)| *line < lines));
+        let on_first = tagged
+            .iter()
+            .filter(|(line, _)| *line == tagged[0].0)
+            .count();
+        assert!(on_first >= 2, "one extractor per line only");
+    }
+}

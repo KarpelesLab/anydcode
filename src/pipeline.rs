@@ -307,6 +307,13 @@ const MIN_LINE_VOTES: usize = 2;
 /// crosses it.
 const MIN_UPCE_VOTES: usize = 5;
 
+/// The vote floor for an Interleaved 2 of 5. It has neither a check character nor a
+/// fixed length, so any stretch of it that happens to begin and end like a symbol *is*
+/// one: when a damaged capture hides a bar, the pieces either side of the gap read as
+/// shorter symbols — the same pieces on every line that loses that bar. A whole symbol
+/// is read by nearly every line that crosses it.
+const MIN_ITF_VOTES: usize = 3;
+
 /// Light margin (modules) a span must show on *both* sides to be decoded. Specified
 /// quiet zones are 10 modules; a bar pattern butting against print or the crop edge is
 /// a fragment of something, and fragments are where misreads come from.
@@ -347,8 +354,10 @@ fn scan_1d_sweep(
     use crate::traits::Decode;
 
     let mut found: Vec<Symbol> = Vec::new();
+    // Sample and edge-extract every scan line once, for both readers.
+    let analysis = crate::scan1d::analyze(frame, scan_opts);
     #[cfg(feature = "ean")]
-    if let Some(s) = crate::codes::ean::scan(frame, scan_opts) {
+    if let Some(s) = crate::codes::ean::scan_analysis(&analysis) {
         found.push(s);
     }
     let linear: Vec<Box<dyn Decode>> = alloc::vec![
@@ -371,26 +380,31 @@ fn scan_1d_sweep(
 
     // Group the per-scanline spans by module pattern: identical patterns decode
     // identically, so each is decoded once and its line count carried as votes.
-    let mut patterns: Vec<(crate::scan1d::LinearCandidate, usize)> = Vec::new();
-    for cand in crate::scan1d::scan_spans(frame, scan_opts) {
+    // A vote is a scan *line*, held as a bit in a mask: one line yields several
+    // candidates (one per edge extractor), and their agreeing is not independent
+    // evidence.
+    let mut patterns: Vec<(crate::scan1d::LinearCandidate, u128)> = Vec::new();
+    for (line, cand) in analysis.spans() {
         if cand.pattern.quiet_zone < MIN_QUIET_MODULES {
             continue;
         }
+        let bit = 1u128 << (line % 128);
         match patterns
             .iter_mut()
             .find(|(c, _)| c.pattern.modules == cand.pattern.modules)
         {
-            Some((best, votes)) => {
-                *votes += 1;
+            Some((best, lines)) => {
+                *lines |= bit;
                 if cand.confidence > best.confidence {
                     *best = cand;
                 }
             }
-            None => patterns.push((cand, 1)),
+            None => patterns.push((cand, bit)),
         }
     }
     patterns.sort_by(|a, b| {
-        b.1.cmp(&a.1)
+        b.1.count_ones()
+            .cmp(&a.1.count_ones())
             .then(b.0.confidence.total_cmp(&a.0.confidence))
     });
     patterns.truncate(MAX_PATTERNS);
@@ -398,8 +412,8 @@ fn scan_1d_sweep(
     // Decode each pattern both ways and tally votes per reading. A scanline as easily
     // runs against the code's reading direction as with it (and a 180°-rotated code
     // always does), hence the mirrored attempt.
-    let mut readings: Vec<(Symbol, usize)> = Vec::new();
-    for (cand, votes) in &patterns {
+    let mut readings: Vec<(Symbol, u128)> = Vec::new();
+    for (cand, lines) in &patterns {
         let mut mirrored = cand.clone();
         mirrored.pattern.modules.reverse();
         mirrored.edges.clear();
@@ -412,32 +426,37 @@ fn scan_1d_sweep(
                     continue;
                 }
                 match readings.iter_mut().find(|(s, _)| same_reading(s, &sym)) {
-                    Some((_, n)) => *n += votes,
-                    None => readings.push((sym, *votes)),
+                    Some((_, n)) => *n |= lines,
+                    None => readings.push((sym, *lines)),
                 }
             }
         }
     }
+    let mut readings: Vec<(Symbol, usize)> = readings
+        .into_iter()
+        .map(|(sym, lines)| (sym, lines.count_ones() as usize))
+        .collect();
     readings.retain(|(sym, n)| {
-        *n >= if sym.symbology == Symbology::UpcE {
-            MIN_UPCE_VOTES
-        } else {
-            MIN_LINE_VOTES
+        *n >= match sym.symbology {
+            Symbology::UpcE => MIN_UPCE_VOTES,
+            Symbology::Itf => MIN_ITF_VOTES,
+            _ => MIN_LINE_VOTES,
         }
     });
 
-    // A reading contained in a longer reading of the same symbology that is at least
-    // as well supported is that longer symbol seen through a scanline that left its
-    // bars early — not a second code.
+    // A reading contained in a longer reading of the same symbology is that longer
+    // symbol seen through scanlines that left its bars early — not a second code. The
+    // longer reading has cleared the vote floor itself, and noise does not extend a
+    // real symbol into a longer one that still contains it; how the votes split between
+    // the two says only how slanted the lines were.
     let partial: Vec<bool> = readings
         .iter()
-        .map(|(a, an)| {
+        .map(|(a, _)| {
             let at = a.payload_bytes();
-            readings.iter().any(|(b, bn)| {
+            readings.iter().any(|(b, _)| {
                 let bt = b.payload_bytes();
                 b.symbology == a.symbology
                     && bt.len() > at.len()
-                    && 2 * bn >= *an
                     && bt.windows(at.len().max(1)).any(|w| w == at.as_slice())
             })
         })

@@ -16,7 +16,7 @@
 use super::tables::{EAN13_FIRST_PARITY, check_digit, l_widths, upce_expand, upce_from_parity};
 use super::{EanMeta, EanVariant};
 use crate::image::GrayFrame;
-use crate::scan1d::{ScanOptions, scan_edges};
+use crate::scan1d::{Analysis, ScanOptions, analyze};
 use crate::segment::Segment;
 use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
@@ -307,41 +307,49 @@ impl Margins<'_> {
 /// barcode is crossed by dozens of clean scanlines; unstructured texture (printed text,
 /// artwork) yields only a stray line or two that happen to slip past a checksum — most
 /// dangerously as UPC-E, whose eight digits are cheap to satisfy by chance.
-const MIN_CONSENSUS_VOTES: usize = 3;
+const MIN_CONSENSUS_VOTES: u32 = 2;
 /// The floor for a UPC-E reading. A slanted scanline that leaves an EAN-13's bars just
 /// past its centre guard — into the white above or below them — yields a run sequence
 /// that *is* a UPC-E, quiet zone included; only the couple of lines exiting at exactly
-/// that module see it (each counted once per prominence level), whereas a real UPC-E is
-/// read by every line crossing it.
-const MIN_UPCE_VOTES: usize = 8;
+/// that module see it, whereas a real UPC-E is read by every line crossing it.
+const MIN_UPCE_VOTES: u32 = 5;
 /// The winning value must additionally out-poll the runner-up by this factor, so a
 /// scanline set split between two readings is treated as unresolved rather than guessed.
-const DOMINANCE: usize = 2;
+const DOMINANCE: u32 = 2;
 
 /// Robustly read an EAN/UPC symbol from a frame by decoding every fine scanline
-/// ([`scan_edges`]) and taking the value the most scanlines agree on — provided that
-/// value clears a consensus floor and clearly out-polls any competitor. Consensus across
-/// scanlines is what makes a curved, blurred capture — where each individual line
+/// (`scan1d::scan_edges`) and taking the value the most scanlines agree on — provided
+/// that value clears a consensus floor and clearly out-polls any competitor. Consensus
+/// across scanlines is what makes a curved, blurred capture — where each individual line
 /// corrupts different thin features — decode reliably; the floor and dominance test are
 /// what stop a lone checksum-passing misread on non-barcode texture from being reported.
+///
+/// A vote is a scan *line*: each line is read through several edge extractors, and one
+/// line agreeing with itself is not consensus.
 pub fn scan(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Option<Symbol> {
-    let mut tally: Vec<(String, usize, Symbol)> = Vec::new();
-    for cand in scan_edges(frame, opts) {
+    scan_analysis(&analyze(frame, opts))
+}
+
+/// [`scan`] over scan lines that have already been sampled.
+pub(crate) fn scan_analysis(analysis: &Analysis) -> Option<Symbol> {
+    let mut tally: Vec<(String, u128, Symbol)> = Vec::new();
+    for (line, cand) in analysis.edge_candidates() {
         let Some(sym) = decode_edges_within(&cand.edges, cand.lead_px, cand.trail_px) else {
             continue;
         };
+        let bit = 1u128 << (line % 128);
         let key = format!("{:?}|{}", sym.symbology, sym.text().unwrap_or_default());
         if let Some(entry) = tally.iter_mut().find(|(k, _, _)| *k == key) {
-            entry.1 += 1;
+            entry.1 |= bit;
         } else {
             let mut sym = sym;
             sym.location.get_or_insert(cand.location);
-            tally.push((key, 1, sym));
+            tally.push((key, bit, sym));
         }
     }
-    tally.sort_by_key(|(_, n, _)| core::cmp::Reverse(*n));
-    let top = tally.first().map(|(_, n, _)| *n).unwrap_or(0);
-    let runner_up = tally.get(1).map(|(_, n, _)| *n).unwrap_or(0);
+    tally.sort_by_key(|(_, lines, _)| core::cmp::Reverse(lines.count_ones()));
+    let top = tally.first().map_or(0, |(_, n, _)| n.count_ones());
+    let runner_up = tally.get(1).map_or(0, |(_, n, _)| n.count_ones());
     let floor = match tally.first() {
         Some((_, _, sym)) if sym.symbology == Symbology::UpcE => MIN_UPCE_VOTES,
         _ => MIN_CONSENSUS_VOTES,

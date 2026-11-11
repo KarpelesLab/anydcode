@@ -68,6 +68,9 @@ const MAX_ANGLE_DEG: f32 = 6.0;
 /// considered to contain a barcode rather than flat background.
 const MIN_AMPLITUDE: f32 = 30.0;
 
+/// Hysteresis half-band of the threshold extractor, in units of the profile noise.
+const HYST_NOISE_K: f32 = 2.5;
+
 /// Options controlling scanline extraction and candidate generation.
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -138,7 +141,7 @@ pub fn refine_axis(frame: &GrayFrame<'_>, deg: f32) -> f32 {
         scan_lines_of(w, h, &opts(a))
             .iter()
             .map(|line| {
-                let p = sample_band(frame, line, AXIS_BAND_HALF);
+                let p = sample_band(frame, line, AXIS_BAND_HALF).samples;
                 p.windows(2)
                     .map(|v| (v[1] - v[0]) * (v[1] - v[0]))
                     .sum::<f32>()
@@ -188,12 +191,38 @@ pub struct LinearCandidate {
 
 /// Scan `frame` for linear barcodes and return normalized candidates.
 ///
-/// Candidates are sorted by descending [`LinearCandidate::confidence`], deduplicated
-/// by identical module pattern, and truncated to [`ScanOptions::max_candidates`].
+/// Candidates are deduplicated by identical module pattern, ordered by how many scan
+/// lines recovered that exact pattern and then by descending
+/// [`LinearCandidate::confidence`], and truncated to [`ScanOptions::max_candidates`].
+/// Agreement between lines comes first because confidence only measures how cleanly
+/// the runs quantized, which a short fragment of bars does more easily than a whole
+/// symbol — whereas a fragment is cut differently on every line.
 pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
-    let mut found = scan_all(frame, opts);
-    dedupe(&mut found, opts.max_candidates);
-    found
+    // (best candidate, lines that produced the pattern) per distinct pattern.
+    let mut kept: Vec<(LinearCandidate, Vec<usize>)> = Vec::new();
+    for (line, cand) in scan_all(frame, opts) {
+        match kept
+            .iter_mut()
+            .find(|(k, _)| k.pattern.modules == cand.pattern.modules)
+        {
+            Some((best, lines)) => {
+                if !lines.contains(&line) {
+                    lines.push(line);
+                }
+                if cand.confidence > best.confidence {
+                    *best = cand;
+                }
+            }
+            None => kept.push((cand, vec![line])),
+        }
+    }
+    kept.sort_by(|a, b| {
+        b.1.len()
+            .cmp(&a.1.len())
+            .then(b.0.confidence.total_cmp(&a.0.confidence))
+    });
+    kept.truncate(opts.max_candidates);
+    kept.into_iter().map(|(c, _)| c).collect()
 }
 
 /// Scan `frame` and return **every** per-scanline span candidate, without the dedup and
@@ -204,7 +233,7 @@ pub fn scan_lines(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandid
 /// available that the reading is real (see [`crate::pipeline::scan_1d`]). Ordered by
 /// scan position, then angle, then left to right along the line.
 pub fn scan_spans(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
-    scan_all(frame, opts)
+    scan_all(frame, opts).into_iter().map(|(_, c)| c).collect()
 }
 
 /// Prominence thresholds (as a fraction of the scanline amplitude) used by the fine
@@ -232,42 +261,114 @@ const MAX_FINE_EXTREMA: usize = 1024;
 /// different lines, so a width-ratio decoder (e.g. EAN/UPC) wants to try every one and
 /// vote. Ordered by descending [`LinearCandidate::confidence`].
 pub fn scan_edges(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
-    let w = frame.width();
-    let h = frame.height();
-    if w < 4 || h == 0 {
-        return Vec::new();
-    }
-    let mut found: Vec<LinearCandidate> = Vec::new();
-    for line in scan_lines_of(w, h, opts) {
-        let profile = sample_profile(frame, &line, opts.smooth_radius);
-        for &prom in FINE_PROMINENCE {
-            if let Some(cand) = analyze_profile_fine(&profile, &line, opts.min_runs, prom) {
-                found.push(cand);
-            }
-        }
-    }
-    found.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(core::cmp::Ordering::Equal)
-    });
-    found
+    analyze(frame, opts)
+        .edge_candidates()
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
 }
 
-/// Run every scan position/angle and collect the raw candidates (no dedup/sort).
-fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<LinearCandidate> {
-    let w = frame.width();
-    let h = frame.height();
-    if w < 4 || h == 0 {
-        return Vec::new();
+/// Run every scan position/angle and collect the raw span candidates (no dedup/sort).
+fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<(usize, LinearCandidate)> {
+    analyze(frame, opts).spans()
+}
+
+/// Every scan line of one frame, sampled and edge-extracted once, for the several
+/// readers that consume them (the span/quantize path, the EAN width reader).
+///
+/// Candidates come tagged with the index of the line they were read from: one line
+/// yields several candidates for the same stretch of bars — one per edge extractor —
+/// and they are not independent evidence. A consensus decoder must count *lines* that
+/// agree, not candidates.
+#[derive(Debug)]
+pub(crate) struct Analysis {
+    lines: Vec<LineRuns>,
+    min_runs: usize,
+}
+
+/// One scan line's profile and the edges each extractor found on it.
+#[derive(Debug)]
+struct LineRuns {
+    line: ScanLine,
+    profile: Profile,
+    /// Threshold-crossing edges (exact on a sharp capture).
+    hyst: Option<Runs>,
+    /// Gradient-peak edges, blur-corrected (survive blur and low contrast).
+    grad: Option<Runs>,
+}
+
+/// Sample every scan line of `frame` and extract its edges.
+pub(crate) fn analyze(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Analysis {
+    let (w, h) = (frame.width(), frame.height());
+    let mut lines = Vec::new();
+    if w >= 4 && h > 0 {
+        for line in scan_lines_of(w, h, opts) {
+            let profile = sample_profile(frame, &line, opts.smooth_radius);
+            let hyst = extract_runs(&profile);
+            let grad = extract_runs_grad(&profile);
+            lines.push(LineRuns {
+                line,
+                profile,
+                hyst,
+                grad,
+            });
+        }
+    }
+    Analysis {
+        lines,
+        min_runs: opts.min_runs,
+    }
+}
+
+impl Analysis {
+    /// One candidate per barcode-shaped span of every line, from both extractors,
+    /// tagged with the line's index. Ordered by line, then left to right.
+    pub(crate) fn spans(&self) -> Vec<(usize, LinearCandidate)> {
+        let mut found = Vec::new();
+        for (idx, l) in self.lines.iter().enumerate() {
+            // Two independent readings of where the edges are.
+            for runs in [&l.hyst, &l.grad].into_iter().flatten() {
+                for mut span in split_spans(runs, self.min_runs) {
+                    let n = span.edges.len();
+                    span.lead_px = span.lead_px.min(quiet_extent(
+                        &l.profile,
+                        span.edges[0],
+                        span.edges[1],
+                        span.lead_px,
+                    ));
+                    span.trail_px = span.trail_px.min(quiet_extent(
+                        &l.profile,
+                        span.edges[n - 1],
+                        span.edges[n - 2],
+                        span.trail_px,
+                    ));
+                    if let Some(cand) = candidate_of(span, &l.line, self.min_runs) {
+                        found.push((idx, cand));
+                    }
+                }
+            }
+        }
+        found
     }
 
-    let mut found: Vec<LinearCandidate> = Vec::new();
-    for line in scan_lines_of(w, h, opts) {
-        let profile = sample_profile(frame, &line, opts.smooth_radius);
-        found.extend(analyze_profile(&profile, &line, opts.min_runs));
+    /// One whole-line candidate per fine edge reading of every line (the peak
+    /// extractor at each prominence, plus the gradient extractor), tagged with the
+    /// line's index and ordered by descending confidence.
+    pub(crate) fn edge_candidates(&self) -> Vec<(usize, LinearCandidate)> {
+        let mut found = Vec::new();
+        for (idx, l) in self.lines.iter().enumerate() {
+            let fine = FINE_PROMINENCE
+                .iter()
+                .filter_map(|&prom| extract_runs_fine(&l.profile.samples, prom));
+            for runs in fine.chain(l.grad.clone()) {
+                if let Some(cand) = candidate_of(runs, &l.line, self.min_runs) {
+                    found.push((idx, cand));
+                }
+            }
+        }
+        found.sort_by(|a, b| b.1.confidence.total_cmp(&a.1.confidence));
+        found
     }
-    found
 }
 
 /// Feed a candidate's pattern to a linear decoder, returning the decoded [`Symbol`]
@@ -359,6 +460,25 @@ fn scan_lines_of(w: usize, h: usize, opts: &ScanOptions) -> Vec<ScanLine> {
 /// Half-width, in pixels, of the band of image rows averaged into each scan line.
 const BAND_HALF: i32 = 2;
 
+/// Band half-width tried on noisy frames (13 rows instead of 5).
+const WIDE_BAND_HALF: i32 = 6;
+/// Profile noise (grey levels) from which the wide band is worth sampling.
+const WIDE_BAND_MIN_NOISE: f32 = 2.5;
+/// The wide band is used if its noise is below this fraction of the narrow band's
+/// (√(5/13) ≈ 0.62 when the line is perfectly aligned).
+const WIDE_BAND_GAIN: f32 = 0.8;
+
+/// A luminance profile along a scan line, with the noise on it.
+#[derive(Debug)]
+struct Profile {
+    /// One sample per pixel of line length.
+    samples: Vec<f32>,
+    /// Standard deviation of the noise on each sample, measured *across* the band: a
+    /// bar is constant along its length, so pixels of one band column differ only by
+    /// noise (and a little by any misalignment of the line with the bars).
+    noise: f32,
+}
+
 /// Build the luminance profile along `line`, one sample per pixel of line length, then
 /// optionally box-smooth it.
 ///
@@ -368,47 +488,107 @@ const BAND_HALF: i32 = 2;
 /// where a camera barcode lives; binning real pixels instead keeps an axis-aligned
 /// line as sharp as the image, lets a diagonal line draw on pixels at several sub-pixel
 /// phases, and averages sensor noise across the band (bars are constant along their
-/// length, so nothing but noise is lost). Positions are clamped to the frame.
-fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) -> Vec<f32> {
-    smooth(&sample_band(frame, line, BAND_HALF), smooth_radius)
+/// length, so nothing but noise is lost). Band pixels outside the frame are left out;
+/// where the line itself is outside, it follows the frame's border.
+fn sample_profile(frame: &GrayFrame<'_>, line: &ScanLine, smooth_radius: usize) -> Profile {
+    let mut profile = sample_band(frame, line, BAND_HALF);
+    // On a noisy frame, average more of each bar's length — if the line runs along
+    // the bars well enough to allow it. A wider band on a misaligned line smears edges
+    // across its samples, which shows up as *more* scatter across the band, not less;
+    // so the measured noise itself says which band is the better profile.
+    if profile.noise >= WIDE_BAND_MIN_NOISE {
+        let wide = sample_band(frame, line, WIDE_BAND_HALF);
+        if wide.noise < WIDE_BAND_GAIN * profile.noise {
+            profile = wide;
+        }
+    }
+    if smooth_radius > 0 {
+        profile.samples = smooth(&profile.samples, smooth_radius);
+        profile.noise /= ((2 * smooth_radius + 1) as f32).sqrt();
+    }
+    profile
 }
 
 /// The band-averaged profile along `line`, averaging `band_half` pixels either side.
-fn sample_band(frame: &GrayFrame<'_>, line: &ScanLine, band_half: i32) -> Vec<f32> {
+fn sample_band(frame: &GrayFrame<'_>, line: &ScanLine, band_half: i32) -> Profile {
     let (w, h) = (frame.width() as i32, frame.height() as i32);
     let n = line.len;
     let mut sum = vec![0.0f32; n];
+    let mut sum_sq = vec![0.0f32; n];
     let mut count = vec![0u16; n];
     // Unit normal to the line.
     let (nx, ny) = (-line.sy, line.sx);
+    let mut add = |x: i32, y: i32| {
+        // Bin by where this pixel's centre falls along the line.
+        let t = (x as f32 - line.ox) * line.sx + (y as f32 - line.oy) * line.sy;
+        let bin = t.round();
+        if bin >= 0.0 && (bin as usize) < n {
+            let v = f32::from(frame.get_unchecked(x as usize, y as usize));
+            sum[bin as usize] += v;
+            sum_sq[bin as usize] += v * v;
+            count[bin as usize] += 1;
+        }
+    };
     for i in 0..n {
         let p = line.point(i as f32);
+        let mut inside = false;
         for k in -band_half..=band_half {
-            let x = ((p.x + k as f32 * nx).round() as i32).clamp(0, w - 1);
-            let y = ((p.y + k as f32 * ny).round() as i32).clamp(0, h - 1);
-            // Bin by where this pixel's centre falls along the line.
-            let t = (x as f32 - line.ox) * line.sx + (y as f32 - line.oy) * line.sy;
-            let bin = t.round();
-            if bin >= 0.0 && (bin as usize) < n {
-                sum[bin as usize] += f32::from(frame.get_unchecked(x as usize, y as usize));
-                count[bin as usize] += 1;
+            let x = (p.x + k as f32 * nx).round() as i32;
+            let y = (p.y + k as f32 * ny).round() as i32;
+            if (0..w).contains(&x) && (0..h).contains(&y) {
+                add(x, y);
+                inside = true;
             }
+        }
+        // Where the whole band has left the frame the line follows the frame's border
+        // instead — one pixel, counted once, so the sample is known to be a noisy one.
+        if !inside {
+            add(
+                (p.x.round() as i32).clamp(0, w - 1),
+                (p.y.round() as i32).clamp(0, h - 1),
+            );
         }
     }
     // A bin no pixel centre fell into (possible on a diagonal) takes its neighbour.
-    let mut profile = Vec::with_capacity(n);
+    let mut samples = Vec::with_capacity(n);
     let mut last = 0.0f32;
+    // Per-pixel variance within each well-populated bin; the median over bins is the
+    // pixel noise (bins straddling an edge on a slightly misaligned line are the
+    // outliers). A sample averaging `c` pixels then carries 1/c of it — and on a
+    // diagonal line the bins are unevenly filled, so that is averaged over the bins.
+    let mut variances: Vec<f32> = Vec::with_capacity(n);
+    let (mut inv_count, mut dof) = (0.0f32, 0.0f32);
     for i in 0..n {
         if count[i] > 0 {
-            last = sum[i] / f32::from(count[i]);
-        } else if let Some(j) = (i + 1..n).find(|&j| count[j] > 0)
-            && i == 0
-        {
-            last = sum[j] / f32::from(count[j]);
+            let c = f32::from(count[i]);
+            last = sum[i] / c;
+            inv_count += 1.0 / c;
+            if count[i] > 2 {
+                variances.push((sum_sq[i] - sum[i] * last).max(0.0) / (c - 1.0));
+                dof += c - 1.0;
+            }
+        } else {
+            inv_count += 1.0;
+            if let Some(j) = (i + 1..n).find(|&j| count[j] > 0)
+                && i == 0
+            {
+                last = sum[j] / f32::from(count[j]);
+            }
         }
-        profile.push(last);
+        samples.push(last);
     }
-    profile
+    let noise = if variances.is_empty() || n == 0 {
+        0.0
+    } else {
+        let mid = variances.len() / 2;
+        let median = *variances.select_nth_unstable_by(mid, f32::total_cmp).1;
+        // The median of a sample variance on k degrees of freedom sits below the
+        // variance itself, by (1 − 2/9k)³ (Wilson–Hilferty).
+        let k = (dof / variances.len() as f32).max(1.0);
+        let pixel_var = median / (1.0 - 2.0 / (9.0 * k)).powi(3);
+        (pixel_var * inv_count / n as f32).sqrt()
+    };
+    Profile { samples, noise }
 }
 
 /// Separable box smoothing with the given radius (`0` returns a copy).
@@ -434,7 +614,7 @@ fn smooth(profile: &[f32], radius: usize) -> Vec<f32> {
 
 /// The run structure recovered from a profile: sub-pixel edge positions plus the
 /// dark/light levels used.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Runs {
     /// Sub-pixel positions (fractional column index) of every transition, from the
     /// leading edge of the first bar to the trailing edge of the last: an even count,
@@ -471,16 +651,10 @@ fn crossing(i: usize, a: f32, b: f32, thr: f32) -> f32 {
     }
 }
 
-/// Per-sample local threshold and hysteresis half-band for a profile.
-///
-/// Each sample is compared against the midpoint of the luminance range within
-/// `radius` samples of it. Where that range is too small to hold a bar edge — inside a
-/// quiet zone, a wide bar, a flat dark background — the nearest *informative* threshold
-/// is carried over, so flat stretches are classified by the contrast next to them
-/// rather than by noise. Returns `None` for a profile that is flat throughout.
-fn local_thresholds(profile: &[f32], radius: usize) -> Option<Vec<(f32, f32)>> {
+/// Minimum and maximum of `profile` within `radius` samples of each sample, via
+/// monotonic deques: O(n).
+fn sliding_range(profile: &[f32], radius: usize) -> (Vec<f32>, Vec<f32>) {
     let n = profile.len();
-    // Sliding-window min and max via monotonic deques: O(n).
     let mut lo = vec![0.0f32; n];
     let mut hi = vec![0.0f32; n];
     let mut min_q: alloc::collections::VecDeque<usize> = alloc::collections::VecDeque::new();
@@ -509,11 +683,24 @@ fn local_thresholds(profile: &[f32], radius: usize) -> Option<Vec<(f32, f32)>> {
         lo[i] = profile[*min_q.front().expect("window is never empty")];
         hi[i] = profile[*max_q.front().expect("window is never empty")];
     }
+    (lo, hi)
+}
+
+/// Per-sample local threshold and hysteresis half-band for a profile.
+///
+/// Each sample is compared against the midpoint of the luminance range within
+/// `radius` samples of it. Where that range is too small to hold a bar edge — inside a
+/// quiet zone, a wide bar, a flat dark background — the nearest *informative* threshold
+/// is carried over, so flat stretches are classified by the contrast next to them
+/// rather than by noise. Returns `None` for a profile that is flat throughout.
+fn local_thresholds(profile: &[f32], radius: usize, floor: f32) -> Option<Vec<(f32, f32)>> {
+    let n = profile.len();
+    let (lo, hi) = sliding_range(profile, radius);
 
     let mut out: Vec<Option<(f32, f32)>> = (0..n)
         .map(|i| {
             let amp = hi[i] - lo[i];
-            (amp >= MIN_AMPLITUDE).then(|| ((lo[i] + hi[i]) / 2.0, amp * 0.12))
+            (amp >= floor).then(|| ((lo[i] + hi[i]) / 2.0, amp * 0.12))
         })
         .collect();
     // Carry informative thresholds across flat stretches: forward, then back-fill the
@@ -540,20 +727,29 @@ fn local_thresholds(profile: &[f32], radius: usize) -> Option<Vec<(f32, f32)>> {
 /// The scan line may begin or end on anything (a dark background, a clipped bar): the
 /// returned edges run from the first light→dark transition to the last dark→light one,
 /// with the light margins outside them reported as the lead/trail widths.
-fn extract_runs(profile: &[f32]) -> Option<Runs> {
+fn extract_runs(profile: &Profile) -> Option<Runs> {
+    // Contrast is only contrast if it stands clear of the noise: on a grainy frame a
+    // flat surface swings by more than the absolute floor.
+    let noise = profile.noise;
+    let floor = MIN_AMPLITUDE.max(GRAD_RANGE_K * noise);
+    let profile = profile.samples.as_slice();
     let n = profile.len();
     if n < 4 {
         return None;
     }
     let (low, high) = levels(profile);
     let amplitude = high - low;
-    if amplitude < MIN_AMPLITUDE {
+    if amplitude < floor {
         return None;
     }
     // Wide enough to see past the widest symbol element at any plausible module size,
     // narrow enough to track an illumination falloff along the line.
     let radius = (n / 24).clamp(8, 48);
-    let thresholds = local_thresholds(profile, radius)?;
+    let mut thresholds = local_thresholds(profile, radius, floor)?;
+    // The hysteresis band must also clear the noise, or a flat stretch flickers.
+    for (_, hyst) in &mut thresholds {
+        *hyst = hyst.max(HYST_NOISE_K * noise);
+    }
 
     let start_dark = profile[0] < thresholds[0].0;
     let mut edges: Vec<f32> = Vec::new();
@@ -730,7 +926,7 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
     }
     // The line may begin or end on anything; judge each end against its own
     // neighbourhood (a global split misreads the dim end of an unevenly lit line).
-    let thresholds = local_thresholds(profile, (n / 24).clamp(8, 48))?;
+    let thresholds = local_thresholds(profile, (n / 24).clamp(8, 48), MIN_AMPLITUDE)?;
     let end_kind = |i: usize| if profile[i] < thresholds[i].0 { -1 } else { 1 };
 
     // Collect extrema (position, value, kind: +1 max / -1 min) from trend reversals,
@@ -825,6 +1021,475 @@ fn extract_runs_fine(profile: &[f32], prom: f32) -> Option<Runs> {
     bar_bounded(edges, start_dark, n, amplitude)
 }
 
+// --- Gradient-peak edge extraction -------------------------------------------
+
+/// Least luminance range (0..255) of a scanline for the gradient extractor to look at
+/// it. Far below [`MIN_AMPLITUDE`]: this extractor never compares against an absolute
+/// level, so faint print is as readable as its signal-to-noise allows.
+const MIN_GRAD_AMPLITUDE: f32 = 10.0;
+
+/// An edge must be at least this fraction of the steepest edge near it. Blur flattens
+/// the edges of single-module elements to a fraction of an isolated edge's slope.
+const GRAD_REL: f32 = 0.16;
+
+/// ... and at least this many times the noise on a slope sample.
+const GRAD_NOISE_K: f32 = 2.5;
+
+/// The whole level change across an edge must be this many times the noise on a
+/// difference of two samples: what keeps sensor noise from reading as bars.
+const GRAD_STEP_K: f32 = 4.0;
+
+/// A line's luminance range must be this many times its noise to hold a barcode.
+const GRAD_RANGE_K: f32 = 6.0;
+
+/// ... and at least this steep in absolute terms (luminance per pixel).
+const GRAD_MIN_STEP: f32 = 2.0;
+
+/// Two same-polarity gradient lobes at most this far apart are one edge seen through
+/// a ripple (a blurred ramp with noise on it), not two edges.
+const GRAD_MERGE_PX: f32 = 2.5;
+
+/// Run extraction from gradient peaks: an edge is where the luminance changes fastest.
+///
+/// A threshold crossing ([`extract_runs`]) places an edge where the profile passes the
+/// midpoint between two plateaus — but under blur a narrow element never reaches its
+/// plateau, so its edges are placed too far apart and it steals width from its
+/// neighbours; and "midpoint" needs an absolute notion of contrast that faint print
+/// does not meet. The point of steepest change has neither problem: convolving a step
+/// with any symmetric blur leaves its steepest point where the step was, and closely
+/// spaced edges pull each other's peaks apart far less than they do their half-height
+/// crossings. Each maximal same-sign lobe of the first difference is one edge, placed
+/// at the centroid of its upper half; lobes weaker than the local and noise floors are
+/// ignored.
+fn extract_runs_grad(profile: &Profile) -> Option<Runs> {
+    let noise = profile.noise;
+    let profile = profile.samples.as_slice();
+    let n = profile.len();
+    if n < 8 {
+        return None;
+    }
+    let (low, high) = levels(profile);
+    let amplitude = high - low;
+    // The spread between the darkest and brightest tenth of pure noise is ~3.5σ.
+    if amplitude < MIN_GRAD_AMPLITUDE.max(GRAD_RANGE_K * noise) {
+        return None;
+    }
+    // Forward differences: g[i] is the slope between samples i and i+1, at i + 0.5.
+    let g: Vec<f32> = profile.windows(2).map(|w| w[1] - w[0]).collect();
+    // A difference of two samples carries √2 times the noise of one.
+    let floor = (GRAD_NOISE_K * core::f32::consts::SQRT_2 * noise).max(GRAD_MIN_STEP);
+    let step_floor = (GRAD_STEP_K * core::f32::consts::SQRT_2 * noise).max(GRAD_MIN_STEP);
+
+    // Steepest slope per block; an edge is judged against its own and adjacent blocks.
+    let block = (n / 24).clamp(8, 48);
+    let bmax: Vec<f32> = g
+        .chunks(block)
+        .map(|c| c.iter().fold(0.0f32, |m, v| m.max(v.abs())))
+        .collect();
+    let threshold = |i: usize| {
+        let b = i / block;
+        let lo = b.saturating_sub(1);
+        let hi = (b + 1).min(bmax.len() - 1);
+        let local = bmax[lo..=hi].iter().fold(0.0f32, |m, &v| m.max(v));
+        (GRAD_REL * local).max(floor)
+    };
+
+    // One accepted lobe per edge.
+    let mut edges: Vec<GradEdge> = Vec::new();
+    let mut i = 0;
+    while i < g.len() {
+        if g[i] == 0.0 {
+            i += 1;
+            continue;
+        }
+        let rising = g[i] > 0.0;
+        let start = i;
+        let (mut peak, mut peak_at) = (0.0f32, i);
+        while i < g.len() && g[i] != 0.0 && (g[i] > 0.0) == rising {
+            if g[i].abs() > peak {
+                peak = g[i].abs();
+                peak_at = i;
+            }
+            i += 1;
+        }
+        // Steep enough at its peak, and a large enough step in total: a noise spike
+        // is one steep sample, whereas a real edge — however blurred — changes the
+        // level by the whole lobe.
+        let step = (profile[i] - profile[start]).abs();
+        if peak < threshold(peak_at) || step < step_floor {
+            continue;
+        }
+        let (mut weight, mut moment) = (0.0f32, 0.0f32);
+        for (k, v) in g.iter().enumerate().take(i).skip(start) {
+            let a = v.abs();
+            if a >= 0.5 * peak {
+                weight += a;
+                moment += a * (k as f32 + 0.5);
+            }
+        }
+        let pos = moment / weight;
+        match edges.last_mut() {
+            Some(last) if last.rising == rising => {
+                if pos - last.pos <= GRAD_MERGE_PX {
+                    last.pos = (last.pos * last.weight + pos * weight) / (last.weight + weight);
+                    last.weight += weight;
+                    last.peak = last.peak.max(peak);
+                } else if weight > last.weight {
+                    // An edge of the other polarity was missed between them; the
+                    // stronger of the two is the one to believe.
+                    *last = GradEdge {
+                        pos,
+                        rising,
+                        weight,
+                        peak,
+                    };
+                }
+            }
+            _ => edges.push(GradEdge {
+                pos,
+                rising,
+                weight,
+                peak,
+            }),
+        }
+    }
+    let start_dark = edges.first()?.rising;
+    deblur_edges(profile, &mut edges, block);
+    let edges: Vec<f32> = edges.into_iter().map(|e| e.pos).collect();
+    bar_bounded(edges, start_dark, n, amplitude)
+}
+
+/// One edge found by the gradient extractor.
+#[derive(Debug, Clone, Copy)]
+struct GradEdge {
+    /// Sub-pixel position along the profile.
+    pos: f32,
+    /// Whether luminance rises across it (dark → light).
+    rising: bool,
+    /// Summed slope of the lobe's upper half (its evidence).
+    weight: f32,
+    /// Steepest slope in the lobe.
+    peak: f32,
+}
+
+/// The standard normal cumulative distribution (Abramowitz & Stegun 7.1.26, |ε| < 2e-7).
+fn normal_cdf(u: f32) -> f32 {
+    let x = u * core::f32::consts::FRAC_1_SQRT_2;
+    let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+    let poly = ((((1.061_405_4 * t - 1.453_152_1) * t + 1.421_413_8) * t - 0.284_496_72) * t
+        + 0.254_829_6)
+        * t;
+    let erf = 1.0 - poly * (-x * x).exp();
+    0.5 * (1.0 + if x >= 0.0 { erf } else { -erf })
+}
+
+/// Blur (Gaussian σ, pixels) below which edges are where they appear to be.
+const DEBLUR_MIN_SIGMA: f32 = 0.6;
+/// Largest blur modelled; beyond it single modules are gone, not displaced.
+const DEBLUR_MAX_SIGMA: f32 = 3.5;
+/// Blur widths tried, as fractions of the estimate read off the sharpest edges. That
+/// estimate can only be too large — an edge with a close neighbour is less steep than
+/// an isolated one — and blur width trades off against the width of narrow elements,
+/// so the fit that leaves the smallest residual decides.
+const DEBLUR_SIGMA_TRIALS: [f32; 4] = [1.0, 0.85, 0.7, 0.55];
+/// Gauss–Newton sweeps per trial blur width, and further sweeps at the chosen one.
+const DEBLUR_TRIAL_SWEEPS: usize = 2;
+const DEBLUR_FINAL_SWEEPS: usize = 3;
+/// Half-width of the windows the levels are re-estimated over, in envelope radii.
+const RELEVEL_REACH: usize = 3;
+/// Modelled darkness within this of 0 or 1 counts as being on a plateau.
+const RELEVEL_BAND: f32 = 0.15;
+/// Samples either side of an edge its blurred step is evaluated over, in σ.
+const DEBLUR_REACH: f32 = 3.5;
+
+/// Move each edge to where it must be for a *blurred* bar pattern to reproduce the
+/// profile.
+///
+/// Blur does not just soften an edge, it displaces the apparent position of edges that
+/// have a neighbour within the blur radius: a one-module bar spreads into the spaces
+/// beside it, so by any local measure — threshold crossing or steepest slope — it reads
+/// wide and its neighbours narrow, by up to half a module once the blur is as wide as a
+/// module. No per-edge rule can undo that, but the forward model is simple: a bar
+/// pattern is a sum of steps, each blurred into a normal CDF, between a local light and
+/// a local dark level. Given the edges found (which exist, even if misplaced), fit their
+/// positions to the profile by least squares — each edge in turn takes the Gauss–Newton
+/// step against the residual around it. The blur width starts from the sharpest edges
+/// (an isolated blurred step of height `A` has peak slope `A / (σ√2π)`) and is settled
+/// by which candidate width fits best.
+fn deblur_edges(profile: &[f32], edges: &mut [GradEdge], radius: usize) {
+    let n = profile.len();
+    if edges.len() < 4 {
+        return;
+    }
+    let (lo, hi) = sliding_range(profile, radius);
+    let at = |x: f32| (x.round().max(0.0) as usize).min(n - 1);
+
+    let mut sigmas: Vec<f32> = edges
+        .iter()
+        .filter_map(|e| {
+            let i = at(e.pos);
+            let a = hi[i] - lo[i];
+            (a > 0.0 && e.peak > 0.0).then(|| a / (e.peak * SQRT_TAU))
+        })
+        .collect();
+    if sigmas.is_empty() {
+        return;
+    }
+    sigmas.sort_by(f32::total_cmp);
+    let estimate = sigmas[sigmas.len() / 6].min(DEBLUR_MAX_SIGMA);
+    if estimate < DEBLUR_MIN_SIGMA {
+        return;
+    }
+
+    let start: Vec<f32> = edges.iter().map(|e| e.pos).collect();
+    let signs: Vec<f32> = edges
+        .iter()
+        .map(|e| if e.rising { -1.0 } else { 1.0 })
+        .collect();
+    let mut best: Option<(f32, BlurFit<'_>)> = None;
+    for scale in DEBLUR_SIGMA_TRIALS {
+        let sigma = estimate * scale;
+        if sigma < 0.45 {
+            break;
+        }
+        let mut fit = BlurFit::new(
+            profile,
+            lo.clone(),
+            hi.clone(),
+            &signs,
+            start.clone(),
+            sigma,
+        );
+        for _ in 0..DEBLUR_TRIAL_SWEEPS {
+            fit.sweep();
+        }
+        fit.relevel(radius);
+        for _ in 0..DEBLUR_TRIAL_SWEEPS {
+            fit.sweep();
+        }
+        let sse = fit.residual();
+        match &best {
+            // The residual has one minimum over the blur width: past it, stop.
+            Some((b, _)) if sse >= *b => break,
+            _ => best = Some((sse, fit)),
+        }
+    }
+    let Some((_, mut fit)) = best else { return };
+    for _ in 0..DEBLUR_FINAL_SWEEPS {
+        fit.sweep();
+    }
+    for (e, &pos) in edges.iter_mut().zip(&fit.pos) {
+        e.pos = pos;
+    }
+}
+
+/// √(2π).
+const SQRT_TAU: f32 = 2.506_628_3;
+
+/// A blurred-bar-pattern model of a profile, being fitted (see [`deblur_edges`]).
+struct BlurFit<'a> {
+    profile: &'a [f32],
+    /// Local dark and light levels per sample.
+    lo: Vec<f32>,
+    hi: Vec<f32>,
+    /// +1 for an edge into a bar, −1 for one out of it.
+    signs: &'a [f32],
+    /// Edge positions.
+    pos: Vec<f32>,
+    sigma: f32,
+    /// Modelled darkness per sample, in [0, 1]: each light→dark edge adds a blurred
+    /// step, each dark→light edge removes one. Predicted luminance is hi − (hi − lo)·D.
+    dark: Vec<f32>,
+    /// Φ(u) tabulated over ±[`DEBLUR_REACH`] in steps of 1/16.
+    cdf: Vec<f32>,
+}
+
+impl<'a> BlurFit<'a> {
+    fn new(
+        profile: &'a [f32],
+        lo: Vec<f32>,
+        hi: Vec<f32>,
+        signs: &'a [f32],
+        pos: Vec<f32>,
+        sigma: f32,
+    ) -> Self {
+        let n = profile.len();
+        let steps = (DEBLUR_REACH * 16.0) as i32;
+        let cdf: Vec<f32> = (-steps..=steps)
+            .map(|i| normal_cdf(i as f32 / 16.0))
+            .collect();
+        let mut fit = BlurFit {
+            profile,
+            lo,
+            hi,
+            signs,
+            pos,
+            sigma,
+            dark: vec![0.0; n],
+            cdf,
+        };
+        // A step well past its edge is a constant: those go in as a prefix sum, the
+        // blurred part of each step is added over its window.
+        let mut diff = vec![0.0f32; n + 1];
+        if signs[0] < 0.0 {
+            diff[0] = 1.0; // the profile starts inside a dark run
+        }
+        for (k, &sign) in signs.iter().enumerate() {
+            let (x0, x1) = fit.window(fit.pos[k]);
+            for x in x0..=x1 {
+                fit.dark[x] += sign * fit.step(x as f32 - fit.pos[k]);
+            }
+            diff[x1 + 1] += sign;
+        }
+        let mut acc = 0.0f32;
+        for (d, step) in fit.dark.iter_mut().zip(&diff) {
+            acc += step;
+            *d += acc;
+        }
+        fit
+    }
+
+    /// Sample range a step at `pos` is blurred over.
+    fn window(&self, pos: f32) -> (usize, usize) {
+        let reach = DEBLUR_REACH * self.sigma;
+        let last = self.profile.len() - 1;
+        (
+            ((pos - reach).ceil().max(0.0) as usize).min(last),
+            ((pos + reach).floor().max(0.0) as usize).min(last),
+        )
+    }
+
+    /// The blurred unit step, `d` pixels past its edge: Φ(d/σ), exactly 0 and 1 beyond
+    /// the reach.
+    fn step(&self, d: f32) -> f32 {
+        let t = (d / self.sigma + DEBLUR_REACH) * 16.0;
+        if t <= 0.0 {
+            return 0.0;
+        }
+        let i = t as usize;
+        if i + 1 >= self.cdf.len() {
+            return 1.0;
+        }
+        let f = t - i as f32;
+        self.cdf[i] + f * (self.cdf[i + 1] - self.cdf[i])
+    }
+
+    /// One Gauss–Newton pass: each edge in turn steps to where it best explains the
+    /// residual around it.
+    fn sweep(&mut self) {
+        let n = self.profile.len();
+        for k in 0..self.pos.len() {
+            let (e, s) = (self.pos[k], self.signs[k]);
+            let (x0, x1) = self.window(e);
+            let (mut num, mut den) = (0.0f32, 0.0f32);
+            for x in x0..=x1 {
+                let a = self.hi[x] - self.lo[x];
+                let u = (x as f32 - e) / self.sigma;
+                // ∂(predicted)/∂(edge position).
+                let j = a * s * (-0.5 * u * u).exp() / (self.sigma * SQRT_TAU);
+                let r = self.profile[x] - (self.hi[x] - a * self.dark[x]);
+                num += r * j;
+                den += j * j;
+            }
+            if den <= 1e-6 {
+                continue;
+            }
+            let lower = if k > 0 { self.pos[k - 1] + 0.25 } else { 0.0 };
+            let upper = self.pos.get(k + 1).map_or((n - 1) as f32, |p| p - 0.25);
+            if lower >= upper {
+                continue;
+            }
+            let new = (e + (num / den).clamp(-1.0, 1.0)).clamp(lower, upper);
+            // The old and new steps differ only within the union of their windows.
+            let (y0, y1) = (self.window(e.min(new)).0, self.window(e.max(new)).1);
+            for x in y0..=y1 {
+                let xf = x as f32;
+                self.dark[x] += s * (self.step(xf - new) - self.step(xf - e));
+            }
+            self.pos[k] = new;
+        }
+    }
+
+    /// Re-estimate the local light and dark levels from the model.
+    ///
+    /// The levels start as the profile's local maximum and minimum — but under blur
+    /// only wide elements reach their level, so where the nearby bars are all narrow
+    /// the dark level comes out too light, and the fit makes up for the missing depth
+    /// by widening every narrow bar (depth and width of a blurred narrow element are
+    /// all but interchangeable). The model knows how far short of its plateau each
+    /// sample is: regress the profile on the modelled darkness, `p = light − (light −
+    /// dark)·D`, over the samples that are nearly on a plateau (`D` near 0 or 1), in
+    /// windows wide enough to hold wide elements of both kinds. Samples in between are
+    /// left out — they are where width and depth trade off.
+    fn relevel(&mut self, radius: usize) {
+        let n = self.profile.len();
+        let reach = RELEVEL_REACH * radius;
+        // Prefix sums of the regression terms over plateau samples.
+        let mut sums = vec![[0.0f64; 5]; n + 1];
+        for x in 0..n {
+            let d = self.dark[x];
+            let mut row = sums[x];
+            if !(RELEVEL_BAND..=1.0 - RELEVEL_BAND).contains(&d) {
+                let (d, p) = (d as f64, self.profile[x] as f64);
+                for (slot, term) in row.iter_mut().zip([1.0, d, d * d, p, p * d]) {
+                    *slot += term;
+                }
+            }
+            sums[x + 1] = row;
+        }
+        // Levels at block centres, then interpolated per sample.
+        let centres: Vec<usize> = (0..n).step_by(radius.max(1)).collect();
+        let fitted: Vec<Option<(f32, f32)>> = centres
+            .iter()
+            .map(|&c| {
+                let (a, b) = (c.saturating_sub(reach), (c + reach + 1).min(n));
+                let t: [f64; 5] = core::array::from_fn(|i| sums[b][i] - sums[a][i]);
+                let [cnt, sd, sdd, sp, spd] = t;
+                // p = h − amp·d  ⇒  normal equations in (h, −amp).
+                let det = cnt * sdd - sd * sd;
+                // Both plateaus must be represented: Var(d)·count² well above zero.
+                if cnt < 8.0 || det < 0.02 * cnt * cnt {
+                    return None;
+                }
+                let h = (sp * sdd - spd * sd) / det;
+                let amp = -(cnt * spd - sd * sp) / det;
+                Some((h as f32, amp as f32))
+            })
+            .collect();
+        for x in 0..n {
+            let i = (x / radius.max(1)).min(centres.len() - 1);
+            let j = (i + 1).min(centres.len() - 1);
+            let f = if j > i {
+                (x - centres[i]) as f32 / (centres[j] - centres[i]) as f32
+            } else {
+                0.0
+            };
+            let (Some((h0, a0)), Some((h1, a1))) = (fitted[i], fitted[j]) else {
+                continue;
+            };
+            let (h, amp) = (h0 + f * (h1 - h0), a0 + f * (a1 - a0));
+            // The envelope can only have fallen short of a plateau, and not by much.
+            let old = self.hi[x] - self.lo[x];
+            let hi = h.clamp(self.hi[x] - 0.05 * old, self.hi[x] + 0.35 * old);
+            let lo = (h - amp).clamp(self.lo[x] - 0.35 * old, self.lo[x] + 0.05 * old);
+            (self.hi[x], self.lo[x]) = (hi, lo);
+        }
+    }
+
+    /// Sum of squared residuals over the stretch the edges span.
+    fn residual(&self) -> f32 {
+        let (x0, _) = self.window(self.pos[0]);
+        let (_, x1) = self.window(self.pos[self.pos.len() - 1]);
+        (x0..=x1)
+            .map(|x| {
+                let a = self.hi[x] - self.lo[x];
+                let r = self.profile[x] - (self.hi[x] - a * self.dark[x]);
+                r * r
+            })
+            .sum()
+    }
+}
+
 // --- Span segmentation -------------------------------------------------------
 
 /// Widest a genuine symbol element may be, in units of the span's narrow run width,
@@ -901,6 +1566,67 @@ fn split_spans(runs: &Runs, min_runs: usize) -> Vec<Runs> {
     // Left-to-right order, for determinism.
     out.sort_by(|a, b| a.edges[0].total_cmp(&b.edges[0]));
     out
+}
+
+/// A light margin stops being quiet where it dips this fraction of the adjacent bar's
+/// depth below its own brightest level...
+const QUIET_DIP: f32 = 0.15;
+/// ... or this many times the profile noise, whichever is more.
+const QUIET_NOISE_K: f32 = 3.0;
+
+/// How far the light margin beside a span really is quiet, in pixels (at most `limit`).
+///
+/// A margin is found as a wide light *run* — but a run is only as trustworthy as the
+/// edge finder: a narrow bar between two wide spaces is the first element blur erases,
+/// and the two spaces then merge into one run wide enough to pass for a quiet zone, in
+/// the middle of a symbol. The bars on one side of it are then a *fragment* that starts
+/// and ends cleanly, which a symbology without a fixed length or a check character
+/// (Interleaved 2 of 5 above all) reads as a shorter symbol. The erased bar is still in
+/// the signal, though, as a dip too shallow to be called an edge; a real quiet zone has
+/// none. So walk outward from the span's outer `edge` (whose bar extends to `bar_end`)
+/// and stop at the first sample that falls clearly below the margin's light level.
+fn quiet_extent(profile: &Profile, edge: f32, bar_end: f32, limit: f32) -> f32 {
+    let p = profile.samples.as_slice();
+    let n = p.len() as isize;
+    if n < 3 || limit.is_nan() || limit <= 0.0 {
+        return 0.0;
+    }
+    // Three-tap mean: steadies single-sample noise without hiding a one-module dip.
+    let at = |i: isize| -> f32 {
+        let c = i.clamp(0, n - 1);
+        (p[(c - 1).max(0) as usize] + p[c as usize] + p[(c + 1).min(n - 1) as usize]) / 3.0
+    };
+    let step: isize = if bar_end > edge { -1 } else { 1 };
+    let first = if step < 0 {
+        edge.floor() as isize
+    } else {
+        edge.ceil() as isize
+    };
+    let count = limit.ceil() as isize;
+    // Light level of the margin, and the depth of the bar it borders.
+    let light = (0..=count)
+        .map(|k| at(first + step * k))
+        .fold(f32::MIN, f32::max);
+    let (b0, b1) = (edge.min(bar_end), edge.max(bar_end));
+    let dark = (b0.floor() as isize..=b1.ceil() as isize)
+        .map(at)
+        .fold(f32::MAX, f32::min);
+    let tolerance = (QUIET_DIP * (light - dark)).max(QUIET_NOISE_K * profile.noise / 1.73);
+    let floor = light - tolerance;
+    // The blurred shoulder of the bar's own edge comes first; allow it the bar's width
+    // (blur wider than the bar would have erased it) plus a little.
+    let shoulder = (b1 - b0).ceil() as isize + 2;
+    let mut k = 0;
+    while k <= count && k <= shoulder && at(first + step * k) < floor {
+        k += 1;
+    }
+    if k > shoulder {
+        return 0.0;
+    }
+    while k <= count && at(first + step * k) >= floor {
+        k += 1;
+    }
+    ((k - 1).max(0) as f32).min(limit)
 }
 
 // --- Module quantization ---------------------------------------------------
@@ -990,18 +1716,67 @@ fn quantize(runs: &Runs, min_runs: usize) -> Option<Quantized> {
     }
 
     // Expand runs into modules and accumulate quantization error for the fit score.
-    let mut modules: Vec<bool> = Vec::new();
-    let mut err_sum = 0.0f32;
-    for (idx, &wpx) in inner.iter().enumerate() {
-        let is_bar = idx % 2 == 0;
-        let exact = (if is_bar { wpx - bias } else { wpx + bias }) / module;
-        let n = exact.round().max(1.0);
-        err_sum += (exact - n).abs();
-        for _ in 0..(n as usize) {
-            modules.push(is_bar);
+    let expand = |module_at: &dyn Fn(usize) -> f32, bias: f32| -> (Vec<bool>, f32) {
+        let mut modules: Vec<bool> = Vec::new();
+        let mut err_sum = 0.0f32;
+        for (idx, &wpx) in inner.iter().enumerate() {
+            let is_bar = idx % 2 == 0;
+            let exact = (if is_bar { wpx - bias } else { wpx + bias }) / module_at(idx);
+            let n = exact.round().max(1.0);
+            err_sum += (exact - n).abs();
+            for _ in 0..(n as usize) {
+                modules.push(is_bar);
+            }
+        }
+        (modules, err_sum / (inner.len() as f32))
+    };
+    let (mut modules, mut mean_err) = expand(&|_| module, bias);
+
+    // A symbol seen off-axis is foreshortened: its module pitch shrinks steadily from
+    // the near end to the far one, and a single pitch then mis-counts the wide runs at
+    // both ends. Refit with the pitch varying linearly along the span — `wᵢ = nᵢ·(m +
+    // k·uᵢ) ± b`, `uᵢ` the run's position in [-1, 1] — and keep that reading only if it
+    // explains the widths clearly better (it always fits a little better: it has one
+    // more parameter to spend).
+    if inner.len() >= MIN_TILT_RUNS && mean_err > TILT_MIN_ERR {
+        let (first, last) = (edges[0], edges[edges.len() - 1]);
+        let (mid, half) = ((first + last) / 2.0, ((last - first) / 2.0).max(1.0));
+        let pos: Vec<f32> = edges
+            .windows(2)
+            .map(|w| ((w[0] + w[1]) / 2.0 - mid) / half)
+            .collect();
+        let (mut m, mut k, mut b) = (module, 0.0f32, bias);
+        for _ in 0..8 {
+            // Normal equations for the basis (n, n·u, ±1).
+            let mut ata = [[0.0f64; 3]; 3];
+            let mut atw = [0.0f64; 3];
+            for (idx, &w) in inner.iter().enumerate() {
+                let sign = if idx % 2 == 0 { 1.0 } else { -1.0 };
+                let n = ((w - sign * b) / (m + k * pos[idx])).round().max(1.0);
+                let basis = [n as f64, (n * pos[idx]) as f64, sign as f64];
+                for r in 0..3 {
+                    for c in 0..3 {
+                        ata[r][c] += basis[r] * basis[c];
+                    }
+                    atw[r] += basis[r] * w as f64;
+                }
+            }
+            let Some([nm, nk, nb]) = solve3(ata, atw) else {
+                break;
+            };
+            let (nm, nk, nb) = (nm as f32, nk as f32, nb as f32);
+            if !(nm.is_finite() && nm > 0.0 && nk.is_finite() && nb.is_finite()) {
+                break;
+            }
+            m = nm;
+            k = nk.clamp(-MAX_TILT * m, MAX_TILT * m);
+            b = nb.clamp(-0.45 * m, 0.45 * m);
+        }
+        let (tilted, tilted_err) = expand(&|idx| m + k * pos[idx], b);
+        if tilted_err < TILT_GAIN * mean_err {
+            (modules, mean_err, module) = (tilted, tilted_err, m);
         }
     }
-    let mean_err = err_sum / (inner.len() as f32);
     let fit = (1.0 - 2.0 * mean_err).clamp(0.0, 1.0);
 
     // Quiet zone = the smaller measured light margin, in modules.
@@ -1018,49 +1793,46 @@ fn quantize(runs: &Runs, min_runs: usize) -> Option<Quantized> {
     })
 }
 
-// --- Candidate assembly ----------------------------------------------------
+/// Fewest runs for which a pitch gradient is fitted: three parameters need support.
+const MIN_TILT_RUNS: usize = 12;
+/// Mean quantization error (modules) below which the constant-pitch fit is already
+/// clean and a pitch gradient has nothing to explain.
+const TILT_MIN_ERR: f32 = 0.08;
+/// Largest pitch change from the span's centre to either end, as a fraction of the
+/// centre pitch: ±35% covers a symbol turned some 50° away from the camera.
+const MAX_TILT: f32 = 0.35;
+/// The gradient fit must cut the mean quantization error to this fraction to be kept.
+const TILT_GAIN: f32 = 0.7;
 
-/// Run the full extract -> segment -> quantize -> locate pipeline on one profile,
-/// yielding one candidate per barcode-shaped span found along it.
-fn analyze_profile(profile: &[f32], line: &ScanLine, min_runs: usize) -> Vec<LinearCandidate> {
-    let Some(runs) = extract_runs(profile) else {
-        return Vec::new();
+/// Solve the 3×3 system `a·x = b` by Cramer's rule; `None` if singular.
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det3 = |m: &[[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
     };
-    split_spans(&runs, min_runs)
-        .into_iter()
-        .filter_map(|span| {
-            let q = quantize(&span, min_runs)?;
-            let amp_factor = (span.amplitude / 128.0).clamp(0.0, 1.0);
-            let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
-            let location = build_location(&span, line, q.module_px);
-            Some(LinearCandidate {
-                pattern: q.pattern,
-                edges: span.edges,
-                lead_px: span.lead_px,
-                trail_px: span.trail_px,
-                location,
-                confidence,
-            })
-        })
-        .collect()
+    let det = det3(&a);
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let mut out = [0.0f64; 3];
+    for (col, slot) in out.iter_mut().enumerate() {
+        let mut m = a;
+        for row in 0..3 {
+            m[row][col] = b[row];
+        }
+        *slot = det3(&m) / det;
+    }
+    Some(out)
 }
 
-/// Like [`analyze_profile`] but using the fine peak-based [`extract_runs_fine`] at the
-/// given prominence, so the resulting candidate's [`LinearCandidate::edges`] resolve
-/// thin features. The quantized [`LinearCandidate::pattern`] is still filled (from the
-/// same fine edges) so the candidate remains a drop-in for [`try_decode`].
-fn analyze_profile_fine(
-    profile: &[f32],
-    line: &ScanLine,
-    min_runs: usize,
-    prom: f32,
-) -> Option<LinearCandidate> {
-    let runs = extract_runs_fine(profile, prom)?;
-    let q = quantize(&runs, min_runs)?;
+// --- Candidate assembly ----------------------------------------------------
 
+/// Quantize one run sequence (a whole line or one span of it) into a candidate.
+fn candidate_of(runs: Runs, line: &ScanLine, min_runs: usize) -> Option<LinearCandidate> {
+    let q = quantize(&runs, min_runs)?;
     let amp_factor = (runs.amplitude / 128.0).clamp(0.0, 1.0);
     let confidence = (q.fit * amp_factor).clamp(0.0, 1.0);
-
     let location = build_location(&runs, line, q.module_px);
     Some(LinearCandidate {
         pattern: q.pattern,
@@ -1094,26 +1866,6 @@ fn build_location(runs: &Runs, line: &ScanLine, module_px: f32) -> Location {
         rotation: Some(line.sy.atan2(line.sx)),
         module_size: Some(module_px),
     }
-}
-
-/// Sort by descending confidence, drop duplicate module patterns, and truncate.
-fn dedupe(cands: &mut Vec<LinearCandidate>, max: usize) {
-    cands.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(core::cmp::Ordering::Equal)
-    });
-    let mut kept: Vec<LinearCandidate> = Vec::new();
-    for c in cands.drain(..) {
-        if kept.iter().any(|k| k.pattern.modules == c.pattern.modules) {
-            continue;
-        }
-        kept.push(c);
-        if kept.len() >= max {
-            break;
-        }
-    }
-    *cands = kept;
 }
 
 #[cfg(test)]

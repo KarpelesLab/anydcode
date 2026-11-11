@@ -222,6 +222,46 @@ fn empty_segments_roundtrip() {
     assert_eq!(decoded, sym);
 }
 
+/// Numeric mode's indicator is all zeros, so an empty numeric segment is bit-for-bit
+/// the terminator: a reader stops there. Encoding one used to succeed and silently
+/// drop every segment after it; it must be refused, at any version and position.
+#[test]
+fn empty_numeric_segment_is_rejected_not_truncated() {
+    let enc = MicroQrEncoder::new();
+    let empty = || Segment::numeric(Vec::new());
+    let digits = || Segment::numeric(b"12".to_vec());
+    for (version, level) in [
+        (MicroVersion::M1, MicroEcLevel::Detection),
+        (MicroVersion::M2, MicroEcLevel::L),
+        (MicroVersion::M3, MicroEcLevel::M),
+        (MicroVersion::M4, MicroEcLevel::Q),
+    ] {
+        for segments in [
+            vec![empty()],
+            vec![empty(), digits()],
+            vec![digits(), empty(), digits()],
+        ] {
+            assert!(enc.build(segments.clone(), level).is_err(), "{version:?}");
+            let pinned = Symbol::new(
+                Symbology::MicroQrCode,
+                segments,
+                SymbolMeta::MicroQr(meta(version, level, 0)),
+            );
+            assert!(
+                matches!(enc.encode(&pinned), Err(anyd::Error::InvalidData { .. })),
+                "{version:?}"
+            );
+        }
+        assert!(enc.build_numeric(b"", level).is_err());
+        // No segments at all is still a valid (empty) symbol.
+        let sym = enc.build(Vec::new(), level).unwrap();
+        let decoded = MicroQrDecoder::new()
+            .decode(&enc.encode(&sym).unwrap())
+            .unwrap();
+        assert_eq!(decoded, sym);
+    }
+}
+
 #[test]
 fn survives_correctable_error_m4() {
     // M4-Q corrects up to ~25%. Flip a single data module and still recover.

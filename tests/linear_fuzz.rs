@@ -218,7 +218,8 @@ fn linear_seeds() -> Vec<LinearPattern> {
         .collect()
 }
 
-/// Feed `modules` (and its mirror) to every decoder; anything accepted must re-encode.
+/// Feed `modules` (and its mirror) to every decoder; anything accepted must re-encode,
+/// and the re-encoded row must read back as the very same symbol.
 fn probe(pairs: &[Pair], modules: &[bool]) {
     let mut pattern = LinearPattern::new();
     pattern.quiet_zone = 10;
@@ -230,9 +231,16 @@ fn probe(pairs: &[Pair], modules: &[bool]) {
         let encoding = Encoding::Linear(pattern.clone());
         for (name, dec, enc) in pairs {
             if let Ok(symbol) = dec.decode(&encoding) {
+                let reencoded = enc.encode(&symbol);
                 assert!(
-                    enc.encode(&symbol).is_ok(),
+                    reencoded.is_ok(),
                     "{name} accepted {:?} as {symbol:?} but cannot re-encode it",
+                    pattern
+                );
+                assert_eq!(
+                    dec.decode(&reencoded.unwrap()).ok().as_ref(),
+                    Some(&symbol),
+                    "{name} read {:?} as a symbol that does not survive a re-encode",
                     pattern
                 );
             }
@@ -310,19 +318,41 @@ fn mutated_symbols_do_not_panic() {
     }
 }
 
-/// Feed a matrix to the postal and DX Film Edge decoders; accepted symbols must re-encode.
+/// Whether two encodings are matrices with the same modules (the recorded quiet zone
+/// is a rendering hint, not part of the symbol).
+fn same_cells(a: &Encoding, b: &Encoding) -> bool {
+    let (Encoding::Matrix(a), Encoding::Matrix(b)) = (a, b) else {
+        return false;
+    };
+    a.width() == b.width()
+        && a.height() == b.height()
+        && (0..a.height()).all(|y| (0..a.width()).all(|x| a.get(x, y) == b.get(x, y)))
+}
+
+/// Feed a matrix to the postal and DX Film Edge decoders; an accepted symbol must
+/// re-encode to the very same modules.
 fn probe_matrix(m: BitMatrix) {
     let encoding = Encoding::Matrix(m);
     if let Ok(symbol) = PostalDecoder::new().decode(&encoding) {
+        let reencoded = PostalEncoder::new().encode(&symbol);
         assert!(
-            PostalEncoder::new().encode(&symbol).is_ok(),
+            reencoded.is_ok(),
             "postal accepted {symbol:?} but cannot re-encode it"
+        );
+        assert!(
+            same_cells(&reencoded.unwrap(), &encoding),
+            "postal read {encoding:?} as {symbol:?}, which re-encodes differently"
         );
     }
     if let Ok(symbol) = DxFilmDecoder::new().decode(&encoding) {
+        let reencoded = DxFilmEncoder::new().encode(&symbol);
         assert!(
-            DxFilmEncoder::new().encode(&symbol).is_ok(),
+            reencoded.is_ok(),
             "DX film accepted {symbol:?} but cannot re-encode it"
+        );
+        assert!(
+            same_cells(&reencoded.unwrap(), &encoding),
+            "DX film read {encoding:?} as {symbol:?}, which re-encodes differently"
         );
     }
 }
@@ -370,5 +400,65 @@ fn random_matrices_do_not_panic() {
             }
         }
         probe_matrix(m);
+    }
+}
+
+/// Valid postal and DX Film Edge symbols with a few bars (or modules) changed: far
+/// likelier than noise to get past the framing checks, so this is where a decoder
+/// that accepts something its encoder renders differently would show.
+#[test]
+fn mutated_matrices_reencode_identically() {
+    let postal = PostalEncoder::new();
+    let dx = DxFilmEncoder::new();
+    let seeds: Vec<Encoding> = [
+        postal.build_postnet("12345"),
+        postal.build_postnet("123456789"),
+        postal.build_planet("12345678901"),
+        postal.build_imb("01234567094987654321", ""),
+        postal.build_imb("01234567094987654321", "01234567891"),
+        postal.build_rm4scc("BX11LT1A"),
+        postal.build_kix("2500GG30250"),
+        postal.build_auspost("96184209", ""),
+        postal.build_auspost("39549554", "12345"),
+        postal.build_auspost("56439111", "ABA 9"),
+        postal.build_auspost("12345678", "9012345678"),
+        postal.build_japanpost("15400233-16-4-205"),
+        postal.build_mailmark("11210012341234567AB19XY1A"),
+        postal.build_mailmark("41038422416563762EF61AH8T"),
+    ]
+    .into_iter()
+    .map(|symbol| postal.encode(&symbol.unwrap()).unwrap())
+    .chain(
+        [dx.build(115, 10, None), dx.build(115, 10, Some((11, true)))]
+            .into_iter()
+            .map(|symbol| dx.encode(&symbol.unwrap()).unwrap()),
+    )
+    .collect();
+
+    let mut rng = Rng(0x6A09_E667_F3BC_C909);
+    for seed in &seeds {
+        let Encoding::Matrix(clean) = seed else {
+            panic!("postal and DX Film Edge encode to matrices");
+        };
+        probe_matrix(clean.clone());
+        for _ in 0..400 {
+            let mut m = clean.clone();
+            for _ in 0..1 + rng.below(3) {
+                // Even columns hold the postal bars; DX rows are dense, so any column.
+                let x = if m.height() == 3 {
+                    2 * rng.below(m.width().div_ceil(2))
+                } else {
+                    rng.below(m.width())
+                };
+                let y = if m.height() == 3 {
+                    2 * rng.below(2) // ascender or descender, never the tracker
+                } else {
+                    rng.below(m.height())
+                };
+                let dark = m.get(x, y);
+                m.set(x, y, !dark);
+            }
+            probe_matrix(m);
+        }
     }
 }

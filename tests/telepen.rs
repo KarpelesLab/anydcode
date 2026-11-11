@@ -93,3 +93,65 @@ fn decodes_without_the_trailing_space() {
         assert_eq!(decoded.segments, symbol.segments);
     }
 }
+
+/// Element widths of a module row, starting with a bar.
+fn run_widths(modules: &[bool]) -> Vec<usize> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < modules.len() {
+        let len = modules[i..]
+            .iter()
+            .take_while(|&&m| m == modules[i])
+            .count();
+        runs.push(len);
+        i += len;
+    }
+    runs
+}
+
+/// Telepen maps its bit stream to elements deterministically: `010` is always a wide
+/// bar + wide space, and inside an open `0 1…1 0` block only narrow bars occur. A row
+/// that opens a block (narrow bar, wide space) and then shows a wide bar is not
+/// something any Telepen bit stream renders to, even though a lenient reading
+/// (`01` + `00` + `10`) yields the same bits as the canonical `010` + `010` — it must
+/// be rejected rather than decoded to a symbol that re-encodes differently.
+#[test]
+fn wide_bar_inside_an_open_block_is_rejected() {
+    use anyd::output::{Encoding, LinearPattern};
+    let enc = TelepenEncoder::new();
+    // 0x12 is `01001000` LSB first: `010` `010` `00`.
+    let symbol = enc.build(&[0x12], false).unwrap();
+    let Encoding::Linear(pattern) = enc.encode(&symbol).unwrap() else {
+        panic!("Telepen encodes to a linear pattern");
+    };
+    let runs = run_widths(&pattern.modules);
+    // The start guard is six pairs; then `010` `010` as two wide/wide pairs.
+    assert_eq!(runs[12..16], [3, 3, 3, 3]);
+
+    for replacement in [
+        [1, 3, 3, 1, 1, 3], // `01` open, `00` (wide bar, narrow space), `10` close
+        [1, 3, 3, 3, 1, 1], // `01` open, `010` (wide bar, wide space), `1`
+    ] {
+        let mut forged = runs[..12].to_vec();
+        forged.extend(replacement);
+        forged.extend(&runs[16..]);
+        let mut row = LinearPattern::new();
+        for (i, &w) in forged.iter().enumerate() {
+            row.modules.extend(core::iter::repeat_n(i % 2 == 0, w));
+        }
+        assert_eq!(row.modules.len(), pattern.modules.len());
+        for check in [false, true] {
+            assert!(
+                TelepenDecoder::with_check(check)
+                    .decode(&Encoding::Linear(row.clone()))
+                    .is_err(),
+                "{replacement:?} accepted"
+            );
+        }
+    }
+    // The genuine row still decodes.
+    let decoded = TelepenDecoder::new()
+        .decode(&Encoding::Linear(pattern))
+        .unwrap();
+    assert_eq!(decoded.segments, symbol.segments);
+}

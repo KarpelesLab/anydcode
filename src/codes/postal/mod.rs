@@ -310,8 +310,10 @@ impl PostalEncoder {
     /// The Customer Information may be digits (encoded via the N table) or the
     /// graphic set `0-9 A-Z a-z space #` (encoded via the C table); the format
     /// (Standard / Customer 2 / Customer 3) and the FCC are chosen automatically.
-    /// A Customer Information field of purely upper-case letters is inherently
-    /// ambiguous with a digit field and decodes back as numeric.
+    /// The bars do not record which table was used, so a graphic-set field whose
+    /// bars also read as digits plus filler (e.g. `"o"`, which reads as `"8"`)
+    /// decodes back as numeric, and trailing `z`s — identical to filler — are
+    /// lost; see the round-trip limits in the module source.
     pub fn build_auspost(&self, dpid: &str, custinfo: &str) -> Result<Symbol> {
         if dpid.len() > 8 || !dpid.bytes().all(|b| b.is_ascii_digit()) {
             return Err(Error::invalid_data(

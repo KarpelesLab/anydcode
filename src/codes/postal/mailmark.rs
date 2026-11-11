@@ -227,7 +227,13 @@ fn postcode_to_int(pc: &[u8; 9]) -> Result<u128> {
                 let v = posn(SET_N, pc[i]).ok_or_else(|| bad_postcode(pc))?;
                 b = b * 10 + v as u128;
             }
-            _ => {} // 'S' contributes a zero
+            // 'S' is padding: it contributes nothing, but it must be a space. The
+            // type detection only looks at one of the short format's two.
+            _ => {
+                if pc[i] != b' ' {
+                    return Err(bad_postcode(pc));
+                }
+            }
         }
     }
     let (offset, _) = postcode_offset(t);

@@ -174,3 +174,108 @@ fn termination_bar_must_be_one_module() {
             .is_err()
     );
 }
+
+/// The 43 base characters in value order; values 43–46 are the shifts `($) (%) (/) (+)`.
+const BASE: &[u8; 43] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-. $/+%";
+const SHIFT_DOLLAR: u8 = 43;
+const SHIFT_PERCENT: u8 = 44;
+const SHIFT_SLASH: u8 = 45;
+const SHIFT_PLUS: u8 = 46;
+
+/// Assemble a Code 93 row from raw symbol values, computing the C and K check
+/// characters here (weights 1..=20 and 1..=15 from the right, modulo 47) rather than
+/// through the encoder, which cannot be asked for an arbitrary value sequence.
+fn row_of(values: &[u8]) -> Encoding {
+    let enc = Code93Encoder::new();
+    // The nine modules after the start character are the first data character.
+    let first = |data: &[u8], full_ascii: bool| -> Vec<bool> {
+        modules(&enc.encode(&enc.build(data, full_ascii).unwrap()).unwrap())[9..18].to_vec()
+    };
+    let pattern = |value: u8| -> Vec<bool> {
+        match value {
+            SHIFT_DOLLAR => first(&[0x01], true),  // SOH is ($)A
+            SHIFT_PERCENT => first(&[0x1B], true), // ESC is (%)A
+            SHIFT_SLASH => first(b"!", true),      // `!` is (/)A
+            SHIFT_PLUS => first(b"a", true),       // `a` is (+)A
+            v => first(&[BASE[v as usize]], false),
+        }
+    };
+    let check = |values: &[u8], max_weight: usize| -> u8 {
+        let sum: usize = values
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, &v)| (i % max_weight + 1) * v as usize)
+            .sum();
+        (sum % 47) as u8
+    };
+    let mut all = values.to_vec();
+    all.push(check(&all, 20));
+    all.push(check(&all, 15));
+
+    let framing = modules(&enc.encode(&enc.build(b"", false).unwrap()).unwrap());
+    let mut pattern_row = anyd::output::LinearPattern::new();
+    pattern_row.quiet_zone = 10; // as the encoder records it
+    pattern_row.modules.extend(&framing[..9]); // start
+    for &v in &all {
+        pattern_row.modules.extend(pattern(v));
+    }
+    pattern_row.modules.extend(&framing[framing.len() - 10..]); // stop + termination bar
+    Encoding::Linear(pattern_row)
+}
+
+/// The hand-assembled rows agree with the encoder, check characters included.
+#[test]
+fn hand_assembled_rows_match_the_encoder() {
+    let enc = Code93Encoder::new();
+    let value = |c: u8| BASE.iter().position(|&b| b == c).unwrap() as u8;
+    let test93: Vec<u8> = b"TEST93".iter().map(|&c| value(c)).collect();
+    assert_eq!(
+        row_of(&test93),
+        enc.encode(&enc.build(b"TEST93", false).unwrap()).unwrap()
+    );
+    // A payload long enough to wrap both weight cycles.
+    let long = b"CODE 93 WRAPS ITS WEIGHTS AFTER 20 AND 15";
+    let values: Vec<u8> = long.iter().map(|&c| value(c)).collect();
+    assert_eq!(
+        row_of(&values),
+        enc.encode(&enc.build(long, false).unwrap()).unwrap()
+    );
+    assert_eq!(
+        row_of(&[SHIFT_PLUS, value(b'A'), value(b'B')]),
+        enc.encode(&enc.build(b"aB", true).unwrap()).unwrap()
+    );
+}
+
+/// A shift character must be followed by a letter it pairs with. Rows whose check
+/// characters are valid but whose shifts are not are rejected — a shift followed by
+/// a digit or punctuation used to underflow in the pair lookup and panic.
+#[test]
+fn broken_shift_pairs_are_rejected() {
+    let value = |c: u8| BASE.iter().position(|&b| b == c).unwrap() as u8;
+    for values in [
+        vec![SHIFT_DOLLAR, value(b'1')],
+        vec![SHIFT_DOLLAR, value(b'-')],
+        vec![SHIFT_PLUS, value(b'0')],
+        vec![SHIFT_PLUS, value(b'%')],
+        vec![SHIFT_PERCENT, value(b'X')],
+        vec![SHIFT_PERCENT, value(b'5')],
+        vec![SHIFT_SLASH, value(b'M')],
+        vec![SHIFT_SLASH, value(b' ')],
+        vec![SHIFT_DOLLAR, SHIFT_DOLLAR, value(b'A')],
+        vec![value(b'A'), SHIFT_PLUS],
+    ] {
+        assert!(
+            matches!(
+                Code93Decoder::new().decode(&row_of(&values)),
+                Err(anyd::Error::Undecodable { .. })
+            ),
+            "{values:?} accepted"
+        );
+    }
+    // Whereas a proper pair in the same position reads fine.
+    let decoded = Code93Decoder::new()
+        .decode(&row_of(&[SHIFT_DOLLAR, value(b'A'), value(b'1')]))
+        .unwrap();
+    assert_eq!(decoded.segments, vec![Segment::byte(vec![0x01, b'1'])]);
+}

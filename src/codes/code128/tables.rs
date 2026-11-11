@@ -206,12 +206,15 @@ pub fn value_for_widths(widths: &[usize]) -> Option<u8> {
 ///
 /// The Start value has weight 1; each subsequent value has weight equal to its
 /// 1-based position after the Start.
+///
+/// The sum is reduced as it goes: the weights grow with the symbol's length, so the
+/// plain sum of a symbol several thousand characters long overflows 32 bits.
 pub(crate) fn checksum(symbols: &[u8]) -> u8 {
-    let mut sum = symbols[0] as u32;
+    let mut sum = symbols[0] as u32 % 103;
     for (k, &v) in symbols.iter().enumerate().skip(1) {
-        sum += (k as u32) * v as u32;
+        sum = (sum + (k % 103) as u32 * v as u32) % 103;
     }
-    (sum % 103) as u8
+    sum as u8
 }
 
 /// Reconstruct the human-readable payload [`Segment`]s from a Start-plus-data symbol

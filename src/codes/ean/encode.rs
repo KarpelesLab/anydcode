@@ -168,7 +168,8 @@ impl EanEncoder {
         Ok(main_symbol(Symbology::Ean5, EanVariant::Ean5, d))
     }
 
-    /// Attach a 2- or 5-digit add-on to a previously built main symbol.
+    /// Attach a 2- or 5-digit add-on to a previously built main symbol. A standalone
+    /// EAN-2/EAN-5 is itself an add-on and cannot take one.
     pub fn with_addon(&self, mut symbol: Symbol, addon: &str) -> Result<Symbol> {
         let digits = ascii_digits(addon)?;
         let kind = match digits.len() {
@@ -177,6 +178,13 @@ impl EanEncoder {
             _ => return Err(Error::invalid_data("add-on must be 2 or 5 digits")),
         };
         match &mut symbol.meta {
+            SymbolMeta::Ean(meta)
+                if matches!(meta.variant, EanVariant::Ean2 | EanVariant::Ean5) =>
+            {
+                return Err(Error::invalid_parameter(
+                    "an add-on symbol cannot itself carry an add-on",
+                ));
+            }
             SymbolMeta::Ean(meta) => meta.addon = Some(AddOn { kind, digits }),
             _ => return Err(Error::invalid_parameter("not an EAN/UPC symbol")),
         }

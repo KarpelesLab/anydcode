@@ -306,6 +306,27 @@ fn mailmark_rejects_bad_fields() {
     assert!(enc.build_mailmark("110000000000!XY11     ").is_err()); // non-alnum
 }
 
+/// The six post-code formats pad to nine characters with trailing spaces (the `S`
+/// positions of the spec's Table 3 patterns). The short `ANNLLNLSS` format has two
+/// of them; a stray character in the last one used to be accepted and silently
+/// dropped from the encoded symbol.
+#[test]
+fn mailmark_rejects_data_in_a_postcode_padding_position() {
+    let enc = PostalEncoder::new();
+    // Format 0, version 1, class 0, chain 00, item 00000000, post code `A12AB1A`.
+    let valid = "0100000000000A12AB1A  ";
+    let sym = enc.build_mailmark(valid).unwrap();
+    assert_lossless(&sym);
+    assert_eq!(sym.segments[0].data, valid.as_bytes());
+
+    assert!(enc.build_mailmark("0100000000000A12AB1A X").is_err());
+    assert!(enc.build_mailmark("0100000000000A12AB1A 1").is_err());
+    // The same holds for a hand-assembled symbol handed straight to the encoder.
+    let mut forged = sym.clone();
+    forged.segments[0].data = b"0100000000000A12AB1A X".to_vec();
+    assert!(PostalEncoder::new().encode(&forged).is_err());
+}
+
 // ---- Cross-code disambiguation ----------------------------------------------
 
 #[test]

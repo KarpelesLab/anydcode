@@ -87,6 +87,10 @@ pub struct PharmacodeMeta;
 /// Parse the numeric payload as a `u32`.
 #[cfg(all(feature = "alloc", feature = "encode"))]
 fn parse_value(payload: &[u8]) -> Result<u32> {
+    // Digits only: `str::parse` alone would also take a leading `+`.
+    if payload.is_empty() || !payload.iter().all(u8::is_ascii_digit) {
+        return Err(Error::invalid_data("Pharmacode payload is not an integer"));
+    }
     let text = core::str::from_utf8(payload)
         .map_err(|_| Error::invalid_data("Pharmacode payload not UTF-8"))?;
     text.parse::<u32>()

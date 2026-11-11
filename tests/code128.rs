@@ -389,3 +389,285 @@ fn fnc4_extended_ascii_payload() {
     let code_a = decode_values(&[START_A, FNC4_A, 64, 33]);
     assert_eq!(code_a.payload_bytes(), [0x80, b'A']);
 }
+
+/// Symbol-value sequences assembled by hand from the ISO/IEC 15417 code-set table
+/// (set A: values 0–63 are ASCII 32–95 and 64–95 the controls 0–31; set B: values
+/// 0–95 are ASCII 32–127; set C: the value is a digit pair), with the payload each
+/// must decode to.
+#[test]
+fn code_set_semantics() {
+    const SHIFT: u8 = 98;
+    const CODE_C: u8 = 99;
+    const CODE_B: u8 = 100;
+    const CODE_A: u8 = 101;
+    const FNC1: u8 = 102;
+    let payload = |symbols: &[u8]| decode_values(symbols).payload_bytes();
+
+    assert_eq!(payload(&[105, 0, 12, 99]), b"001299");
+    assert_eq!(
+        payload(&[103, 0, 33, 63, 64, 73, 95]),
+        [b' ', b'A', b'_', 0, b'\t', 31]
+    );
+    assert_eq!(payload(&[104, 0, 33, 65, 95]), [b' ', b'A', b'a', 127]);
+
+    // Shift borrows the other of A/B for exactly one character.
+    assert_eq!(payload(&[104, 65, SHIFT, 65, 65]), [b'a', 1, b'a']);
+    assert_eq!(payload(&[103, 33, SHIFT, 65, 33]), [b'A', b'a', b'A']);
+    // Latches: C → B → A → C.
+    assert_eq!(
+        payload(&[105, 12, CODE_B, 33, CODE_A, 73, CODE_C, 34]),
+        b"12A\t34"
+    );
+    // FNC2 (97) and FNC3 (96) carry no payload.
+    assert_eq!(payload(&[104, 96, 97, 33]), b"A");
+
+    // FNC1 straight after the Start marks GS1-128 and is not data; later ones are
+    // field separators, reported as GS.
+    let gs1 = decode_values(&[105, FNC1, 12, FNC1, 34]);
+    assert_eq!(gs1.symbology, Symbology::Gs1_128);
+    assert_eq!(gs1.payload_bytes(), b"12\x1d34");
+    let plain = decode_values(&[104, 33, FNC1, 34]);
+    assert_eq!(plain.symbology, Symbology::Code128);
+    assert_eq!(plain.payload_bytes(), b"A\x1dB");
+}
+
+/// The planner's choices for inputs whose shortest encoding is unambiguous.
+#[test]
+fn planner_reference_sequences() {
+    let encoder = Code128Encoder::new();
+    let planned = |symbol: anyd::Symbol| match symbol.meta {
+        SymbolMeta::Code128(meta) => meta.symbols,
+        _ => panic!("Code 128 meta"),
+    };
+    // GS1-128 (01)95012345678903: Start C, FNC1, then eight digit pairs.
+    assert_eq!(
+        planned(encoder.build_gs1(&data("0195012345678903")).unwrap()),
+        [105, 102, 1, 95, 1, 23, 45, 67, 89, 3]
+    );
+    // An even run of four or more trailing digits moves to set C.
+    assert_eq!(
+        planned(encoder.build_text("ABC123456").unwrap()),
+        [104, 33, 34, 35, 99, 12, 34, 56]
+    );
+    // Two digits are not worth a latch.
+    assert_eq!(
+        planned(encoder.build_text("A12").unwrap()),
+        [104, 33, 17, 18]
+    );
+    // A leading control character starts in set A; an isolated one is shifted.
+    assert_eq!(planned(encoder.build_text("\tA").unwrap()), [103, 73, 33]);
+    assert_eq!(
+        planned(encoder.build_text("a\tb").unwrap()),
+        [104, 65, 98, 73, 66]
+    );
+    // Lower case after controls needs set B for good: latch, not shift.
+    assert_eq!(
+        planned(encoder.build_text("\t\tab").unwrap()),
+        [103, 73, 73, 100, 65, 66]
+    );
+}
+
+/// Whatever mix of ASCII, digit runs, controls and FNC1 goes in, the planned symbol
+/// decodes to exactly that payload, fits the documented bound and round-trips.
+#[test]
+fn planner_random_inputs_roundtrip() {
+    let mut rng = anyd::transform::Rng::new(0x0128);
+    let mut below = |n: u64| (rng.next_u64() >> 20) % n;
+    let encoder = Code128Encoder::new();
+    for round in 0..6000 {
+        let len = below(24) as usize;
+        let style = below(4);
+        let input: Vec<Code128Input> = (0..len)
+            .map(|_| {
+                let digit = Code128Input::Data(b'0' + below(10) as u8);
+                match (style, below(7)) {
+                    (0, _) => Code128Input::Data(below(128) as u8),
+                    (1, _) => digit,
+                    (2, 0) => Code128Input::Data(below(128) as u8),
+                    (2, _) => digit,
+                    (_, 0) => Code128Input::Fnc1,
+                    (_, 1 | 2) => Code128Input::Data(below(32) as u8),
+                    (_, 3 | 4) => Code128Input::Data(96 + below(32) as u8),
+                    _ => digit,
+                }
+            })
+            .collect();
+        let gs1 = round % 2 == 0;
+        let built = if gs1 {
+            encoder.build_gs1(&input)
+        } else {
+            encoder.build(&input)
+        };
+        if input.is_empty() && !gs1 {
+            assert!(matches!(built, Err(anyd::Error::InvalidData { .. })));
+            continue;
+        }
+        let built = built.unwrap();
+        let SymbolMeta::Code128(meta) = &built.meta else {
+            panic!("Code 128 meta");
+        };
+        assert!(meta.symbols.len() <= Code128Encoder::max_symbols(input.len()));
+
+        let mut expected: Vec<u8> = input
+            .iter()
+            .map(|el| match el {
+                Code128Input::Data(b) => *b,
+                Code128Input::Fnc1 => 0x1D,
+            })
+            .collect();
+        // A plain symbol that opens with FNC1 *is* a GS1-128 symbol.
+        let leading_fnc1 = !gs1 && input.first() == Some(&Code128Input::Fnc1);
+        if leading_fnc1 {
+            expected.remove(0);
+        }
+        assert_eq!(built.payload_bytes(), expected, "{input:?}");
+        assert_eq!(meta.gs1, gs1 || leading_fnc1);
+
+        let encoding = encoder.encode(&built).unwrap();
+        let decoded = Code128Decoder::new().decode(&encoding).unwrap();
+        assert_eq!(decoded, built, "{input:?}");
+        assert_eq!(encoder.encode(&decoded).unwrap(), encoding);
+    }
+}
+
+#[test]
+fn encoder_rejects_malformed_sequences() {
+    use anyd::Symbol;
+    use anyd::codes::code128::Code128Meta;
+    use anyd::output::LinearPattern;
+    let encoder = Code128Encoder::new();
+    let invalid_parameter = |symbols: &[u8]| {
+        let mut out = LinearPattern::new();
+        let err = encoder.encode_into(symbols, &mut out);
+        // Nothing is written before the sequence is known to be valid.
+        assert!(out.modules.is_empty());
+        matches!(err, Err(anyd::Error::InvalidParameter { .. }))
+    };
+    assert!(invalid_parameter(&[])); // no Start
+    assert!(invalid_parameter(&[33, 34])); // does not begin with a Start
+    assert!(invalid_parameter(&[104, 106])); // Stop as data
+    assert!(invalid_parameter(&[104, 33, 200])); // not a symbol value
+
+    let symbols = vec![104, 33];
+    let good = Symbol::new(
+        Symbology::Code128,
+        Vec::new(),
+        SymbolMeta::Code128(Code128Meta {
+            gs1: false,
+            symbols,
+        }),
+    );
+    encoder.encode(&good).unwrap();
+    let mut wrong_symbology = good.clone();
+    wrong_symbology.symbology = Symbology::Code39;
+    let mut wrong_meta = good.clone();
+    wrong_meta.meta = SymbolMeta::Itf(Default::default());
+    for bad in [wrong_symbology, wrong_meta] {
+        assert!(matches!(
+            encoder.encode(&bad),
+            Err(anyd::Error::InvalidParameter { .. })
+        ));
+    }
+
+    assert!(matches!(
+        encoder.build(&[]),
+        Err(anyd::Error::InvalidData { .. })
+    ));
+    assert!(matches!(
+        encoder.build_gs1(&[Code128Input::Data(128)]),
+        Err(anyd::Error::InvalidData { .. })
+    ));
+    // GS1 mode with no data is just Start + FNC1, and still round-trips.
+    assert_roundtrip(&[], true);
+}
+
+#[test]
+fn decoder_rejects_malformed_rows() {
+    use anyd::output::{BitMatrix, LinearPattern};
+    let decoder = Code128Decoder::new();
+    let row = |modules: Vec<bool>| {
+        let mut pattern = LinearPattern::new();
+        pattern.modules = modules;
+        Encoding::Linear(pattern)
+    };
+    let undecodable =
+        |e: &Encoding| matches!(decoder.decode(e), Err(anyd::Error::Undecodable { .. }));
+
+    assert!(matches!(
+        decoder.decode(&Encoding::Matrix(BitMatrix::new(35, 1, 0))),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    assert!(undecodable(&row(Vec::new())));
+    assert!(undecodable(&row(vec![true; 60])));
+    assert!(undecodable(&row(vec![false; 60])));
+
+    let encoder = Code128Encoder::new();
+    let good = modules(
+        &encoder
+            .encode(&encoder.build_text("Ab\t1234").unwrap())
+            .unwrap(),
+    );
+    decoder.decode(&row(good.clone())).unwrap();
+    // The structural decoder takes the row cropped to its bars.
+    let mut padded = vec![false];
+    padded.extend(&good);
+    assert!(undecodable(&row(padded)));
+    for len in 0..good.len() {
+        assert!(
+            undecodable(&row(good[..len].to_vec())),
+            "truncated to {len}"
+        );
+    }
+    for at in 0..good.len() {
+        let mut flipped = good.clone();
+        flipped[at] = !flipped[at];
+        assert!(undecodable(&row(flipped)), "module {at} flipped");
+    }
+
+    // Well-formed characters with a valid check, but not a legal sequence.
+    for symbols in [
+        &[104u8, 103][..], // a second Start as data
+        &[105, 103],
+        &[103, 105, 33],
+        &[105, 12, 104],
+    ] {
+        let mut pattern = LinearPattern::new();
+        encoder.encode_into(symbols, &mut pattern).unwrap();
+        assert!(undecodable(&Encoding::Linear(pattern)), "{symbols:?}");
+    }
+}
+
+/// The check character is the position-weighted sum of the symbol values modulo
+/// 103. The weights grow with the length, so for a long enough symbol the plain sum
+/// no longer fits 32 bits; it must still come out as the true residue, not wrap (or,
+/// with overflow checks on, panic).
+#[test]
+fn check_character_of_a_very_long_symbol() {
+    let encoder = Code128Encoder::new();
+    let mut symbols = vec![104u8]; // Start B
+    symbols.extend((0..20_000u32).map(|i| (i * 7 % 96) as u8));
+    let expected = symbols
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| k.max(1) as u64 * v as u64)
+        .sum::<u64>();
+    assert!(expected > u32::MAX as u64);
+    let expected = (expected % 103) as u8;
+
+    let mut pattern = anyd::output::LinearPattern::new();
+    encoder.encode_into(&symbols, &mut pattern).unwrap();
+    // The check character sits just before the 13-module Stop; compare it with the
+    // same value rendered as the single data character of a short symbol.
+    let mut short = anyd::output::LinearPattern::new();
+    encoder.encode_into(&[104, expected], &mut short).unwrap();
+    let n = pattern.modules.len();
+    assert_eq!(pattern.modules[n - 24..n - 13], short.modules[11..22]);
+
+    let decoded = Code128Decoder::new()
+        .decode(&Encoding::Linear(pattern))
+        .unwrap();
+    let SymbolMeta::Code128(meta) = &decoded.meta else {
+        panic!("Code 128 meta");
+    };
+    assert_eq!(meta.symbols, symbols);
+}

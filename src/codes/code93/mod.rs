@@ -226,10 +226,10 @@ fn fa_encode(b: u8) -> Option<Fa> {
 #[cfg(feature = "decode")]
 fn fa_decode_pair(prefix: u8, letter: u8) -> Option<u8> {
     match prefix {
-        b'$' => letter.is_ascii_uppercase().then_some(1 + (letter - b'A')),
-        b'+' => letter
-            .is_ascii_uppercase()
-            .then_some(b'a' + (letter - b'A')),
+        // Lazily: `letter - b'A'` underflows for the digits and punctuation that sort
+        // below `A`, which a shift character can be followed by in a damaged row.
+        b'$' => letter.is_ascii_uppercase().then(|| 1 + (letter - b'A')),
+        b'+' => letter.is_ascii_uppercase().then(|| b'a' + (letter - b'A')),
         b'%' => match letter {
             b'A'..=b'E' => Some(27 + (letter - b'A')),
             b'F'..=b'J' => Some(b';' + (letter - b'F')),

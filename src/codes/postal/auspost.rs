@@ -21,18 +21,32 @@
 //! each character of the 64-symbol graphic set as three bar values. zint chooses
 //! the C table whenever the Customer Information contains a non-digit.
 //!
-//! ## Round-trip and the N/C ambiguity
+//! ## Round-trip limits
 //!
-//! The choice of encoding table for the Customer Information field is *not*
-//! recorded in the barcode, and the C-table is a bijection onto every triple of
-//! bar values while the letters `A`–`Z` map to triples drawn only from
-//! `{0,1,2}` — the same alphabet the N-table uses. A Customer Information field
-//! of purely upper-case letters is therefore genuinely indistinguishable from
-//! some digit string. This decoder resolves the field as **numeric when it
-//! parses cleanly as N-table pairs, otherwise as a raw byte field** (C-table).
-//! Fields containing a space, `#` or a lower-case letter always force the C
-//! table (their triples contain a `3`), so they round-trip exactly; a caller
-//! that needs an unambiguous alphabetic field should include such a character.
+//! Neither the table used for the Customer Information field nor — beyond the
+//! bar count — the format is recoverable from the bars alone, and a decoded
+//! symbol keeps only the DPID and the field. Some symbols therefore do not
+//! survive a round trip:
+//!
+//! - **N/C ambiguity.** The C table is a bijection onto every triple of bar
+//!   values and the N table uses pairs over the same values (digit `9` is
+//!   `3,0`), so a C-table field can be bar-for-bar identical to an N-table one
+//!   followed by filler: `"o"` (`2,2,3`) and `"8"`, `" "` (`0,0,3`) and `"0"`.
+//!   The decoder reads the field as **numeric when it parses as N-table pairs
+//!   plus filler, otherwise as C-table bytes**. Such a field re-encodes to the
+//!   same bars but comes back as different data.
+//! - **Trailing `z`.** `z` is the triple `3,3,3` — three Tracker bars, exactly
+//!   what filler is — so trailing `z`s read as padding and are dropped. Where
+//!   that changes the format the encoder picks (`"z"` alone is a 52-bar symbol
+//!   that decodes to a bare DPID, 37 bars; six characters ending in `z` are 67
+//!   bars, the remaining five 52) the re-encoded symbol differs.
+//! - **FCC.** The FCC bars are only checked for being digits and are re-derived
+//!   on encode from the field lengths. A symbol carrying another FCC (45 Reply
+//!   Paid, 87 Routing, 92 Redirection, or 62 around a field short enough for
+//!   59) decodes to its DPID and field but re-encodes under FCC 11/59/62.
+//!
+//! Digit fields, and C-table fields that neither end in `z` nor happen to parse
+//! as digit pairs, round-trip exactly.
 //!
 //! Reference: verified against zint's `test_auspost` diagrams (AusPost Tech
 //! Specs Diagram 1 "96184209" and Guide Figures 3/4), see `tests/postal_extra.rs`.

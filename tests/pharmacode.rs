@@ -137,3 +137,54 @@ fn one_track_uses_the_standard_two_module_gap() {
         .unwrap();
     assert_eq!(decoded.segments, vec![Segment::numeric(b"12".to_vec())]);
 }
+
+/// A hand-assembled symbol's payload must be a plain decimal number: Rust's integer
+/// parser also takes a leading `+`, which is not a digit and used to slip through.
+#[test]
+fn payload_must_be_decimal_digits() {
+    use anyd::Symbol;
+    use anyd::codes::pharmacode::PharmacodeMeta;
+    use anyd::symbol::SymbolMeta;
+    let enc = PharmacodeEncoder::new();
+    let with_payload = |symbology: Symbology, text: &str| {
+        Symbol::new(
+            symbology,
+            vec![Segment::numeric(text.as_bytes().to_vec())],
+            SymbolMeta::Pharmacode(PharmacodeMeta),
+        )
+    };
+    for symbology in [Symbology::Pharmacode, Symbology::PharmacodeTwoTrack] {
+        assert_eq!(
+            enc.encode(&with_payload(symbology, "1234")).unwrap(),
+            enc.encode(&match symbology {
+                Symbology::Pharmacode => enc.build(1234).unwrap(),
+                _ => enc.build_two_track(1234).unwrap(),
+            })
+            .unwrap()
+        );
+        for bad in [
+            "+1234",
+            "-1234",
+            " 1234",
+            "1234 ",
+            "12a4",
+            "",
+            "99999999999",
+        ] {
+            assert!(
+                matches!(
+                    enc.encode(&with_payload(symbology, bad)),
+                    Err(anyd::Error::InvalidData { .. })
+                ),
+                "{bad:?} accepted"
+            );
+        }
+    }
+    // The right payload under the wrong metadata is refused as well.
+    let mut foreign = enc.build(1234).unwrap();
+    foreign.meta = SymbolMeta::Itf(Default::default());
+    assert!(matches!(
+        enc.encode(&foreign),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+}

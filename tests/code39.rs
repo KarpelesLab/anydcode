@@ -207,3 +207,73 @@ fn decodes_three_to_one_ratio_symbols() {
         assert_eq!(enc.encode(&decoded).unwrap(), narrow);
     }
 }
+
+/// The Code 39 full-ASCII shift pairs (ISO/IEC 16388 Annex A), one from each row of
+/// the table, read back as the plain characters that are actually printed.
+#[test]
+fn code39_full_ascii_reference_pairs() {
+    let enc = Code39Encoder::new();
+    for (byte, printed) in [
+        (0u8, "%U"),
+        (1, "$A"),
+        (26, "$Z"),
+        (27, "%A"),
+        (31, "%E"),
+        (b' ', " "),
+        (b'!', "/A"),
+        (b',', "/L"),
+        (b'-', "-"),
+        (b'.', "."),
+        (b'/', "/O"),
+        (b'5', "5"),
+        (b':', "/Z"),
+        (b';', "%F"),
+        (b'?', "%J"),
+        (b'@', "%V"),
+        (b'Q', "Q"),
+        (b'[', "%K"),
+        (b'_', "%O"),
+        (b'`', "%W"),
+        (b'a', "+A"),
+        (b'z', "+Z"),
+        (b'{', "%P"),
+        (b'~', "%S"),
+        (127, "%T"),
+        // The four shift characters themselves are escaped too.
+        (b'$', "/D"),
+        (b'%', "/E"),
+        (b'+', "/K"),
+    ] {
+        let symbol = enc.build(&[byte], true, false).unwrap();
+        let encoding = enc.encode(&symbol).unwrap();
+        let plain = Code39Decoder::new().decode(&encoding).unwrap();
+        assert_eq!(
+            plain.payload_bytes(),
+            printed.as_bytes(),
+            "byte {byte:#04x}"
+        );
+        let back = Code39Decoder::new()
+            .with_full_ascii(true)
+            .decode(&encoding)
+            .unwrap();
+        assert_eq!(back, symbol);
+    }
+}
+
+/// Shift characters that do not form a pair are not full-ASCII data.
+#[test]
+fn code39_full_ascii_rejects_broken_pairs() {
+    let enc = Code39Encoder::new();
+    let full = Code39Decoder::new().with_full_ascii(true);
+    for printed in ["A$", "+", "$1", "+-", "%X", "/M", "/1", "$$A"] {
+        let encoding = enc
+            .encode(&enc.build(printed.as_bytes(), false, false).unwrap())
+            .unwrap();
+        assert!(
+            matches!(full.decode(&encoding), Err(anyd::Error::Undecodable { .. })),
+            "{printed:?} accepted"
+        );
+        // The same row is fine as plain Code 39.
+        Code39Decoder::new().decode(&encoding).unwrap();
+    }
+}

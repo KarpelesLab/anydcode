@@ -22,14 +22,23 @@ use anyd::symbology::Symbology;
 use anyd::traits::Encode;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
+    match collect_args(std::env::args_os().skip(1)).and_then(|args| run(&args)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The command line as UTF-8 strings. `std::env::args` panics on an argument that is
+/// not valid Unicode (a Latin-1 payload, a mis-encoded file name); report it instead.
+fn collect_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    args.map(|a| {
+        a.into_string()
+            .map_err(|bad| format!("argument {bad:?} is not valid UTF-8"))
+    })
+    .collect()
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -561,30 +570,33 @@ fn print_help() {
     );
 }
 
+/// The symbology names `anyd list` prints; each is accepted by [`build_encoding`].
+const ENCODABLE: &[&str] = &[
+    "qr",
+    "microqr",
+    "rmqr",
+    "datamatrix",
+    "aztec",
+    "maxicode",
+    "pdf417",
+    "code128",
+    "code39",
+    "code93",
+    "code11",
+    "ean13",
+    "ean8",
+    "upca",
+    "upce",
+    "itf",
+    "std2of5",
+    "codabar",
+    "telepen",
+    "pharmacode",
+];
+
 fn print_symbologies() {
     println!("Encodable symbology names for `anyd encode`:");
-    for name in [
-        "qr",
-        "microqr",
-        "rmqr",
-        "datamatrix",
-        "aztec",
-        "maxicode",
-        "pdf417",
-        "code128",
-        "code39",
-        "code93",
-        "code11",
-        "ean13",
-        "ean8",
-        "upca",
-        "upce",
-        "itf",
-        "std2of5",
-        "codabar",
-        "telepen",
-        "pharmacode",
-    ] {
+    for name in ENCODABLE {
         println!("  {name}");
     }
     println!(
@@ -690,6 +702,135 @@ mod tests {
         assert!(run(&args(&["decode", "a.png", "b.png"])).is_err());
         assert!(run(&args(&["encode", "qr", "HELLO WORLD", "--out", out])).is_ok());
         let _ = std::fs::remove_file(out);
+    }
+
+    /// `anyd encode qr $'\xff'` used to panic inside `std::env::args`.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_argument_is_an_error_not_a_panic() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![0xff, 0xfe]);
+        let err = collect_args(["encode".into(), "qr".into(), bad].into_iter()).unwrap_err();
+        assert!(err.contains("not valid UTF-8"), "{err}");
+        let ok = collect_args(["decode".into(), "caf\u{e9}.png".into()].into_iter()).unwrap();
+        assert_eq!(ok, ["decode", "caf\u{e9}.png"]);
+    }
+
+    /// Every name `anyd list` advertises encodes, in every output format.
+    #[test]
+    fn every_listed_symbology_encodes() {
+        for &name in ENCODABLE {
+            let data = match name {
+                "ean13" => "5901234123457",
+                "ean8" => "96385074",
+                "upca" => "036000291452",
+                "upce" => "01234565",
+                "codabar" | "itf" | "std2of5" | "code11" | "pharmacode" => "1234",
+                _ => "HELLO",
+            };
+            let enc = build_encoding(name, data, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                render_png(&enc, 2).unwrap().starts_with(b"\x89PNG"),
+                "{name}"
+            );
+            let svg = render_svg(&enc, 2).unwrap();
+            assert!(
+                svg.ends_with("</svg>\n") && svg.contains("<rect x="),
+                "{name}"
+            );
+            let plain = render_unicode(&enc, false);
+            let inverted = render_unicode(&enc, true);
+            assert_eq!(plain.lines().count(), inverted.lines().count(), "{name}");
+            assert!(
+                plain.contains('\u{2588}') || plain.contains('\u{2580}'),
+                "{name}"
+            );
+        }
+        assert!(build_encoding("nope", "x", None).is_err());
+        assert!(build_encoding("qr", "x", Some("Z")).is_err());
+        assert!(build_encoding("pdf417", "x", Some("9")).is_err());
+        assert!(build_encoding("pharmacode", "abc", None).is_err());
+    }
+
+    /// The SVG canvas and the PNG raster agree on size, and the half-block text has
+    /// one line per two module rows (an odd row count gets a final half line).
+    #[test]
+    fn renderers_agree_on_geometry() {
+        let enc = build_encoding("qr", "HELLO", None).unwrap();
+        let Encoding::Matrix(m) = &enc else {
+            panic!("QR is a matrix")
+        };
+        let side = (m.width() + 2 * m.quiet_zone) * 3;
+        let svg = render_svg(&enc, 3).unwrap();
+        assert!(svg.contains(&format!("width=\"{side}\" height=\"{side}\"")));
+        let img = render(&enc, 3);
+        assert_eq!((img.width(), img.height()), (side, side));
+        // 21 modules + 2x2 margin = 25 rows -> 13 text lines, each 25 columns wide.
+        let text = render_unicode(&enc, false);
+        assert_eq!(text.lines().count(), 13);
+        assert!(text.lines().all(|l| l.chars().count() == 25));
+        // Inverting flips every cell: the quiet-zone corner is blank, then filled.
+        assert!(text.starts_with(' '));
+        assert!(render_unicode(&enc, true).starts_with('\u{2588}'));
+        // The last (half) line of an inverted odd-height symbol is top-half blocks only.
+        let last = render_unicode(&enc, true)
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(last.chars().all(|c| c == '\u{2580}'), "{last:?}");
+    }
+
+    #[test]
+    fn command_dispatch_and_error_exits() {
+        assert!(run(&args(&["bogus"])).is_err());
+        assert!(run(&args(&["encode"])).is_err());
+        assert!(run(&args(&["encode", "qr", "x", "--format", "gif"])).is_err());
+        assert!(run(&args(&["encode", "qr", "x", "--format", "png"])).is_err());
+        assert!(run(&args(&["encode", "qr", "x", "--scale", "-1"])).is_err());
+        assert!(run(&args(&["encode", "nope", "x"])).is_err());
+        assert!(run(&args(&["decode"])).is_err());
+        assert!(run(&args(&["decode", "/nonexistent/anyd.png"])).is_err());
+        assert_eq!(hex(&[0x00, 0xab, 0xff]), "00abff");
+
+        // encode -> PNG file -> decode, through the command entry points.
+        let dir = std::env::temp_dir();
+        let png = dir.join(format!("anyd-cli-rt-{}.png", std::process::id()));
+        let png = png.to_str().unwrap();
+        run(&args(&[
+            "encode",
+            "QR",
+            "ROUND TRIP",
+            "--format=png",
+            "--out",
+            png,
+            "--scale",
+            "4",
+            "--ec",
+            "h",
+        ]))
+        .unwrap();
+        let found = decode_png_bytes(&std::fs::read(png).unwrap()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text().as_deref(), Some("ROUND TRIP"));
+        assert!(run(&args(&["decode", png])).is_ok());
+        // A blank image holds no barcode: an error exit, not an empty success.
+        let blank = oxideav_png::PngImage {
+            width: 64,
+            height: 64,
+            pixel_format: oxideav_png::PngPixelFormat::Gray8,
+            stride: 64,
+            data: vec![255; 64 * 64],
+            palette: Vec::new(),
+        };
+        std::fs::write(png, oxideav_png::encode_png_image(&blank).unwrap()).unwrap();
+        assert!(run(&args(&["decode", png])).is_err());
+        // Truncated file: an error, not a panic.
+        let bytes = std::fs::read(png).unwrap();
+        for cut in [9, 20, 33, bytes.len() / 2, bytes.len() - 1] {
+            assert!(decode_png_bytes(&bytes[..cut]).is_err(), "cut {cut}");
+        }
+        let _ = std::fs::remove_file(png);
     }
 
     #[test]

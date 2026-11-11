@@ -494,3 +494,222 @@ fn m1_detects_errors_and_never_miscorrects() {
         assert!(MicroQrDecoder::new().decode(&Encoding::Matrix(m)).is_err());
     }
 }
+
+// --- Capacity boundaries, error paths, parameter ranges ---
+
+/// ISO/IEC 18004 Table 7, Micro QR rows: the longest numeric / alphanumeric / byte
+/// / Kanji segment per version and level (0 = mode not available there). zint 2.16
+/// accepts exactly the same lengths.
+const CAPACITY: [(MicroVersion, MicroEcLevel, [usize; 4]); 8] = [
+    (MicroVersion::M1, MicroEcLevel::Detection, [5, 0, 0, 0]),
+    (MicroVersion::M2, MicroEcLevel::L, [10, 6, 0, 0]),
+    (MicroVersion::M2, MicroEcLevel::M, [8, 5, 0, 0]),
+    (MicroVersion::M3, MicroEcLevel::L, [23, 14, 9, 6]),
+    (MicroVersion::M3, MicroEcLevel::M, [18, 11, 7, 4]),
+    (MicroVersion::M4, MicroEcLevel::L, [35, 21, 15, 9]),
+    (MicroVersion::M4, MicroEcLevel::M, [30, 18, 13, 8]),
+    (MicroVersion::M4, MicroEcLevel::Q, [21, 13, 9, 5]),
+];
+
+fn segment_of(mode: usize, len: usize) -> Segment {
+    match mode {
+        0 => Segment::numeric(vec![b'8'; len]),
+        1 => Segment::alphanumeric(vec![b'%'; len]),
+        2 => Segment::byte(vec![0xB7; len]),
+        _ => Segment::kanji([0xE4, 0xAA].repeat(len)),
+    }
+}
+
+/// At every version and level, in every mode: the Table 7 maximum fits (the
+/// terminator is shortened or dropped) and round-trips, one character more is a
+/// capacity error, and a mode the version lacks is refused outright.
+#[test]
+fn capacity_boundaries_at_every_version_and_level() {
+    let enc = MicroQrEncoder::new();
+    for (version, level, maxima) in CAPACITY {
+        for (mode, max) in maxima.into_iter().enumerate() {
+            let what = format!("{version:?}-{level:?} mode {mode}");
+            let pinned = |len| symbol(segment_of(mode, len), meta(version, level, 2));
+            if max == 0 {
+                assert!(
+                    matches!(enc.encode(&pinned(1)), Err(anyd::Error::InvalidData { .. })),
+                    "{what}"
+                );
+                continue;
+            }
+            for len in 1..=max {
+                let full = pinned(len);
+                let encoding = enc.encode(&full).unwrap();
+                assert_eq!(
+                    MicroQrDecoder::new().decode(&encoding).unwrap(),
+                    full,
+                    "{what} len {len}"
+                );
+            }
+            assert!(
+                matches!(
+                    enc.encode(&pinned(max + 1)),
+                    Err(anyd::Error::Capacity { .. })
+                ),
+                "{what}"
+            );
+        }
+    }
+    // The builder moves to the next version exactly at the boundary, and gives up
+    // past M4.
+    let version_of = |s: &Symbol| match &s.meta {
+        SymbolMeta::MicroQr(m) => m.version,
+        _ => panic!("expected MicroQrMeta"),
+    };
+    for (len, want) in [
+        (10, Some(MicroVersion::M2)),
+        (11, Some(MicroVersion::M3)),
+        (23, Some(MicroVersion::M3)),
+        (24, Some(MicroVersion::M4)),
+        (35, Some(MicroVersion::M4)),
+        (36, None),
+    ] {
+        let built = enc.build_numeric(&vec![b'1'; len], MicroEcLevel::L);
+        assert_eq!(built.as_ref().ok().map(version_of), want, "{len} digits");
+        if want.is_none() {
+            assert!(matches!(built, Err(anyd::Error::Capacity { .. })));
+        }
+    }
+}
+
+#[test]
+fn encoder_rejects_what_it_cannot_represent() {
+    let enc = MicroQrEncoder::new();
+    let one = || Segment::numeric(b"1".to_vec());
+    // Levels a version does not define.
+    for (version, level) in [
+        (MicroVersion::M1, MicroEcLevel::L),
+        (MicroVersion::M2, MicroEcLevel::Detection),
+        (MicroVersion::M2, MicroEcLevel::Q),
+        (MicroVersion::M3, MicroEcLevel::Q),
+        (MicroVersion::M4, MicroEcLevel::Detection),
+    ] {
+        assert!(
+            matches!(
+                enc.encode(&symbol(one(), meta(version, level, 0))),
+                Err(anyd::Error::InvalidParameter { .. })
+            ),
+            "{version:?}-{level:?}"
+        );
+    }
+    // Content no mode can carry, and ECI, which Micro QR does not have.
+    for segment in [
+        Segment::numeric(b"1a".to_vec()),
+        Segment::alphanumeric(b"a".to_vec()),
+        Segment::kanji(vec![0x93]),
+        Segment::kanji(vec![0x41, 0x42]),
+        Segment::eci(26),
+    ] {
+        let pinned = symbol(segment.clone(), meta(MicroVersion::M4, MicroEcLevel::L, 0));
+        assert!(
+            matches!(enc.encode(&pinned), Err(anyd::Error::InvalidData { .. })),
+            "{segment:?}"
+        );
+        assert!(enc.build(vec![segment], MicroEcLevel::L).is_err());
+    }
+    // The right symbology without Micro QR metadata.
+    let generic = Symbol::new(Symbology::MicroQrCode, vec![one()], SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&generic),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // A grid buffer too small for the version.
+    let views = [anyd::segment::SegmentView::numeric(b"1")];
+    let mut short = vec![0u8; MicroQrEncoder::buffer_len(MicroVersion::M2) - 1];
+    assert!(matches!(
+        enc.encode_into(&views, MicroEcLevel::L, None, None, &mut short),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    // Detection is M1 only, and M1 is numeric only.
+    assert!(enc.build_text("A", MicroEcLevel::Detection).is_err());
+    assert!(enc.build_text("123456", MicroEcLevel::Detection).is_err());
+}
+
+#[test]
+fn decoder_rejects_non_micro_qr_inputs() {
+    let dec = MicroQrDecoder::new();
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    for (w, h) in [(0, 0), (11, 13), (9, 9), (19, 19), (21, 21)] {
+        assert!(
+            dec.decode_matrix(&BitMatrix::new(w, h, 2)).is_err(),
+            "{w}x{h}"
+        );
+    }
+    // The format information names the version too; it must agree with the grid.
+    // An M2 symbol's format strip transplanted onto an M3 symbol does not.
+    let enc = MicroQrEncoder::new();
+    let grid = |version, level| {
+        let sym = symbol(Segment::numeric(b"123".to_vec()), meta(version, level, 0));
+        let Encoding::Matrix(m) = enc.encode(&sym).unwrap() else {
+            panic!("expected matrix");
+        };
+        m
+    };
+    let m2 = grid(MicroVersion::M2, MicroEcLevel::L);
+    let mut m3 = grid(MicroVersion::M3, MicroEcLevel::L);
+    for i in 1..=8 {
+        m3.set(8, i, m2.get(8, i));
+        m3.set(i, 8, m2.get(i, 8));
+    }
+    assert!(matches!(
+        dec.decode_matrix(&m3),
+        Err(anyd::Error::Undecodable { .. })
+    ));
+}
+
+/// The 15-bit format word is BCH(15,5): any three damaged modules are corrected,
+/// for all eight symbol numbers.
+#[test]
+fn format_information_survives_three_errors() {
+    let enc = MicroQrEncoder::new();
+    for (i, (version, level, _)) in CAPACITY.into_iter().enumerate() {
+        let sym = symbol(Segment::numeric(b"271".to_vec()), meta(version, level, 3));
+        let Encoding::Matrix(clean) = enc.encode(&sym).unwrap() else {
+            panic!("expected matrix");
+        };
+        // Format modules: column 8 rows 1..=8, then row 8 columns 7..=1.
+        let cells: Vec<(usize, usize)> = (1..=8)
+            .map(|y| (8, y))
+            .chain((1..=7).rev().map(|x| (x, 8)))
+            .collect();
+        assert_eq!(cells.len(), 15);
+        for a in 0..13 {
+            let mut m = clean.clone();
+            for k in [a, a + 1 + i % 2, (a + 7) % 15] {
+                let (x, y) = cells[k];
+                m.set(x, y, !clean.get(x, y));
+            }
+            assert_eq!(
+                MicroQrDecoder::new().decode_matrix(&m).as_ref(),
+                Ok(&sym),
+                "{version:?}-{level:?} from {a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn parameter_types_validate_their_ranges() {
+    assert!(MicroVersion::from_number(0).is_none() && MicroVersion::from_number(5).is_none());
+    for n in 1..=4u8 {
+        let version = MicroVersion::from_number(n).unwrap();
+        assert_eq!(version.number(), n);
+        assert_eq!(version.size(), 9 + 2 * n as usize);
+        assert_eq!(MicroVersion::from_size(version.size()), Some(version));
+        assert!(MicroQrEncoder::buffer_len(version) <= MicroQrEncoder::MAX_BUFFER_LEN);
+    }
+    for size in [0, 9, 12, 19, 21] {
+        assert!(MicroVersion::from_size(size).is_none());
+    }
+    assert!(MicroMask::new(4).is_none());
+    assert_eq!(MicroMask::new(3).unwrap().index(), 3);
+}

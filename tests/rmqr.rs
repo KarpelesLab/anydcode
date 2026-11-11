@@ -385,3 +385,246 @@ fn fnc1_symbol_is_unsupported_not_empty() {
     let err = RmqrDecoder::new().decode(&reference).unwrap_err();
     assert!(matches!(err, anyd::Error::Unsupported { .. }), "{err:?}");
 }
+
+/// The largest size at level H against zint: four interleaved RS blocks, interior
+/// alignment columns and five segments in three modes. `zint -b 145 --vers=32
+/// --secure=4 -d "rMQR R17x139-H: 0123456789012345 ABCDEFGHIJKLMNOP 点字 anyd"`
+/// (zint converts the text to Shift JIS; rows are its `--dump` hex).
+#[test]
+fn r17x139_h_mixed_modes_match_zint() {
+    let rows = [
+        "FEAAAABAAAAAABAAAAAABAAAAAABAAAAAAE",
+        "82C4792841EFB29CE15DED4B997AF1FA172",
+        "BA864BFC30D15383123A796BC93BCF1AC0A",
+        "BA9720496A07F001A7E34FF7A2C4464CA6C",
+        "BA5AD914F474E92D46BEDB54EA6D396F832",
+        "82960727EA94DA13E0F4A5256C9C8C1168C",
+        "FEA9001A3D75936FF82F31D735FD3EE8B1E",
+        "002DBDA24FB51EB5004DC54F1094EBF35A8",
+        "E302BD50FD0957834856DA684571543C0F2",
+        "59AC2C4A46F65A543022E76CA7E45AA9D50",
+        "92B40EDBD93F4FD31AF610BBBEA1C379412",
+        "19233E4585D986EB182C682CEFFAB7B82B4",
+        "C8C629B1791A1B381B4155D52EAF19031BE",
+        "0DAA55E8912D561B4F3E4B23F03E162A5E2",
+        "91C9F23CC165FBD57615FEB77863FDF49EA",
+        "95116D2D6CD73292D02F6A7FAC46A517762",
+        "EAAAAABAAAAAABAAAAAABAAAAAABAAAAABE",
+    ];
+    let mut m = BitMatrix::new(139, 17, 2);
+    for (y, row) in rows.iter().enumerate() {
+        for x in 0..139 {
+            let nibble = (row.as_bytes()[x / 4] as char).to_digit(16).unwrap();
+            m.set(x, y, nibble & (8 >> (x % 4)) != 0);
+        }
+    }
+    let want = Symbol::new(
+        Symbology::RectMicroQrCode,
+        vec![
+            Segment::byte(b"rMQR R17x".to_vec()),
+            Segment::alphanumeric(b"139-H: ".to_vec()),
+            Segment::numeric(b"0123456789012345".to_vec()),
+            Segment::alphanumeric(b" ABCDEFGHIJKLMNOP ".to_vec()),
+            Segment::byte(b"\x93\x5F\x8E\x9A anyd".to_vec()),
+        ],
+        SymbolMeta::Rmqr(meta(139, 17, RmqrEcLevel::H)),
+    );
+    let reference = Encoding::Matrix(m);
+    assert_eq!(RmqrDecoder::new().decode(&reference).unwrap(), want);
+    assert_eq!(RmqrEncoder::new().encode(&want).unwrap(), reference);
+}
+
+/// Longest numeric / alphanumeric / byte / Kanji segment of each size (in version
+/// indicator order) at level M and at level H: the data capacities of ISO/IEC
+/// 23941, confirmed against zint 2.16 (`--vers`, `--secure`) for all 256 cells.
+#[rustfmt::skip]
+const CAPACITY: [([usize; 4], [usize; 4]); 32] = [
+    ([12, 7, 5, 3], [5, 3, 2, 1]),
+    ([26, 16, 11, 6], [14, 8, 6, 3]),
+    ([45, 27, 19, 11], [21, 13, 9, 5]),
+    ([64, 39, 27, 16], [30, 18, 13, 8]),
+    ([102, 62, 42, 26], [54, 33, 22, 14]),
+    ([26, 16, 11, 6], [14, 8, 6, 3]),
+    ([47, 29, 20, 12], [23, 14, 10, 6]),
+    ([71, 43, 30, 18], [37, 23, 16, 9]),
+    ([97, 59, 40, 25], [49, 30, 20, 12]),
+    ([147, 89, 61, 38], [75, 46, 31, 19]),
+    ([14, 8, 6, 3], [9, 6, 4, 2]),
+    ([42, 26, 18, 11], [23, 14, 10, 6]),
+    ([71, 43, 30, 18], [33, 20, 14, 8]),
+    ([100, 60, 41, 25], [52, 31, 21, 13]),
+    ([133, 81, 55, 34], [66, 40, 27, 17]),
+    ([198, 120, 82, 51], [97, 59, 40, 25]),
+    ([26, 16, 11, 6], [14, 8, 6, 3]),
+    ([62, 37, 26, 16], [28, 17, 12, 7]),
+    ([88, 53, 36, 22], [45, 27, 18, 11]),
+    ([124, 75, 51, 31], [66, 40, 27, 17]),
+    ([171, 104, 71, 44], [80, 49, 33, 20]),
+    ([251, 152, 104, 64], [126, 76, 52, 32]),
+    ([76, 46, 31, 19], [33, 20, 13, 8]),
+    ([112, 68, 46, 28], [59, 36, 24, 15]),
+    ([157, 95, 65, 40], [71, 43, 29, 18]),
+    ([207, 126, 86, 53], [111, 68, 46, 28]),
+    ([301, 182, 125, 77], [162, 98, 67, 41]),
+    ([90, 55, 37, 23], [47, 28, 19, 12]),
+    ([131, 79, 54, 33], [63, 38, 26, 16]),
+    ([183, 111, 76, 47], [87, 53, 36, 22]),
+    ([236, 143, 98, 60], [131, 79, 54, 33]),
+    ([361, 219, 150, 92], [178, 108, 74, 46]),
+];
+
+/// At every size and level, in every mode: the maximum fits and round-trips (with
+/// the terminator shortened or gone), and one character more is a capacity error —
+/// not a panic, and not a count field that wrapped.
+#[test]
+fn capacity_boundaries_at_every_size_and_level() {
+    let enc = RmqrEncoder::new();
+    for size in RmqrSize::all() {
+        let (m, h) = CAPACITY[size.indicator() as usize];
+        for (ec, maxima) in [(RmqrEcLevel::M, m), (RmqrEcLevel::H, h)] {
+            for (mode, max) in maxima.into_iter().enumerate() {
+                let segment = |len: usize| match mode {
+                    0 => Segment::numeric(vec![b'8'; len]),
+                    1 => Segment::alphanumeric(vec![b'%'; len]),
+                    2 => Segment::byte(vec![0xB7; len]),
+                    _ => Segment::kanji([0xE4, 0xAA].repeat(len)),
+                };
+                roundtrip_size(size, ec, segment(max));
+                let over = Symbol::new(
+                    Symbology::RectMicroQrCode,
+                    vec![segment(max + 1)],
+                    SymbolMeta::Rmqr(RmqrMeta { size, ec_level: ec }),
+                );
+                assert!(
+                    matches!(enc.encode(&over), Err(anyd::Error::Capacity { .. })),
+                    "{} {ec:?} mode {mode}",
+                    size.name()
+                );
+            }
+        }
+    }
+    // Nothing holds more than R17x139: the builder reports it.
+    for (level, max) in [(RmqrEcLevel::M, 361), (RmqrEcLevel::H, 178)] {
+        let sym = enc.build(vec![Segment::numeric(vec![b'1'; max])], level);
+        assert_eq!(sym.unwrap().meta, SymbolMeta::Rmqr(meta(139, 17, level)));
+        assert!(matches!(
+            enc.build(vec![Segment::numeric(vec![b'1'; max + 1])], level),
+            Err(anyd::Error::Capacity { .. })
+        ));
+        assert!(matches!(
+            enc.build_text(&"1".repeat(max + 1), level),
+            Err(anyd::Error::Capacity { .. })
+        ));
+    }
+}
+
+#[test]
+fn encoder_rejects_what_it_cannot_represent() {
+    let enc = RmqrEncoder::new();
+    let pinned = |segment: Segment| {
+        Symbol::new(
+            Symbology::RectMicroQrCode,
+            vec![segment],
+            SymbolMeta::Rmqr(meta(77, 11, RmqrEcLevel::M)),
+        )
+    };
+    for segment in [
+        Segment::numeric(b"1a".to_vec()),
+        Segment::alphanumeric(b"a".to_vec()),
+        Segment::alphanumeric(b"A,".to_vec()),
+        Segment::kanji(vec![0x93]),
+        Segment::kanji(vec![0x41, 0x42]),
+        Segment::eci(1_000_000),
+    ] {
+        assert!(
+            matches!(
+                enc.encode(&pinned(segment.clone())),
+                Err(anyd::Error::InvalidData { .. })
+            ),
+            "{segment:?}"
+        );
+        assert!(enc.build(vec![segment], RmqrEcLevel::M).is_err());
+    }
+    let mut wrong = pinned(Segment::byte(b"x".to_vec()));
+    wrong.symbology = Symbology::QrCode;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let generic = Symbol::new(Symbology::RectMicroQrCode, Vec::new(), SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&generic),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+}
+
+#[test]
+fn decoder_rejects_non_rmqr_inputs() {
+    let dec = RmqrDecoder::new();
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    // 27 modules wide exists only from 11 rows up; a blank grid has no format.
+    for (w, h) in [
+        (0, 0),
+        (27, 7),
+        (27, 9),
+        (43, 8),
+        (7, 43),
+        (155, 17),
+        (43, 7),
+    ] {
+        assert!(
+            dec.decode_matrix(&BitMatrix::new(w, h, 2)).is_err(),
+            "{w}x{h}"
+        );
+    }
+    // The format information names the size as well: R7x43's, transplanted into
+    // the same corner of an R7x59 symbol, contradicts the grid.
+    let enc = RmqrEncoder::new();
+    let grid = |w| {
+        let sym = Symbol::new(
+            Symbology::RectMicroQrCode,
+            vec![Segment::numeric(b"1".to_vec())],
+            SymbolMeta::Rmqr(meta(w, 7, RmqrEcLevel::M)),
+        );
+        let Encoding::Matrix(m) = enc.encode(&sym).unwrap() else {
+            panic!("expected matrix");
+        };
+        m
+    };
+    let (small, mut large) = (grid(43), grid(59));
+    for y in 0..7 {
+        for x in 0..12 {
+            large.set(x, y, small.get(x, y));
+        }
+    }
+    assert!(dec.decode_matrix(&large).is_err());
+}
+
+#[test]
+fn sizes_enumerate_the_32_standard_symbols() {
+    let all: Vec<RmqrSize> = RmqrSize::all().collect();
+    assert_eq!(all.len(), 32);
+    assert!(RmqrSize::from_indicator(32).is_none());
+    for (i, size) in all.iter().enumerate() {
+        assert_eq!(size.indicator() as usize, i);
+        assert_eq!(RmqrSize::from_indicator(i as u8), Some(*size));
+        assert_eq!(
+            RmqrSize::from_dimensions(size.width(), size.height()),
+            Some(*size)
+        );
+        assert_eq!(size.name(), format!("R{}x{}", size.height(), size.width()));
+        assert!([7, 9, 11, 13, 15, 17].contains(&size.height()));
+        assert!([27, 43, 59, 77, 99, 139].contains(&size.width()));
+    }
+    // ISO/IEC 23941 order: R7x43 first, R17x139 last; R7x27 and R9x27 do not exist.
+    assert_eq!(all[0].name(), "R7x43");
+    assert_eq!(all[10].name(), "R11x27");
+    assert_eq!(all[31].name(), "R17x139");
+    assert!(RmqrSize::from_dimensions(27, 7).is_none());
+    assert!(RmqrSize::from_dimensions(27, 9).is_none());
+    assert!(RmqrSize::from_dimensions(7, 43).is_none());
+}

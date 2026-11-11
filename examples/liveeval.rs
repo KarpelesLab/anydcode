@@ -26,7 +26,7 @@ use anyd::codes::qr::{EcLevel, QrEncoder};
 use anyd::detect::{LocateOptions, locate};
 use anyd::render::render;
 use anyd::traits::Encode;
-use anyd::transform::{Rng, add_noise, gaussian_blur};
+use anyd::transform::{Rng, add_noise, brightness_contrast, gaussian_blur, tilt_right};
 use anyd::{GrayFrame, GrayImage, Symbol};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -219,12 +219,68 @@ fn clutter(canvas: &mut GrayImage, rng: &mut Rng) {
     }
 }
 
+/// Capture quality of a scene: what the camera did to the print.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Quality {
+    /// Mild optical blur and sensor noise — a good capture (the historical baseline).
+    Clean,
+    /// Out of focus: blur on the order of a module, more noise.
+    Soft,
+    /// Low-contrast print in poor light: a third of the dynamic range, noisy.
+    Dim,
+    /// Hand shake: a 5-pixel linear motion blur across the frame diagonal.
+    Motion,
+    /// Viewed off-axis: the code foreshortened by 30% on one side.
+    Tilt,
+    /// Dark, grainy capture: heavy sensor noise on reduced contrast.
+    Grain,
+}
+
+impl Quality {
+    const ALL: [Quality; 6] = [
+        Quality::Clean,
+        Quality::Soft,
+        Quality::Dim,
+        Quality::Motion,
+        Quality::Tilt,
+        Quality::Grain,
+    ];
+}
+
+/// Linear motion blur: the mean of `len` samples along direction `deg`.
+fn motion_blur(img: &GrayImage, len: usize, deg: f32) -> GrayImage {
+    let (s, c) = deg.to_radians().sin_cos();
+    let (w, h) = (img.width(), img.height());
+    let mut out = GrayImage::filled(w, h, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            for i in 0..len {
+                let t = i as f32 - (len as f32 - 1.0) / 2.0;
+                let sx = (x as f32 + c * t).clamp(0.0, (w - 1) as f32);
+                let sy = (y as f32 + s * t).clamp(0.0, (h - 1) as f32);
+                acc += img.sample_bilinear(sx, sy).unwrap_or(255.0);
+            }
+            out.set(x, y, (acc / len as f32).round() as u8);
+        }
+    }
+    out
+}
+
 struct Scene {
     image: GrayImage,
     truth: [f32; 4],
 }
 
-fn scene(code: &Code, scale: usize, bg: Bg, deg: f32, gradient: bool, seed: u64) -> Scene {
+fn scene(
+    code: &Code,
+    scale: usize,
+    bg: Bg,
+    deg: f32,
+    gradient: bool,
+    quality: Quality,
+    seed: u64,
+) -> Scene {
     let mut rng = Rng::new(seed);
     let base = if bg == Bg::Label { 55 } else { 232 };
     let mut canvas = GrayImage::filled(W, H, base);
@@ -240,6 +296,9 @@ fn scene(code: &Code, scale: usize, bg: Bg, deg: f32, gradient: bool, seed: u64)
             sprite.set(x + margin, y + margin, raw.get(x, y));
         }
     }
+    if quality == Quality::Tilt {
+        sprite = tilt_right(&sprite, 0.3);
+    }
     // Off-centre, jittered placement.
     let cx = W as f32 * (0.40 + 0.2 * rng.next_f32());
     let cy = H as f32 * (0.42 + 0.16 * rng.next_f32());
@@ -254,7 +313,25 @@ fn scene(code: &Code, scale: usize, bg: Bg, deg: f32, gradient: bool, seed: u64)
             }
         }
     }
-    let image = add_noise(&gaussian_blur(&canvas, 0.8), 4.0, &mut rng);
+    let image = match quality {
+        Quality::Clean | Quality::Tilt => add_noise(&gaussian_blur(&canvas, 0.8), 4.0, &mut rng),
+        Quality::Soft => add_noise(&gaussian_blur(&canvas, 1.6), 8.0, &mut rng),
+        Quality::Dim => add_noise(
+            &brightness_contrast(&gaussian_blur(&canvas, 0.8), -20.0, 0.33),
+            6.0,
+            &mut rng,
+        ),
+        Quality::Motion => add_noise(
+            &motion_blur(&gaussian_blur(&canvas, 0.6), 5, 30.0),
+            4.0,
+            &mut rng,
+        ),
+        Quality::Grain => add_noise(
+            &brightness_contrast(&gaussian_blur(&canvas, 0.8), -30.0, 0.6),
+            16.0,
+            &mut rng,
+        ),
+    };
     Scene { image, truth }
 }
 
@@ -321,6 +398,7 @@ struct Trial {
     bg: Bg,
     deg: f32,
     gradient: bool,
+    quality: Quality,
     seed: u64,
 }
 
@@ -336,14 +414,14 @@ struct Outcome {
 }
 
 fn run(code: &Code, t: &Trial) -> Outcome {
-    let sc = scene(code, t.scale, t.bg, t.deg, t.gradient, t.seed);
+    let sc = scene(code, t.scale, t.bg, t.deg, t.gradient, t.quality, t.seed);
     let small = half(&sc.image);
     let mut secs = [0.0f64; 4];
     // LIVEEVAL_DUMP=<dir> writes every scene as a PGM for the other debug tools.
     if let Ok(dir) = std::env::var("LIVEEVAL_DUMP") {
         let name = format!(
-            "{dir}/{}-s{}-{:?}-r{}-g{}.pgm",
-            code.name, t.scale, t.bg, t.deg, t.gradient as u8
+            "{dir}/{}-s{}-{:?}-r{}-g{}-{:?}.pgm",
+            code.name, t.scale, t.bg, t.deg, t.gradient as u8, t.quality
         );
         for (img, suffix) in [(&sc.image, ""), (&small, "-half")] {
             let mut bytes = format!("P5\n{} {}\n255\n", img.width(), img.height()).into_bytes();
@@ -463,6 +541,15 @@ fn run(code: &Code, t: &Trial) -> Outcome {
 
 fn main() {
     let verbose = std::env::args().any(|a| a == "-v");
+    // `--quality=<name>|all` picks the capture quality (default: clean, the baseline).
+    let qarg = std::env::args()
+        .find_map(|a| a.strip_prefix("--quality=").map(str::to_lowercase))
+        .unwrap_or_else(|| "clean".into());
+    let qualities: Vec<Quality> = Quality::ALL
+        .into_iter()
+        .filter(|q| qarg == "all" || format!("{q:?}").to_lowercase() == qarg)
+        .collect();
+    assert!(!qualities.is_empty(), "unknown --quality={qarg}");
     let only: Option<String> = std::env::args().skip(1).find(|a| !a.starts_with('-'));
     let codes = codes();
 
@@ -475,14 +562,17 @@ fn main() {
                     for gradient in [false, true] {
                         seed += 1;
                         if only.as_deref().is_none_or(|o| o == code.name) {
-                            trials.push(Trial {
-                                code: ci,
-                                scale,
-                                bg,
-                                deg,
-                                gradient,
-                                seed,
-                            });
+                            for &quality in &qualities {
+                                trials.push(Trial {
+                                    code: ci,
+                                    scale,
+                                    bg,
+                                    deg,
+                                    gradient,
+                                    quality,
+                                    seed,
+                                });
+                            }
                         }
                     }
                 }
@@ -521,6 +611,16 @@ fn main() {
             format!("rot={}", t.deg),
             format!("light={}", if t.gradient { "gradient" } else { "flat" }),
             format!("kind={}", if code.linear { "1d" } else { "2d" }),
+            format!("quality={:?}", t.quality),
+            format!(
+                "scale={}",
+                if t.scale == code.scales[0] {
+                    "small"
+                } else {
+                    "large"
+                }
+            ),
+            format!("q/{:?}/{}", t.quality, code.name),
         ] {
             add(per_cond.entry(key).or_default(), out.tally);
         }
@@ -530,7 +630,7 @@ fn main() {
         }
         if verbose && (out.tally.live == 0 || !out.falses.is_empty()) {
             println!(
-                "{} {:<10} scale={} bg={:?} rot={} grad={} located={} ideal={} cands={} falses={:?}",
+                "{} {:<10} scale={} bg={:?} rot={} grad={} q={:?} located={} ideal={} cands={} falses={:?}",
                 if out.tally.live == 0 {
                     "MISS "
                 } else {
@@ -541,6 +641,7 @@ fn main() {
                 t.bg,
                 t.deg,
                 t.gradient,
+                t.quality,
                 out.tally.located,
                 out.tally.ideal,
                 out.cands,

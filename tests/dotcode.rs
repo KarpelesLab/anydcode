@@ -569,3 +569,62 @@ fn matches_zint_when_cr_lf_pairs_weigh_set_a_against_set_b() {
         );
     }
 }
+
+/// `zint -b DOTCODE --structapp=2,5 -d ABC` (21 x 14): symbol 2 of 5, no padding.
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND: &[&str] = &[
+    "100010001010101010101",
+    "010100000001000001010",
+    "001000001000001010000",
+    "010101000101010101000",
+    "000010101010000010000",
+    "000001010000010000010",
+    "000010101010001000100",
+    "000101000100000100010",
+    "101000100000101000000",
+    "000000000100000001010",
+    "100010101000101000001",
+    "010001000101000001000",
+    "101000000010101010101",
+    "000101010001000101010",
+];
+
+/// `zint -b DOTCODE --cols=30 --structapp=3,4 -d ABCD` (30 x 11): symbol 3 of 4,
+/// followed by pad codewords.
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND_PADDED: &[&str] = &[
+    "101000001000101010000010000010",
+    "010001000100010100010001000100",
+    "001000101010001000100010001000",
+    "010000000101010001010001010000",
+    "000010001000101010000010001010",
+    "000100010101000100000101000101",
+    "001000101000100000101000001010",
+    "000101010001010001000100010001",
+    "001000101010001000001010001000",
+    "000100000101010001010000010101",
+    "100010100000001010101000001010",
+];
+
+#[test]
+fn structured_append_trailer_is_not_payload() {
+    // FNC2 as the last data codeword marks a Structured Append symbol; the two
+    // characters before it are its position and the symbol count, not message data
+    // (and the pad codewords after it are not an ECI number).
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for (rows, payload) in [
+        (ZINT_STRUCTURED_APPEND, &b"ABC"[..]),
+        (ZINT_STRUCTURED_APPEND_PADDED, b"ABCD"),
+    ] {
+        let reference = matrix_from_rows(rows);
+        let decoded = dec.decode(&reference).unwrap();
+        assert_eq!(decoded.segments, vec![anyd::Segment::byte(payload)]);
+        // The trailer stays in the pinned codewords, so the symbol re-encodes whole.
+        let SymbolMeta::DotCode(meta) = &decoded.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        assert!(meta.codewords.contains(&108), "FNC2 kept in {meta:?}");
+        assert_eq!(enc.encode(&decoded).unwrap(), reference);
+    }
+}

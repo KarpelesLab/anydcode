@@ -455,7 +455,16 @@ fn emit_b(bytes: &mut Vec<u8>, v: u8) {
 
 /// Read a non-binary ECI value starting at `cw[start]` (after FNC2). Emits an
 /// [`Segment::eci`] (flushing any pending bytes) and returns the next index.
+///
+/// An FNC2 with nothing but pad codewords after it is not an ECI at all: in the final
+/// data position it marks a Structured Append symbol, and the two characters before
+/// it are the symbol's position and the symbol count. They are dropped from the
+/// payload (the codewords in [`DotCodeMeta`] keep them) and decoding ends.
 fn read_eci(cw: &[u8], start: usize, bytes: &mut Vec<u8>, segments: &mut Vec<Segment>) -> usize {
+    if cw[start.min(cw.len())..].iter().all(|&c| c == LATCH_BC) {
+        bytes.truncate(bytes.len().saturating_sub(2));
+        return cw.len();
+    }
     let (eci, next) = match cw.get(start) {
         Some(&first) if first < 40 => (first as u32, start + 1),
         Some(&a) => {

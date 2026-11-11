@@ -628,3 +628,115 @@ fn structured_append_trailer_is_not_payload() {
         assert_eq!(enc.encode(&decoded).unwrap(), reference);
     }
 }
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::codes::dotcode::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
+    let enc = DotCodeEncoder::new();
+    let good = enc.build_bytes(b"DOTCODE").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut bare = good.clone();
+    bare.meta = SymbolMeta::Generic;
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // Empty input and out-of-range widths.
+    assert!(matches!(
+        enc.build_bytes(b""),
+        Err(anyd::Error::InvalidData { .. })
+    ));
+    assert!(enc.build_gs1_reduced(b"").is_err());
+    for width in [0usize, MIN_SIZE - 1, MAX_SIZE + 1] {
+        assert!(
+            matches!(
+                enc.build_bytes_width(b"A", width),
+                Err(anyd::Error::InvalidParameter { .. })
+            ),
+            "width {width}"
+        );
+    }
+    // A width too narrow for the data needs more than 200 rows.
+    assert!(matches!(
+        enc.build_bytes_width(&[b'x'; 300], MIN_SIZE),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(enc.build_bytes_width(b"A", MIN_SIZE).is_ok());
+    assert!(enc.build_bytes_width(b"A", MAX_SIZE).is_ok());
+    // Hand-built metadata: every field is checked.
+    let SymbolMeta::DotCode(meta) = &good.meta else {
+        panic!("expected DotCodeMeta");
+    };
+    let edit = |f: &dyn Fn(&mut DotCodeMeta)| {
+        let mut m = meta.clone();
+        f(&mut m);
+        anyd::Symbol::new(Symbology::DotCode, Vec::new(), SymbolMeta::DotCode(m))
+    };
+    assert!(enc.encode(&edit(&|_| {})).is_ok());
+    assert!(enc.encode(&edit(&|m| m.mask = 8)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords[0] = 113)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords.clear())).is_err());
+    assert!(enc.encode(&edit(&|m| m.width += 1)).is_err(), "even w + h");
+    assert!(enc.encode(&edit(&|m| m.width = MAX_SIZE + 1)).is_err());
+    assert!(enc.encode(&edit(&|m| m.height = MIN_SIZE - 1)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords.push(106))).is_err());
+    // The default metadata names no symbol: it has no codewords.
+    let default = anyd::Symbol::new(
+        Symbology::DotCode,
+        Vec::new(),
+        SymbolMeta::DotCode(DotCodeMeta::default()),
+    );
+    assert!(enc.encode(&default).is_err());
+    // A linear pattern is not a DotCode symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        DotCodeDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn every_mask_round_trips() {
+    // Masks 0-3 and their corner-forced variants 4-7, at both fold directions. A
+    // forced mask that changes nothing (the corners were already lit) reads back as
+    // the plain mask; anything else must come back exactly.
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for (payload, width) in [
+        (&b"Mask test 12345"[..], None),
+        (b"Ba", None),
+        (b"fold", Some(12)),
+    ] {
+        let built = match width {
+            Some(w) => enc.build_bytes_width(payload, w).unwrap(),
+            None => enc.build_bytes(payload).unwrap(),
+        };
+        let SymbolMeta::DotCode(meta) = &built.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        for mask in 0..8u8 {
+            let mut m = meta.clone();
+            m.mask = mask;
+            let symbol = anyd::Symbol::new(Symbology::DotCode, Vec::new(), SymbolMeta::DotCode(m));
+            let encoding = enc.encode(&symbol).unwrap();
+            let decoded = dec.decode(&encoding).unwrap();
+            assert_eq!(decoded.payload_bytes(), payload, "mask {mask}");
+            let SymbolMeta::DotCode(got) = &decoded.meta else {
+                panic!("expected DotCodeMeta");
+            };
+            assert!(
+                got.mask == mask || got.mask + 4 == mask,
+                "mask {mask} read as {}",
+                got.mask
+            );
+            assert_eq!(got.codewords, meta.codewords, "mask {mask}");
+            assert_eq!(enc.encode(&decoded).unwrap(), encoding, "mask {mask}");
+        }
+    }
+}

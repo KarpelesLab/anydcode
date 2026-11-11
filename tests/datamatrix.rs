@@ -895,3 +895,120 @@ fn any_segmentation_round_trips() {
     }
     assert!(accepted > 500 && refused > 100, "{accepted} / {refused}");
 }
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::codes::datamatrix::Encodation;
+    use anyd::segment::{Segment, SegmentView};
+    use anyd::symbol::{Symbol, SymbolMeta};
+    use anyd::symbology::Symbology;
+    let enc = DataMatrixEncoder::new();
+    let good = enc.build(b"DATA").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let bare = Symbol::new(
+        Symbology::DataMatrix,
+        good.segments.clone(),
+        SymbolMeta::Generic,
+    );
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // One encodation per segment, byte segments only, a real square size.
+    let mut extra = good.clone();
+    extra.segments.push(Segment::byte(b"x".to_vec()));
+    assert!(matches!(
+        enc.encode(&extra),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut numeric = good.clone();
+    numeric.segments = vec![Segment::numeric(b"12".to_vec())];
+    assert!(matches!(
+        enc.encode(&numeric),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    for size in [0usize, 9, 11, 28, 146] {
+        assert!(matches!(
+            enc.build_sized(b"A", size),
+            Err(anyd::Error::InvalidParameter { .. })
+        ));
+        assert_eq!(DataMatrixEncoder::scratch_len(size), None);
+        assert_eq!(DataMatrixEncoder::storage_len(size), None);
+    }
+    // The heap-free entry points report the same problems, plus short buffers.
+    let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+    let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+    let view = [SegmentView::byte(b"DATA")];
+    assert!(matches!(
+        enc.encode_into(&view, &[], 12, &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        enc.encode_into(&view, &[Encodation::Ascii], 13, &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        enc.encode_into(
+            &[SegmentView::numeric(b"12")],
+            &[Encodation::Ascii],
+            12,
+            &mut scratch,
+            &mut storage
+        ),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    assert!(matches!(
+        enc.encode_data_into(b"DATA", Some(13), &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let need = DataMatrixEncoder::scratch_len(12).unwrap();
+    assert!(matches!(
+        enc.encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch[..need - 1],
+            &mut storage
+        ),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(matches!(
+        enc.encode_data_into(b"DATA", None, &mut scratch[..2], &mut storage),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    let need = DataMatrixEncoder::storage_len(12).unwrap();
+    assert!(
+        enc.encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch,
+            &mut storage[..need - 1]
+        )
+        .is_err()
+    );
+    // Exactly the advertised buffers are enough.
+    let scratch_len = DataMatrixEncoder::scratch_len(12).unwrap();
+    let buf = enc
+        .encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch[..scratch_len],
+            &mut storage[..need],
+        )
+        .unwrap();
+    assert_eq!((buf.width(), buf.height()), (12, 12));
+    // A linear pattern is not a Data Matrix symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        DataMatrixDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}

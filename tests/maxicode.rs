@@ -509,3 +509,92 @@ fn decoder_never_panics_on_garbage() {
         }
     }
 }
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::symbology::Symbology;
+    let enc = MaxiCodeEncoder::new();
+    let good = enc.build(b"MAXI").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut bare = good.clone();
+    bare.meta = SymbolMeta::Generic;
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // Modes outside 2..=6, a body of the wrong length, a carrier-less mode 2/3.
+    for mode in [0u8, 1, 7, 255] {
+        let broken = with_meta(&good, |m| m.mode = mode);
+        assert!(enc.encode(&broken).is_err(), "mode {mode}");
+        assert!(enc.build_mode(b"X", mode).is_err(), "mode {mode}");
+    }
+    for mode in [2u8, 3] {
+        assert!(enc.build_mode(b"X", mode).is_err(), "build_mode({mode})");
+    }
+    for mode in [0u8, 1, 4, 5, 6, 7] {
+        assert!(
+            enc.build_structured(mode, "12345", 840, 1, b"X").is_err(),
+            "build_structured({mode})"
+        );
+    }
+    let broken = with_meta(&good, |m| m.body.pop().map(|_| ()).unwrap());
+    assert!(enc.encode(&broken).is_err());
+    let broken = with_meta(&good, |m| m.mode = 5);
+    assert!(
+        enc.encode(&broken).is_err(),
+        "mode 5 with a 93-codeword body"
+    );
+    let structured = enc.build_structured(2, "12345", 840, 1, b"X").unwrap();
+    let broken = with_meta(&structured, |m| m.carrier = None);
+    assert!(enc.encode(&broken).is_err());
+    assert!(enc.build_structured(2, "12345", 1000, 1, b"X").is_err());
+    assert!(enc.build_structured(2, "12345", 1, 1000, b"X").is_err());
+    assert!(enc.build_structured(2, "1234567890", 1, 1, b"X").is_err());
+    assert!(enc.build_structured(3, "ABCDEFG", 1, 1, b"X").is_err());
+    assert!(enc.build_structured(3, "ab{c", 1, 1, b"X").is_err());
+    // Mode 3 postcodes are upper-cased and space-padded to six characters.
+    let padded = enc.build_structured(3, "b1050", 56, 999, b"X").unwrap();
+    assert_eq!(meta(&padded).carrier.as_ref().unwrap().postcode, "B1050 ");
+    assert_lossless(&padded);
+    // The default metadata is an encodable, empty Mode 4 symbol.
+    let empty = anyd::Symbol::new(
+        Symbology::MaxiCode,
+        Vec::new(),
+        SymbolMeta::MaxiCode(MaxiCodeMeta::default()),
+    );
+    let decoded = MaxiCodeDecoder::new()
+        .decode(&enc.encode(&empty).unwrap())
+        .unwrap();
+    assert_eq!(meta(&decoded), &MaxiCodeMeta::default());
+    // A linear pattern is not a MaxiCode symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        MaxiCodeDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn every_byte_value_round_trips_in_every_mode() {
+    // Each of the 256 byte values lives in one of the five code sets; reaching it
+    // from Code Set A and from Code Set B, then leaving it again, exercises every
+    // latch the encoder emits.
+    let enc = MaxiCodeEncoder::new();
+    for b in 0..=255u8 {
+        let payload = [b, b'A', b, b, b'a', b];
+        for mode in 4..=6 {
+            let sym = enc.build_mode(&payload, mode).unwrap();
+            assert_eq!(sym.payload_bytes(), payload, "byte {b:#04x} mode {mode}");
+            assert_lossless(&sym);
+        }
+        let sym = enc.build_structured(3, "AB12", 124, 7, &payload).unwrap();
+        assert_eq!(sym.payload_bytes(), payload, "byte {b:#04x} mode 3");
+        assert_lossless(&sym);
+    }
+}

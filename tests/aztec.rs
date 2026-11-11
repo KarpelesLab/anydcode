@@ -538,3 +538,58 @@ fn every_length_up_to_capacity_round_trips() {
         assert!(refused, "capacity limit never reached");
     }
 }
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::symbol::Symbol;
+    use anyd::symbology::Symbology;
+    let enc = AztecEncoder::new();
+    let good = enc.build_text("AZTEC").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::DataMatrix;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let bare = Symbol::new(Symbology::Aztec, good.segments.clone(), SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // ECI segments decode but cannot be encoded, when building or rendering.
+    let eci = vec![Segment::eci(26), Segment::byte(b"x".to_vec())];
+    assert!(matches!(
+        enc.build(eci.clone()),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    let with_eci = Symbol::new(Symbology::Aztec, eci, good.meta.clone());
+    assert!(matches!(
+        enc.encode(&with_eci),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    // No symbol holds zero data codewords, so an empty message is refused.
+    assert!(matches!(
+        enc.build(vec![Segment::byte(Vec::new())]),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(matches!(
+        enc.build(Vec::new()),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    // Segments of any data mode are flattened into the one byte payload.
+    let mixed = enc
+        .build(vec![
+            Segment::numeric(b"123".to_vec()),
+            Segment::alphanumeric(b"AB".to_vec()),
+            Segment::byte(b"c".to_vec()),
+        ])
+        .unwrap();
+    assert_eq!(mixed.segments, vec![Segment::byte(b"123ABc".to_vec())]);
+    // A linear pattern is not an Aztec symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        AztecDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}

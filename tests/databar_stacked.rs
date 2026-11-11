@@ -332,3 +332,106 @@ fn expanded_stacked_rejects_impossible_dimensions() {
         assert_eq!(dec.decode(&encoding).unwrap(), symbol, "{columns} columns");
     }
 }
+
+/// The parameter and input error paths of the stacked variants.
+#[test]
+fn rejects_bad_parameters_and_input() {
+    use anyd::error::Error;
+    use anyd::output::BitMatrix;
+    use anyd::segment::Segment;
+    use anyd::symbol::Symbol;
+
+    let enc = DataBarEncoder::new();
+    let dec = DataBarDecoder::new();
+
+    // Column pairs per row: 1..=11.
+    for columns in [0, 12, usize::MAX] {
+        assert!(
+            matches!(
+                enc.build_expanded_stacked(b"1012A", columns),
+                Err(Error::InvalidParameter { .. })
+            ),
+            "{columns} columns"
+        );
+        let symbol = Symbol::new(
+            Symbology::DataBarExpandedStacked,
+            vec![Segment::byte(b"1012A".to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::expanded_stacked(columns)),
+        );
+        assert!(enc.encode(&symbol).is_err(), "{columns} columns");
+    }
+    // Expanded Stacked metadata without a column count, and a payload that is not a
+    // GS1 element string.
+    let symbol = Symbol::new(
+        Symbology::DataBarExpandedStacked,
+        vec![Segment::byte(b"1012A".to_vec())],
+        SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::ExpandedStacked)),
+    );
+    assert!(enc.encode(&symbol).is_err());
+    assert!(enc.build_expanded_stacked(b"", 2).is_err());
+    assert!(enc.build_expanded_stacked(b"10`", 2).is_err());
+
+    // GTIN input for the two-row variants: same rules as Omnidirectional.
+    for gtin in [
+        &b""[..],
+        b"123",
+        b"12345678901234567",
+        b"12345678901a3",
+        b"00950110153000",
+    ] {
+        assert!(enc.build_stacked(gtin).is_err(), "{gtin:?}");
+        assert!(enc.build_stacked_omni(gtin).is_err(), "{gtin:?}");
+    }
+    // A stacked symbology whose payload is not a numeric GTIN segment.
+    let symbol = Symbol::new(
+        Symbology::DataBarStacked,
+        vec![Segment::byte(b"0095011015300".to_vec())],
+        SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Stacked)),
+    );
+    assert!(matches!(
+        enc.encode(&symbol),
+        Err(Error::InvalidData { .. })
+    ));
+
+    // Matrices of no stacked DataBar shape.
+    for (width, height) in [
+        (0, 0),
+        (50, 1),
+        (50, 2),
+        (50, 4),
+        (49, 3),
+        (51, 5),
+        (102, 3),
+        (53, 2),
+    ] {
+        let m = BitMatrix::new(width, height, 1);
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{width}x{height}"
+        );
+    }
+    // Blank grids of a valid shape hold no symbol.
+    for (width, height) in [(50, 3), (50, 5), (53, 1), (102, 5), (151, 9)] {
+        let m = BitMatrix::new(width, height, 1);
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{width}x{height}"
+        );
+    }
+
+    // The two data rows of a stacked symbol exchanged: the finders no longer sit
+    // where the checksum says.
+    let Encoding::Matrix(m) = enc
+        .encode(&enc.build_stacked(b"0095011015300").unwrap())
+        .unwrap()
+    else {
+        panic!("expected matrix");
+    };
+    let mut swapped = m.clone();
+    for x in 0..m.width() {
+        swapped.set(x, 0, m.get(x, 2));
+        swapped.set(x, 2, m.get(x, 0));
+    }
+    assert!(dec.decode(&Encoding::Matrix(m)).is_ok());
+    assert!(dec.decode(&Encoding::Matrix(swapped)).is_err());
+}

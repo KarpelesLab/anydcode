@@ -485,11 +485,33 @@ fn run(code: &Code, t: &Trial) -> Outcome {
         let Some(c) = crop(&sc.image, padded) else {
             continue;
         };
+        let tc = Instant::now();
         let syms = if let Some(axis) = lin {
             anyd::pipeline::scan_linear_at(&frame(&c), axis)
         } else {
             anyd::pipeline::scan_all(&frame(&c))
         };
+        if std::env::var("LIVEEVAL_CROPS").is_ok() {
+            if lin.is_none() {
+                let t = Instant::now();
+                let _ = anyd::pipeline::scan_2d(&frame(&c));
+                let d2 = 1000.0 * t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                let _ = anyd::pipeline::scan_1d(&frame(&c));
+                eprintln!(
+                    "  2d={d2:.0}ms 1d={:.0}ms",
+                    1000.0 * t.elapsed().as_secs_f64()
+                );
+            }
+            eprintln!(
+                "crop {}x{} axis={:?} {:.0}ms -> {:?}",
+                c.width(),
+                c.height(),
+                lin.map(f32::to_degrees),
+                1000.0 * tc.elapsed().as_secs_f64(),
+                reads(&syms)
+            );
+        }
         crop_reads.extend(reads(&syms));
     }
     secs[1] = t0.elapsed().as_secs_f64();

@@ -142,9 +142,18 @@ fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
                     segments.push(Segment::byte(core::mem::take(&mut ascii)));
                     encodations.push(Encodation::Ascii);
                 }
-                let bytes = read_base256(data, &mut i)?;
+                let (bytes, counted) = read_base256(data, &mut i)?;
+                let short = bytes.len() < 250;
                 segments.push(Segment::byte(bytes));
                 encodations.push(Encodation::Base256);
+                // A run that reaches the end of the symbol is normally written with
+                // a zero length field, and that is what the encoder does for a final
+                // Base256 segment. One that carries its byte count instead is told
+                // apart by an empty ASCII segment after it.
+                if counted && short && i == data.len() {
+                    segments.push(Segment::byte(Vec::new()));
+                    encodations.push(Encodation::Ascii);
+                }
             }
             _ => {
                 return Err(Error::Unsupported {
@@ -167,13 +176,15 @@ fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
 }
 
 /// Read one Base256 run starting at `*i` (positioned just after the latch),
-/// advancing `*i` past it. Length field and payload are de-randomized.
-fn read_base256(data: &[u8], i: &mut usize) -> Result<Vec<u8>> {
+/// advancing `*i` past it. Length field and payload are de-randomized. Also returns
+/// whether the length field held a byte count (rather than 0, "to the end of the
+/// symbol").
+fn read_base256(data: &[u8], i: &mut usize) -> Result<(Vec<u8>, bool)> {
     let pos0 = *i + 1;
     let l1 = unrandomize_255(*data.get(*i).ok_or_else(trunc)?, pos0);
     *i += 1;
     let count = if l1 == 0 {
-        // "Rest of the symbol" length; encoder never emits this, but honor it.
+        // The run takes every remaining data codeword of the symbol.
         data.len() - *i
     } else if l1 <= 249 {
         l1 as usize
@@ -189,7 +200,7 @@ fn read_base256(data: &[u8], i: &mut usize) -> Result<Vec<u8>> {
         bytes.push(unrandomize_255(*data.get(*i).ok_or_else(trunc)?, pos));
         *i += 1;
     }
-    Ok(bytes)
+    Ok((bytes, l1 != 0))
 }
 
 /// Inverse of the Base256 "255-state" randomizing algorithm.

@@ -207,6 +207,10 @@ pub fn value_in_set(set: usize, byte: u8) -> Option<u8> {
         .map(|p| p as u8)
 }
 
+/// The Code Set A Pad codeword, which in the first data position introduces a
+/// Structured Append sequence indicator.
+const STRUCTURED_APPEND_PAD: u8 = 33;
+
 /// Run the code-set state machine over a data-codeword body, recovering the payload
 /// bytes as [`Segment`]s (byte runs split by ECI switches). Trailing padding is
 /// dropped. This is the shared source of truth used by both the decoder and the
@@ -219,7 +223,15 @@ pub(crate) fn decode_body(body: &[u8]) -> Vec<Segment> {
     let mut set = 0usize;
     let mut last_set = 0usize;
     let mut shift: i32 = -1;
-    let mut i = 0;
+    // A Pad in the first data position announces Structured Append: the codeword
+    // after it is the sequence indicator (position − 1 in its high three bits, symbol
+    // count − 1 in the low three), not a character. It stays in the body, so the
+    // symbol re-encodes exactly, but is no part of the payload.
+    let structured_append = matches!(
+        body,
+        [STRUCTURED_APPEND_PAD, seq, ..] if (seq & 7) >= 1 && (seq >> 3) <= (seq & 7)
+    );
+    let mut i = if structured_append { 2 } else { 0 };
 
     while i < body.len() {
         let value = (body[i] & 0x3F) as usize;

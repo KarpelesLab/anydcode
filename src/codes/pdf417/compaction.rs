@@ -170,7 +170,7 @@ pub fn decode_segments(data: &[u32]) -> Result<Vec<Segment>> {
                 while i < cws.len() && cws[i] < 900 {
                     i += 1;
                 }
-                let bytes = byte_decode(&cws[start..i], latch);
+                let bytes = byte_decode(&cws[start..i], latch)?;
                 if !bytes.is_empty() {
                     segments.push(Segment::byte(bytes));
                 }
@@ -448,11 +448,15 @@ fn byte_encode(bytes: &[u8], out: &mut Vec<u32>) {
     }
 }
 
-fn byte_decode(slice: &[u32], mode: u32) -> Vec<u8> {
+/// Invert Byte compaction. A five-codeword group is a base-900 number below 256^6
+/// and a lone codeword is one byte; anything larger is not Byte compaction output
+/// and is rejected rather than truncated to fit.
+fn byte_decode(slice: &[u32], mode: u32) -> Result<Vec<u8>> {
     let len = slice.len();
     if len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    let bad = || Error::undecodable("invalid PDF417 byte compaction codeword");
     let groups = if mode == LATCH_BYTE_6 {
         len / 5
     } else {
@@ -465,14 +469,17 @@ fn byte_decode(slice: &[u32], mode: u32) -> Vec<u8> {
         for &c in cws {
             v = v * 900 + c as u64;
         }
+        if v >> 48 != 0 {
+            return Err(bad());
+        }
         for i in 0..6 {
             out.push((v >> (8 * (5 - i))) as u8);
         }
     }
     for &c in &slice[groups * 5..] {
-        out.push(c as u8);
+        out.push(u8::try_from(c).map_err(|_| bad())?);
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +616,31 @@ mod tests {
         // A dangling or out-of-range byte shift is malformed.
         assert!(decode_segments(&[3, 810, 913]).is_err());
         assert!(decode_segments(&[4, 810, 913, 256]).is_err());
+    }
+
+    /// Byte compaction carries six bytes in five codewords (a base-900 number below
+    /// 256^6) and leftover bytes one per codeword (0..=255). Codewords outside those
+    /// ranges are not bytes; they must be refused, not truncated into some.
+    #[test]
+    fn byte_compaction_rejects_out_of_range_codewords() {
+        // A lone "byte" codeword of 300 (was read as 300 mod 256 = 44).
+        assert!(decode_segments(&[3, 901, 300]).is_err());
+        assert!(decode_segments(&[4, 901, 65, 899]).is_err());
+        // Five codewords whose base-900 value needs more than 48 bits (was read
+        // with the high bits dropped), under either latch.
+        assert!(decode_segments(&[7, 924, 899, 899, 899, 899, 899]).is_err());
+        assert!(decode_segments(&[8, 901, 899, 899, 899, 899, 899, 65]).is_err());
+        // The largest valid group, 256^6 - 1, still decodes.
+        assert_eq!(
+            decode_segments(&[7, 924, 429, 11, 71, 222, 855]).unwrap(),
+            vec![Segment::byte(vec![0xff; 6])]
+        );
+        assert_eq!(
+            encode_segments(&[Segment::byte(vec![0xff; 6])]).unwrap(),
+            vec![924, 429, 11, 71, 222, 855]
+        );
+        // One past it does not.
+        assert!(decode_segments(&[7, 924, 429, 11, 71, 222, 856]).is_err());
     }
 
     /// Garbage codeword streams must decode or fail cleanly, never panic.

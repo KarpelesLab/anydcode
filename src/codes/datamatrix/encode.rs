@@ -181,13 +181,17 @@ impl DataMatrixEncoder {
         let forced = forced.map(spec_for).transpose()?;
         let limit = forced.map_or(LARGEST_SQUARE.data_cw, |s| s.data_cw);
         let mut cw = vec![0u8; limit];
-        let n = write_codewords(canonical_runs(data), &mut cw).ok_or(Error::capacity(
-            if forced.is_some() {
-                "data does not fit in the requested size"
-            } else {
-                "data exceeds the largest square Data Matrix"
-            },
-        ))?;
+        // Canonical runs are never empty Base256, so the only failure is overflow.
+        let n = match write_codewords(canonical_runs(data), &mut cw) {
+            Ok(written) => written.len,
+            Err(_) => {
+                return Err(Error::capacity(if forced.is_some() {
+                    "data does not fit in the requested size"
+                } else {
+                    "data exceeds the largest square Data Matrix"
+                }));
+            }
+        };
         let spec = match forced {
             Some(s) => s,
             None => smallest_square_for(n).expect("codeword count within the largest size"),
@@ -306,19 +310,24 @@ fn render_into<'s, 'a>(
     }
     let limit = forced.map_or(LARGEST_SQUARE.data_cw, |s| s.data_cw);
     let avail = limit.min(scratch.len());
-    let Some(n) = write_codewords(segs, &mut scratch[..avail]) else {
-        return Err(Error::capacity(if avail < limit {
-            "Data Matrix scratch buffer too small"
-        } else if forced.is_some() {
-            "data does not fit in the symbol size"
-        } else {
-            "data exceeds the largest square Data Matrix"
-        }));
+    let written = match write_codewords(segs, &mut scratch[..avail]) {
+        Ok(written) => written,
+        Err(WriteError::EmptyBase256) => return Err(empty_base256_error()),
+        Err(WriteError::Full) => {
+            return Err(Error::capacity(if avail < limit {
+                "Data Matrix scratch buffer too small"
+            } else if forced.is_some() {
+                "data does not fit in the symbol size"
+            } else {
+                "data exceeds the largest square Data Matrix"
+            }));
+        }
     };
     let spec = match forced {
         Some(s) => s,
-        None => smallest_square_for(n).expect("codeword count within the largest size"),
+        None => smallest_square_for(written.len).expect("codeword count within the largest size"),
     };
+    let n = written.checked_len(&spec)?;
     if scratch.len() < scratch_len_for(&spec) {
         return Err(Error::capacity("Data Matrix scratch buffer too small"));
     }
@@ -362,20 +371,66 @@ impl Codewords<'_> {
     }
 }
 
-/// Encode all segments into `out` as the data codeword stream (before padding),
-/// returning its length, or `None` if it does not fit.
+/// Why a codeword stream could not be written.
+enum WriteError {
+    /// The codewords do not fit the buffer.
+    Full,
+    /// An empty Base256 segment is followed by more codewords (see
+    /// [`empty_base256_error`]).
+    EmptyBase256,
+}
+
+/// A written codeword stream.
+struct Written {
+    /// Number of data codewords, before padding.
+    len: usize,
+    /// The stream ends in an empty Base256 run, whose zero length field reads as
+    /// "to the end of the symbol": it is only valid if no padding follows.
+    to_symbol_end: bool,
+}
+
+impl Written {
+    /// The codeword count, once `spec` is known to hold the stream as it stands.
+    fn checked_len(&self, spec: &SquareSpec) -> Result<usize> {
+        if self.to_symbol_end && self.len != spec.data_cw {
+            return Err(empty_base256_error());
+        }
+        Ok(self.len)
+    }
+}
+
+/// A Base256 length field of 0 means "the rest of the symbol", so an empty run can
+/// only be written as the very last codewords of a symbol it fills exactly; anywhere
+/// else a reader would take whatever follows (segments, padding) as its bytes.
+fn empty_base256_error() -> Error {
+    Error::invalid_data("an empty Base256 segment must end a symbol it fills exactly")
+}
+
+/// Encode all segments into `out` as the data codeword stream (before padding).
 fn write_codewords<'s>(
     segs: impl Iterator<Item = (Encodation, &'s [u8])>,
     out: &mut [u8],
-) -> Option<usize> {
+) -> core::result::Result<Written, WriteError> {
     let mut cw = Codewords { buf: out, len: 0 };
+    // Where an empty Base256 run ended, if one has been written.
+    let mut open_end = None;
     for (enc, bytes) in segs {
         match enc {
-            Encodation::Ascii => ascii_encode(&mut cw, bytes)?,
-            Encodation::Base256 => base256_encode(&mut cw, bytes)?,
+            Encodation::Ascii => ascii_encode(&mut cw, bytes),
+            Encodation::Base256 => base256_encode(&mut cw, bytes),
+        }
+        .ok_or(WriteError::Full)?;
+        if open_end.is_some_and(|end| cw.len > end) {
+            return Err(WriteError::EmptyBase256);
+        }
+        if enc == Encodation::Base256 && bytes.is_empty() {
+            open_end = Some(cw.len);
         }
     }
-    Some(cw.len)
+    Ok(Written {
+        len: cw.len,
+        to_symbol_end: open_end.is_some(),
+    })
 }
 
 /// Append `bytes` in ASCII encodation: digit pairs pack into one codeword, other
@@ -464,7 +519,9 @@ mod tests {
 
     fn codewords<'s>(segs: impl Iterator<Item = (Encodation, &'s [u8])>) -> Vec<u8> {
         let mut buf = vec![0u8; LARGEST_SQUARE.data_cw];
-        let n = write_codewords(segs, &mut buf).unwrap();
+        let Ok(Written { len: n, .. }) = write_codewords(segs, &mut buf) else {
+            panic!("codewords do not fit");
+        };
         buf.truncate(n);
         buf
     }

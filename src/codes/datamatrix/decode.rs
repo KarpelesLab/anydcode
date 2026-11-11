@@ -100,19 +100,33 @@ fn deinterleave_and_correct(full: &[u8], spec: &SquareSpec) -> Result<Vec<u8>> {
 
 /// Parse corrected data codewords into segments and their encodations, stopping at
 /// the first pad codeword. ASCII is the base state; a Base256 latch introduces a
-/// length-prefixed randomized run and then returns to ASCII.
+/// length-prefixed randomized run and then returns to ASCII. An ASCII run is one
+/// segment unless it holds digits that were not paired the way the encoder pairs
+/// them, in which case it is split there so that it re-encodes codeword for codeword.
 fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
     let mut segments = Vec::new();
     let mut encodations = Vec::new();
     let mut ascii: Vec<u8> = Vec::new();
+    // Whether the previous codeword was a digit encoded on its own. The encoder
+    // packs two adjacent digits of one ASCII segment into a pair codeword, so a lone
+    // digit followed by more digits can only be reproduced as the end of a segment.
+    let mut lone_digit = false;
     let mut i = 0;
 
     while i < data.len() {
         let cw = data[i];
         i += 1;
+        let after_lone_digit = core::mem::take(&mut lone_digit);
+        if after_lone_digit && matches!(cw, 49..=58 | 130..=229) {
+            segments.push(Segment::byte(core::mem::take(&mut ascii)));
+            encodations.push(Encodation::Ascii);
+        }
         match cw {
             PAD => break,
-            1..=128 => ascii.push(cw - 1),
+            1..=128 => {
+                ascii.push(cw - 1);
+                lone_digit = matches!(cw, 49..=58);
+            }
             130..=229 => {
                 let v = cw - 130;
                 ascii.push(b'0' + v / 10);

@@ -23,6 +23,13 @@
 //! `encode(decode(encoding)) == encoding` holds. Segments always use [`Mode::Byte`];
 //! [`DataMatrixMeta`] records the square size and the per-segment encodation.
 //!
+//! A symbol segmented any other way re-encodes identically too. The decoder merges
+//! adjacent ASCII runs, except where that would change how digits pair up: a digit
+//! encoded on its own and followed by another digit ends its segment, since the
+//! encoder packs two adjacent digits of one segment into a single codeword. An empty
+//! Base256 segment is only accepted as the last codewords of a symbol it fills
+//! exactly, because its zero length field means "to the end of the symbol".
+//!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 //! [`Mode::Byte`]: crate::segment::Mode::Byte

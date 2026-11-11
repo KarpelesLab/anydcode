@@ -580,3 +580,109 @@ fn exactly_full_and_one_over_at_every_size() {
         assert!(enc.build_sized(&vec![0xA5u8; cap - field], size).is_err());
     }
 }
+
+/// A hand-segmented symbol: `segments` paired with their encodations at `size`.
+fn hand_built(
+    segments: &[(anyd::codes::datamatrix::Encodation, &[u8])],
+    size: usize,
+) -> anyd::symbol::Symbol {
+    anyd::symbol::Symbol::new(
+        anyd::symbology::Symbology::DataMatrix,
+        segments
+            .iter()
+            .map(|&(_, bytes)| anyd::segment::Segment::byte(bytes.to_vec()))
+            .collect(),
+        anyd::symbol::SymbolMeta::DataMatrix(anyd::codes::datamatrix::DataMatrixMeta {
+            symbol_size: size,
+            encodations: segments.iter().map(|&(e, _)| e).collect(),
+        }),
+    )
+}
+
+#[test]
+fn unpaired_digits_reencode_identically() {
+    // ASCII encodation packs two adjacent digits into one codeword, but nothing
+    // obliges an encoder to: "1" then "23" (a segment boundary between them) is three
+    // digits in two codewords, "1","2","3" in three. Whatever the pairing, decoding
+    // and re-encoding must give back the same modules — which a single merged "123"
+    // segment (re-paired as "12","3") does not.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let cases: &[&[(anyd::codes::datamatrix::Encodation, &[u8])]] = &[
+        &[(Ascii, b"1"), (Ascii, b"23")],
+        &[(Ascii, b"1"), (Ascii, b"2"), (Ascii, b"3")],
+        &[(Ascii, b"A1"), (Ascii, b"2")],
+        &[(Ascii, b"12"), (Ascii, b"3"), (Ascii, b"45")],
+        &[(Ascii, b"0"), (Ascii, b"09\x80")],
+        &[
+            (Ascii, b"7"),
+            (Base256, b"\xff"),
+            (Ascii, b"7"),
+            (Ascii, b"7"),
+        ],
+        // Boundaries that change nothing still merge into one segment.
+        &[(Ascii, b"12"), (Ascii, b"34")],
+        &[(Ascii, b"1"), (Ascii, b"A"), (Ascii, b"2")],
+    ];
+    for segments in cases {
+        let symbol = hand_built(segments, 16);
+        let encoding = enc.encode(&symbol).unwrap();
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(decoded.payload_bytes(), symbol.payload_bytes());
+        assert_eq!(
+            enc.encode(&decoded).unwrap(),
+            encoding,
+            "segments {segments:?} decoded as {:?}",
+            decoded.segments
+        );
+    }
+    // The split happens only where the pairing demands it.
+    let merged = dec
+        .decode(&enc.encode(&hand_built(cases[6], 16)).unwrap())
+        .unwrap();
+    assert_eq!(merged.segments.len(), 1);
+    let split = dec
+        .decode(&enc.encode(&hand_built(cases[0], 16)).unwrap())
+        .unwrap();
+    assert_eq!(split, hand_built(cases[0], 16));
+}
+
+#[test]
+fn empty_base256_segment_must_end_the_symbol() {
+    // A Base256 length field of 0 means "to the end of the symbol", so an empty
+    // Base256 run is only expressible as the last two codewords of a full symbol.
+    // Anywhere else the reader would take the rest of the symbol (the following
+    // segments, the padding) as the run's bytes.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let refused: &[&[(anyd::codes::datamatrix::Encodation, &[u8])]] = &[
+        &[(Base256, b"")],
+        &[(Base256, b""), (Ascii, b"A")],
+        &[(Ascii, b"A"), (Base256, b""), (Base256, b"")],
+        &[(Ascii, b"AB"), (Base256, b"")],
+    ];
+    for segments in refused {
+        let symbol = hand_built(segments, 12);
+        assert!(
+            matches!(enc.encode(&symbol), Err(anyd::Error::InvalidData { .. })),
+            "segments {segments:?}"
+        );
+        // The heap-free path agrees.
+        let views: Vec<_> = symbol.segments.iter().map(|s| s.view()).collect();
+        let encodations: Vec<_> = segments.iter().map(|&(e, _)| e).collect();
+        let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+        let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+        assert!(
+            enc.encode_into(&views, &encodations, 12, &mut scratch, &mut storage)
+                .is_err()
+        );
+    }
+    // 12x12 holds five data codewords: "ABC", the latch and the zero length.
+    let symbol = hand_built(&[(Ascii, b"ABC"), (Base256, b"")], 12);
+    let encoding = enc.encode(&symbol).unwrap();
+    let decoded = dec.decode(&encoding).unwrap();
+    assert_eq!(decoded, symbol);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+}

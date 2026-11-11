@@ -338,7 +338,11 @@ fn decode_alpha(reader: &mut BitReader<'_>, base: u8) -> Result<(Vec<u8>, Next)>
 }
 
 fn decode_numeral(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Next)> {
+    // Pad digits in the final group: 0..=2. A third would leave a group of no digits.
     let p = reader.read(2)? as usize;
+    if p == 3 {
+        return Err(Error::undecodable("invalid Grid Matrix numeral padding"));
+    }
     let last_len = 3 - p; // 1..=3
     let mut groups = Vec::new();
     let control = loop {
@@ -349,6 +353,11 @@ fn decode_numeral(reader: &mut BitReader<'_>) -> Result<(Vec<u8>, Next)> {
             break v;
         }
     };
+    // Numeral mode always carries at least one group (the encoder has no way to
+    // write a run of no digits either).
+    if groups.is_empty() {
+        return Err(Error::undecodable("empty Grid Matrix numeral run"));
+    }
     let mut data = Vec::new();
     let count = groups.len();
     for (k, &g) in groups.iter().enumerate() {
@@ -588,6 +597,59 @@ mod tests {
                 *bit = (selector >> (3 - k)) & 1 != 0;
             }
             let _ = decode_segments(&bits);
+        }
+    }
+
+    /// Whatever the decoder accepts must be content the encoder can write back, and
+    /// writing it back must be stable: `decode(encode(decode(x))) == decode(x)`.
+    #[test]
+    fn accepted_bitstreams_reencode() {
+        let mut seed = 0x0A1D_014B_17C0_FFEEu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut accepted = 0;
+        for round in 0..20_000 {
+            let len = 20 + (next() % 200) as usize;
+            let mut bits: Vec<bool> = (0..len).map(|_| next() & 1 != 0).collect();
+            let selector = [2, 3, 4, 6][round % 4];
+            for (k, bit) in bits.iter_mut().take(4).enumerate() {
+                *bit = (selector >> (3 - k)) & 1 != 0;
+            }
+            let Ok(segs) = decode_segments(&bits) else {
+                continue;
+            };
+            accepted += 1;
+            let again = encode_segments(&segs)
+                .unwrap_or_else(|e| panic!("decoded {segs:?} does not re-encode: {e}"));
+            assert_eq!(decode_segments(&again).unwrap(), segs);
+        }
+        assert!(accepted > 1000, "only {accepted} streams accepted");
+    }
+
+    /// A numeral run holds at least one digit: a pad indicator of 3 (a final group of
+    /// no digits) or a control straight after the indicator used to decode as an
+    /// empty or silently shortened run that the encoder then refused to write.
+    #[test]
+    fn numeral_run_without_digits_is_rejected() {
+        // selector 2 | pad 0 | end-of-data: no group at all.
+        assert!(decode_segments(&fields(&[(2, 4), (0, 2), (1018, 10)])).is_err());
+        // Same, switching to upper instead of ending.
+        let bits = fields(&[(2, 4), (2, 2), (1021, 10), (0, 5), (27, 5)]);
+        assert!(decode_segments(&bits).is_err());
+        // pad 3: the only group would contribute no digits ...
+        assert!(decode_segments(&fields(&[(2, 4), (3, 2), (120, 10), (1018, 10)])).is_err());
+        // ... and with two groups the second would silently vanish.
+        let bits = fields(&[(2, 4), (3, 2), (123, 10), (456, 10), (1018, 10)]);
+        assert!(decode_segments(&bits).is_err());
+        // Pads 0..=2 are the three legal final-group lengths.
+        for (pad, want) in [(0, &b"123456"[..]), (1, b"12345"), (2, b"1234")] {
+            let bits = fields(&[(2, 4), (pad, 2), (123, 10), (456, 10), (1018, 10)]);
+            let segs = decode_segments(&bits).unwrap();
+            assert_eq!(segs, [(GmMode::Numeral, want.to_vec())]);
         }
     }
 

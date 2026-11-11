@@ -462,3 +462,110 @@ fn macro_messages_decode_to_the_original_bytes() {
         assert_roundtrip(&symbol);
     }
 }
+
+/// A dot matrix from `'0'`/`'1'` rows.
+fn matrix_from_rows(rows: &[&str]) -> Encoding {
+    let mut m = anyd::output::BitMatrix::new(rows[0].len(), rows.len(), 3);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x, y, c == b'1');
+        }
+    }
+    Encoding::Matrix(m)
+}
+
+/// `zint -b DOTCODE --binary --esc -d '\r\n2'` (zint 2.16, 13 x 10).
+#[rustfmt::skip]
+const ZINT_CRLF_DIGIT: &[&str] = &[
+    "1000000000001",
+    "0101010000010",
+    "1000101010101",
+    "0101010001010",
+    "0010101010001",
+    "0101010100010",
+    "0010000000001",
+    "0000000101010",
+    "1000001000001",
+    "0100010101010",
+];
+
+/// `zint -b DOTCODE --binary --esc -d '12\r\n34\r\n'` (20 x 13).
+#[rustfmt::skip]
+const ZINT_DIGITS_CRLF: &[&str] = &[
+    "10100010101010101010",
+    "00000101000100010001",
+    "10001000001000101010",
+    "01000101000101000001",
+    "00100010100000101000",
+    "01000001010000000101",
+    "10000000101000101010",
+    "01000000010101010001",
+    "10101000001010000010",
+    "00010001000001010001",
+    "10001010100010001000",
+    "00000000000100010101",
+    "10101010001010101010",
+];
+
+/// `zint -b DOTCODE --binary --esc -d '\x80\r\n\r\n\r\n'` (20 x 13).
+#[rustfmt::skip]
+const ZINT_BINARY_CRLF: &[&str] = &[
+    "10101010101010101010",
+    "00010000000001010001",
+    "00001010101000001010",
+    "00010100010101000001",
+    "00101000101000001010",
+    "00010100000100000001",
+    "10000000101000101010",
+    "00010001010101000001",
+    "00100010100010100000",
+    "00000100010000010101",
+    "00101010100010100010",
+    "01000001000100000101",
+    "10101010101000001010",
+];
+
+#[test]
+fn matches_zint_when_cr_lf_pairs_weigh_set_a_against_set_b() {
+    // Choosing between Code Set A and B, the encodation counts how many *data
+    // characters* each set can take next. A CR/LF pair is two of them in either set,
+    // although Set B spends a single codeword on it: counting codewords instead
+    // makes Set A look longer and trades the compact CR/LF for a Latch A.
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    let cases: [(&[u8], &[&str], &[u8]); 3] = [
+        // 2x Shift B, CR/LF, '2'.
+        (b"\r\n2", ZINT_CRLF_DIGIT, &[103, 96, 18]),
+        // FNC1, "12", 4x Shift B, CR/LF, '3', '4', CR/LF.
+        (
+            b"12\r\n34\r\n",
+            ZINT_DIGITS_CRLF,
+            &[107, 12, 105, 96, 19, 20, 96],
+        ),
+        // Binary latch, 0x80 (two base-103 codewords), terminate with Latch B.
+        (
+            b"\x80\r\n\r\n\r\n",
+            ZINT_BINARY_CRLF,
+            &[112, 1, 25, 110, 96, 96, 96],
+        ),
+    ];
+    for (payload, rows, codewords) in cases {
+        let reference = matrix_from_rows(rows);
+        // The reference itself reads back, pinning the expected codewords.
+        let decoded = dec.decode(&reference).unwrap();
+        assert_eq!(decoded.payload_bytes(), payload);
+        let SymbolMeta::DotCode(meta) = &decoded.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        assert_eq!(meta.codewords, codewords, "payload {payload:?}");
+        assert_eq!(enc.encode(&decoded).unwrap(), reference);
+        // And a fresh build makes the same choices.
+        let built = enc.build_bytes(payload).unwrap();
+        assert_eq!(built.meta, decoded.meta, "payload {payload:?}");
+        assert_eq!(
+            enc.encode(&built).unwrap(),
+            reference,
+            "payload {payload:?}"
+        );
+    }
+}

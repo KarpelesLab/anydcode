@@ -113,7 +113,8 @@ fn ahead_a(src: &[u8], pos: usize) -> usize {
     count
 }
 
-/// Returns (chars consumed, number of codewords `nx`).
+/// Returns (data characters consumed `n`, number of codewords `nx`): they differ by
+/// one for every CR/LF pair, which Set B encodes in a single codeword.
 fn ahead_b(src: &[u8], pos: usize) -> (usize, usize) {
     let mut count = 0;
     let mut i = pos;
@@ -319,9 +320,11 @@ pub(crate) fn encode_message(
                     continue;
                 }
                 // Step C4
+                // Sets A and B are weighed by the data characters each takes next
+                // (a CR/LF pair is two in both), not by Set B's codeword count.
                 let m = ahead_a(source, position);
-                let (_, nx) = ahead_b(source, position);
-                if m > nx {
+                let (n, nx) = ahead_b(source, position);
+                if m > n {
                     out.push(LATCH_A);
                     mode = b'A';
                 } else if (1..=4).contains(&nx) {
@@ -502,7 +505,7 @@ pub(crate) fn encode_message(
                 }
                 // Step F3
                 bin.empty(&mut out);
-                if ahead_a(source, position) > ahead_b(source, position).1 {
+                if ahead_a(source, position) > ahead_b(source, position).0 {
                     out.push(FNC3); // Terminate with Latch to A
                     mode = b'A';
                 } else {

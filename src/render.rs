@@ -36,13 +36,16 @@ pub fn render(encoding: &Encoding, scale: usize) -> GrayImage {
 /// Render a 2D [`BitMatrix`] at `scale` pixels per module, framed by its quiet zone.
 ///
 /// # Panics
-/// Panics if `scale` is zero.
+/// Panics if `scale` is zero, the matrix has no modules and no quiet zone, or the
+/// pixel size overflows `usize`.
 pub fn render_matrix(matrix: &BitMatrix, scale: usize) -> GrayImage {
     assert!(scale > 0, "render scale must be >= 1");
     let qz = matrix.quiet_zone;
-    let mods_w = matrix.width() + 2 * qz;
-    let mods_h = matrix.height() + 2 * qz;
-    let mut img = GrayImage::filled(mods_w * scale, mods_h * scale, LIGHT);
+    let mut img = GrayImage::filled(
+        pixel_extent(matrix.width(), qz, scale),
+        pixel_extent(matrix.height(), qz, scale),
+        LIGHT,
+    );
     for my in 0..matrix.height() {
         for mx in 0..matrix.width() {
             if matrix.get(mx, my) {
@@ -57,13 +60,16 @@ pub fn render_matrix(matrix: &BitMatrix, scale: usize) -> GrayImage {
 /// with the quiet zone on the left and right (and a matching light margin top/bottom).
 ///
 /// # Panics
-/// Panics if `scale` is zero.
+/// Panics if `scale` is zero, the pattern has no modules and no quiet zone, or the
+/// pixel size overflows `usize`.
 pub fn render_linear(pattern: &LinearPattern, scale: usize) -> GrayImage {
     assert!(scale > 0, "render scale must be >= 1");
     let qz = pattern.quiet_zone;
-    let mods_w = pattern.modules.len() + 2 * qz;
-    let mods_h = LINEAR_HEIGHT_MODULES + 2 * qz;
-    let mut img = GrayImage::filled(mods_w * scale, mods_h * scale, LIGHT);
+    let mut img = GrayImage::filled(
+        pixel_extent(pattern.modules.len(), qz, scale),
+        pixel_extent(LINEAR_HEIGHT_MODULES, qz, scale),
+        LIGHT,
+    );
     for (i, &bar) in pattern.modules.iter().enumerate() {
         if bar {
             let x0 = (i + qz) * scale;
@@ -73,6 +79,20 @@ pub fn render_linear(pattern: &LinearPattern, scale: usize) -> GrayImage {
         }
     }
     img
+}
+
+/// Pixels spanned by `modules` plus a quiet zone on both sides, at `scale` pixels per
+/// module.
+///
+/// Checked: `quiet_zone` is a public field, and a wrapped product would not fail — it
+/// would size a smaller canvas and paint the modules at wrapped offsets, e.g. silently
+/// dropping the quiet zone when `2 * quiet_zone` wraps to zero.
+fn pixel_extent(modules: usize, quiet_zone: usize, scale: usize) -> usize {
+    quiet_zone
+        .checked_mul(2)
+        .and_then(|margin| margin.checked_add(modules))
+        .and_then(|total| total.checked_mul(scale))
+        .expect("render size overflows usize")
 }
 
 /// Paint one `scale × scale` dark block with its top-left corner at `(px, py)`.
@@ -103,5 +123,96 @@ mod tests {
         assert_eq!(img.get(8, 8), DARK);
         // Module (1,1) is light.
         assert_eq!(img.get(12, 12), LIGHT);
+        // Each dark module is exactly one scale x scale block: 2 modules x 16 pixels.
+        assert_eq!(img.pixels().iter().filter(|&&p| p == DARK).count(), 32);
+        assert_eq!(
+            (img.get(11, 11), img.get(7, 8), img.get(8, 7)),
+            (DARK, LIGHT, LIGHT)
+        );
+        assert_eq!((img.get(19, 19), img.get(20, 20)), (DARK, LIGHT));
+        assert_eq!(render(&Encoding::Matrix(m), 4), img);
+    }
+
+    #[test]
+    fn non_square_matrix_keeps_its_aspect() {
+        let mut m = BitMatrix::new(5, 2, 1);
+        m.set(4, 1, true);
+        let img = render_matrix(&m, 3);
+        assert_eq!((img.width(), img.height()), (21, 12));
+        assert_eq!(img.get(15, 6), DARK);
+        assert_eq!(img.get(17, 8), DARK);
+        assert_eq!(img.get(18, 8), LIGHT, "right quiet zone");
+        assert_eq!(img.get(14, 6), LIGHT);
+        // Scale 1, no quiet zone: one pixel per module.
+        m.quiet_zone = 0;
+        let img = render_matrix(&m, 1);
+        assert_eq!((img.width(), img.height()), (5, 2));
+        assert_eq!(
+            img.pixels(),
+            [255, 255, 255, 255, 255, 255, 255, 255, 255, 0]
+        );
+    }
+
+    #[test]
+    fn linear_bars_span_the_bar_height_between_quiet_zones() {
+        let p = LinearPattern {
+            modules: std::vec![true, false, true, true],
+            quiet_zone: 2,
+        };
+        let img = render_linear(&p, 3);
+        assert_eq!(img.width(), (4 + 2 * 2) * 3);
+        assert_eq!(img.height(), (LINEAR_HEIGHT_MODULES + 2 * 2) * 3);
+        let (top, bottom) = (2 * 3, (2 + LINEAR_HEIGHT_MODULES) * 3 - 1);
+        for (module, bar) in p.modules.iter().enumerate() {
+            let want = if *bar { DARK } else { LIGHT };
+            for x in (2 + module) * 3..(3 + module) * 3 {
+                assert_eq!(img.get(x, top), want, "x {x}");
+                assert_eq!(img.get(x, bottom), want, "x {x}");
+                assert_eq!(img.get(x, top - 1), LIGHT, "margin above x {x}");
+                assert_eq!(img.get(x, bottom + 1), LIGHT, "margin below x {x}");
+            }
+        }
+        assert_eq!((img.get(5, top), img.get(18, top)), (LIGHT, LIGHT));
+        assert_eq!(render(&Encoding::Linear(p), 3), img);
+        // An empty pattern is just its quiet zone.
+        let blank = LinearPattern {
+            modules: std::vec::Vec::new(),
+            quiet_zone: 1,
+        };
+        let img = render_linear(&blank, 1);
+        assert_eq!((img.width(), img.height()), (2, LINEAR_HEIGHT_MODULES + 2));
+        assert!(img.pixels().iter().all(|&p| p == LIGHT));
+    }
+
+    #[test]
+    #[should_panic(expected = "render scale must be >= 1")]
+    fn zero_scale_panics() {
+        let _ = render_matrix(&BitMatrix::new(3, 3, 0), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "render scale must be >= 1")]
+    fn zero_scale_panics_for_linear() {
+        let _ = render_linear(&LinearPattern::new(), 0);
+    }
+
+    /// `2 * quiet_zone` wraps to 0 here, and every block offset wraps back into the
+    /// image: unchecked, a release build returned a symbol with no quiet zone at all.
+    #[test]
+    #[should_panic(expected = "render size overflows usize")]
+    fn overflowing_quiet_zone_panics() {
+        let mut m = BitMatrix::new(3, 3, 1usize << (usize::BITS - 1));
+        m.set(1, 1, true);
+        let _ = render_matrix(&m, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "render size overflows usize")]
+    fn overflowing_scale_panics() {
+        let p = LinearPattern {
+            modules: std::vec![true; 4],
+            quiet_zone: 0,
+        };
+        let _ = render_linear(&p, usize::MAX / 2);
     }
 }

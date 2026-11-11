@@ -298,3 +298,140 @@ fn single_row_expanded_stacked_is_the_linear_symbol() {
     };
     assert_eq!(matrix_rows(&zint)[0].len(), p.modules.len());
 }
+
+/// ISO/IEC 24724 caps an Expanded symbol at 22 symbol characters — 11 codeblocks —
+/// so a stacked matrix has at most 11 codeblock columns and 11 rows. Anything
+/// larger is rejected on its dimensions alone; the decoder must not go looking for
+/// a last-row layout among thousands of candidate column counts.
+#[test]
+fn expanded_stacked_rejects_impossible_dimensions() {
+    use anyd::output::BitMatrix;
+
+    let dec = DataBarDecoder::new();
+    for (columns, stack_rows) in [(12usize, 2usize), (3000, 3), (2, 12), (11, 400), (200, 200)] {
+        let (width, height) = (columns * 49 + 4, stack_rows * 4 - 3);
+        let mut m = BitMatrix::new(width, height, 1);
+        // Finely striped rows: the worst case for a run-length based search.
+        for y in (0..height).step_by(4) {
+            for x in (1..width).step_by(2) {
+                m.set(x, y, true);
+            }
+        }
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{columns} columns x {stack_rows} rows"
+        );
+    }
+    // The largest real symbol still reads: 21 data characters, one codeblock per row.
+    let enc = DataBarEncoder::new();
+    let mut reduced = b"0109501101530003".to_vec();
+    reduced.extend((0..58).map(|i| b'0' + (i % 10) as u8));
+    for columns in [1, 11] {
+        let symbol = enc.build_expanded_stacked(&reduced, columns).unwrap();
+        let encoding = enc.encode(&symbol).unwrap();
+        assert_eq!(dec.decode(&encoding).unwrap(), symbol, "{columns} columns");
+    }
+}
+
+/// The parameter and input error paths of the stacked variants.
+#[test]
+fn rejects_bad_parameters_and_input() {
+    use anyd::error::Error;
+    use anyd::output::BitMatrix;
+    use anyd::segment::Segment;
+    use anyd::symbol::Symbol;
+
+    let enc = DataBarEncoder::new();
+    let dec = DataBarDecoder::new();
+
+    // Column pairs per row: 1..=11.
+    for columns in [0, 12, usize::MAX] {
+        assert!(
+            matches!(
+                enc.build_expanded_stacked(b"1012A", columns),
+                Err(Error::InvalidParameter { .. })
+            ),
+            "{columns} columns"
+        );
+        let symbol = Symbol::new(
+            Symbology::DataBarExpandedStacked,
+            vec![Segment::byte(b"1012A".to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::expanded_stacked(columns)),
+        );
+        assert!(enc.encode(&symbol).is_err(), "{columns} columns");
+    }
+    // Expanded Stacked metadata without a column count, and a payload that is not a
+    // GS1 element string.
+    let symbol = Symbol::new(
+        Symbology::DataBarExpandedStacked,
+        vec![Segment::byte(b"1012A".to_vec())],
+        SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::ExpandedStacked)),
+    );
+    assert!(enc.encode(&symbol).is_err());
+    assert!(enc.build_expanded_stacked(b"", 2).is_err());
+    assert!(enc.build_expanded_stacked(b"10`", 2).is_err());
+
+    // GTIN input for the two-row variants: same rules as Omnidirectional.
+    for gtin in [
+        &b""[..],
+        b"123",
+        b"12345678901234567",
+        b"12345678901a3",
+        b"00950110153000",
+    ] {
+        assert!(enc.build_stacked(gtin).is_err(), "{gtin:?}");
+        assert!(enc.build_stacked_omni(gtin).is_err(), "{gtin:?}");
+    }
+    // A stacked symbology whose payload is not a numeric GTIN segment.
+    let symbol = Symbol::new(
+        Symbology::DataBarStacked,
+        vec![Segment::byte(b"0095011015300".to_vec())],
+        SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Stacked)),
+    );
+    assert!(matches!(
+        enc.encode(&symbol),
+        Err(Error::InvalidData { .. })
+    ));
+
+    // Matrices of no stacked DataBar shape.
+    for (width, height) in [
+        (0, 0),
+        (50, 1),
+        (50, 2),
+        (50, 4),
+        (49, 3),
+        (51, 5),
+        (102, 3),
+        (53, 2),
+    ] {
+        let m = BitMatrix::new(width, height, 1);
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{width}x{height}"
+        );
+    }
+    // Blank grids of a valid shape hold no symbol.
+    for (width, height) in [(50, 3), (50, 5), (53, 1), (102, 5), (151, 9)] {
+        let m = BitMatrix::new(width, height, 1);
+        assert!(
+            dec.decode(&Encoding::Matrix(m)).is_err(),
+            "{width}x{height}"
+        );
+    }
+
+    // The two data rows of a stacked symbol exchanged: the finders no longer sit
+    // where the checksum says.
+    let Encoding::Matrix(m) = enc
+        .encode(&enc.build_stacked(b"0095011015300").unwrap())
+        .unwrap()
+    else {
+        panic!("expected matrix");
+    };
+    let mut swapped = m.clone();
+    for x in 0..m.width() {
+        swapped.set(x, 0, m.get(x, 2));
+        swapped.set(x, 2, m.get(x, 0));
+    }
+    assert!(dec.decode(&Encoding::Matrix(m)).is_ok());
+    assert!(dec.decode(&Encoding::Matrix(swapped)).is_err());
+}

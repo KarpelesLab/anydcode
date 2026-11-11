@@ -22,6 +22,9 @@ use crate::symbol::{Symbol, SymbolMeta};
 use crate::symbology::Symbology;
 use crate::traits::Decode;
 
+/// Maximum total codewords (data + error correction) in a symbol (ISO/IEC 15438).
+const MAX_CODEWORDS: usize = 928;
+
 /// PDF417 structural decoder.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Pdf417Decoder;
@@ -52,6 +55,12 @@ impl Pdf417Decoder {
         let rows = height / ROW_HEIGHT;
         if !(3..=90).contains(&rows) {
             return Err(Error::undecodable("PDF417 row count out of range"));
+        }
+
+        // A symbol holds at most 928 codewords, the longest block Reed–Solomon over
+        // GF(929) protects; a larger grid cannot be one (nor be re-encoded).
+        if rows * cols > MAX_CODEWORDS {
+            return Err(Error::undecodable("PDF417 grid exceeds 928 codewords"));
         }
 
         let reverse = build_reverse_tables();
@@ -174,6 +183,43 @@ mod tests {
         for (cluster, map) in rev.iter().enumerate() {
             assert_eq!(map.len(), 929, "cluster {cluster} lost patterns");
         }
+    }
+
+    /// A grid of more than 928 codewords is not a PDF417 symbol even when its
+    /// codewords form a consistent Reed–Solomon block with a matching length
+    /// descriptor: e.g. 31 rows x 30 columns of pad codewords, descriptor 928, two
+    /// check codewords. It used to decode to a symbol the encoder refuses to render.
+    #[test]
+    fn rejects_grids_beyond_928_codewords() {
+        let render = |rows: usize, cols: usize, k: usize| {
+            let mut data = vec![900u32; rows * cols - k];
+            data[0] = (rows * cols - k) as u32;
+            let ecc = ec::encode(&data, k);
+            data.extend_from_slice(&ecc);
+            let mut m = BitMatrix::new(17 * cols + 69, rows * ROW_HEIGHT, 2);
+            for (cell, &cw) in data.iter().enumerate() {
+                let (row, col) = (cell / cols, cell % cols);
+                let pattern = CODEWORD_PATTERNS[row % 3][cw as usize];
+                for j in 0..17 {
+                    if (pattern >> (16 - j)) & 1 != 0 {
+                        for dy in 0..ROW_HEIGHT {
+                            m.set(34 + 17 * col + j, row * ROW_HEIGHT + dy, true);
+                        }
+                    }
+                }
+            }
+            m
+        };
+        let dec = Pdf417Decoder::new();
+        // 32 x 29 = 928 codewords is the largest symbol and reads (as all padding).
+        let largest = dec.decode_matrix(&render(32, 29, 2)).unwrap();
+        assert!(largest.segments.is_empty());
+        assert!(Pdf417Encoder::new().encode(&largest).is_ok());
+        // More cells than that are past the limit, whatever the error-correction
+        // level that would make the length descriptor fit.
+        assert!(dec.decode_matrix(&render(31, 30, 2)).is_err());
+        assert!(dec.decode_matrix(&render(33, 29, 32)).is_err());
+        assert!(dec.decode_matrix(&render(48, 30, 512)).is_err());
     }
 
     #[test]

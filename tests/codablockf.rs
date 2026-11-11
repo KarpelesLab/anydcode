@@ -128,3 +128,198 @@ fn zint_extended_ascii_fnc4() {
     );
     assert_eq!(CodablockFEncoder::new().encode(&decoded).unwrap(), encoding);
 }
+
+use anyd::error::Error;
+
+fn matrix_from_dump(dump: &[&str], width: usize) -> anyd::output::BitMatrix {
+    let mut m = anyd::output::BitMatrix::new(width, dump.len(), 10);
+    for (y, hex) in dump.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, width).iter().enumerate() {
+            m.set(x, y, b);
+        }
+    }
+    m
+}
+
+/// A third-party symbol using what this crate's own layout never produces: a row in
+/// Code Set C, a row selected into Set A, a Code B latch inside a row, a filler
+/// Code C before the checks, and K1/K2 sharing the last data row in Set C (zint
+/// 2.16.0, `zint -b CODABLOCKF --binary --esc --cols=12 -d
+/// '1234567890123456AB\x01cd\x7f99' --dump`; K1 = 59, K2 = 29).
+#[test]
+fn zint_set_c_and_shared_check_row() {
+    let dump = [
+        "D0 97 7B 36 59 C8 B1 C5 B0 A6 F6 B3 91 62 F1 63 AC",
+        "D0 9E 8B 12 6E 4C E9 46 22 C4 B0 BD D0 B3 93 63 AC",
+        "D0 97 BA CE 42 6B D1 CB 39 65 DE E3 5C CB 14 63 AC",
+    ];
+    let encoding = Encoding::Matrix(matrix_from_dump(&dump, 11 * 11 + 13));
+    let decoded = CodablockFDecoder::new().decode(&encoding).unwrap();
+    assert_eq!(decoded.payload_bytes(), b"1234567890123456AB\x01cd\x7f99");
+    #[rustfmt::skip]
+    let grid: Vec<u8> = vec![
+        103,  99,  1, 12, 34, 56, 78, 90,  12, 34, 96, 106,
+        103,  98, 11, 21, 22, 33, 34, 65, 100, 67, 26, 106,
+        103, 100, 12, 68, 95, 25, 25, 99,  59, 29, 40, 106,
+    ];
+    assert_eq!(
+        decoded.meta,
+        SymbolMeta::CodablockF(CodablockFMeta {
+            rows: 3,
+            columns: 12,
+            codewords: grid,
+        })
+    );
+    assert_eq!(CodablockFEncoder::new().encode(&decoded).unwrap(), encoding);
+}
+
+/// This layout puts 62 data characters on each of 43 rows and the checks on a 44th:
+/// 2666 single-set characters fit, one more is a capacity error.
+#[test]
+fn capacity_is_43_full_rows() {
+    let enc = CodablockFEncoder::new();
+    let symbol = enc.build(&[b'K'; 2666]).unwrap();
+    let SymbolMeta::CodablockF(meta) = &symbol.meta else {
+        panic!();
+    };
+    assert_eq!((meta.rows, meta.columns), (44, 67));
+    assert_lossless(&[b'K'; 2666]);
+    for over in [2667, 2700, 5000] {
+        let err = enc.build(&vec![b'K'; over]).unwrap_err();
+        assert!(matches!(err, Error::Capacity { .. }), "{over}: {err:?}");
+    }
+}
+
+/// Every length from one character up through several rows, and every ordered pair
+/// of ASCII bytes (each start set, each latch), survives.
+#[test]
+fn lengths_and_byte_pairs_roundtrip() {
+    for n in 1..=130usize {
+        let data: Vec<u8> = (0..n).map(|i| b' ' + (i * 7 % 95) as u8).collect();
+        assert_lossless(&data);
+    }
+    for a in 0..=127u8 {
+        for b in (0..=127u8).step_by(5) {
+            assert_lossless(&[a, b, a]);
+        }
+    }
+}
+
+/// The parameter and input error paths of the public API, and the three integrity
+/// checks of the decoder (row check, row indicator, K1/K2).
+#[test]
+fn rejects_bad_parameters_and_input() {
+    let enc = CodablockFEncoder::new();
+    let dec = CodablockFDecoder::new();
+
+    assert!(matches!(enc.build(b""), Err(Error::InvalidData { .. })));
+    assert!(matches!(
+        enc.build(b"A\x80"),
+        Err(Error::InvalidData { .. })
+    ));
+
+    let symbol = enc.build(b"Integrity checks, three rows of them").unwrap();
+    let SymbolMeta::CodablockF(good) = symbol.meta.clone() else {
+        panic!();
+    };
+    let with = |meta: CodablockFMeta| {
+        Symbol::new(
+            Symbology::CodablockF,
+            Vec::new(),
+            SymbolMeta::CodablockF(meta),
+        )
+    };
+    assert!(good.rows >= 4);
+
+    // Metadata that cannot be rendered.
+    let mut bad_value = good.clone();
+    bad_value.codewords[4] = 106;
+    let bad = [
+        with(CodablockFMeta {
+            rows: 1,
+            columns: good.columns,
+            codewords: good.codewords[..good.columns].to_vec(),
+        }),
+        with(CodablockFMeta {
+            rows: 45,
+            columns: 9,
+            codewords: vec![0; 45 * 9],
+        }),
+        with(CodablockFMeta {
+            rows: 2,
+            columns: 8,
+            codewords: vec![0; 16],
+        }),
+        with(CodablockFMeta {
+            rows: 2,
+            columns: 68,
+            codewords: vec![0; 136],
+        }),
+        with(CodablockFMeta {
+            rows: good.rows + 1,
+            ..good.clone()
+        }),
+        with(bad_value),
+        Symbol::new(Symbology::CodablockF, Vec::new(), SymbolMeta::Generic),
+    ];
+    for s in bad {
+        assert!(
+            matches!(enc.encode(&s), Err(Error::InvalidParameter { .. })),
+            "{:?}",
+            s.meta
+        );
+    }
+
+    // Decoder input that cannot be a Codablock F grid.
+    let linear = Encoding::Linear(anyd::output::LinearPattern {
+        modules: vec![true; 101],
+        quiet_zone: 10,
+    });
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(Error::Unsupported { .. })
+    ));
+    for (width, height) in [(101, 1), (101, 45), (100, 4), (90, 4), (750, 4), (0, 0)] {
+        let m = anyd::output::BitMatrix::new(width, height, 10);
+        assert!(dec.decode_matrix(&m).is_err(), "{width}x{height}");
+    }
+
+    let columns = good.columns;
+    // The modulo-103 check of one row (start value, then position-weighted values).
+    let row_check = |row: &[u8]| {
+        let mut sum = row[0] as u32;
+        for (pos, &v) in row[..columns - 2].iter().enumerate().skip(1) {
+            sum += v as u32 * pos as u32;
+        }
+        (sum % 103) as u8
+    };
+    let decodes = |codewords: Vec<u8>| {
+        let meta = CodablockFMeta {
+            codewords,
+            ..good.clone()
+        };
+        dec.decode(&enc.encode(&with(meta)).unwrap())
+    };
+    assert_eq!(decodes(good.codewords.clone()).unwrap().meta, symbol.meta);
+
+    // 1. A changed data character with the row check left stale.
+    let mut cw = good.codewords.clone();
+    cw[columns + 3] ^= 1;
+    assert!(decodes(cw.clone()).is_err());
+    // 2. ...and with the row check repaired: only K1/K2 can tell.
+    let check = row_check(&cw[columns..2 * columns]);
+    cw[2 * columns - 2] = check;
+    assert!(decodes(cw).is_err());
+    // 3. Two whole rows exchanged: each is a valid row with the wrong row number.
+    let mut cw = good.codewords.clone();
+    for i in 0..columns {
+        cw.swap(columns + i, 2 * columns + i);
+    }
+    assert!(decodes(cw).is_err());
+    // 4. A wrong row count in the first row's indicator, row check repaired.
+    let mut cw = good.codewords.clone();
+    cw[2] = if cw[2] == 70 { 71 } else { 70 };
+    let check = row_check(&cw[..columns]);
+    cw[columns - 2] = check;
+    assert!(decodes(cw).is_err());
+}

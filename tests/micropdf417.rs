@@ -210,3 +210,329 @@ fn autosize_grows_with_data() {
         large.text()
     );
 }
+
+use anyd::codes::pdf417::{EcLevel, Pdf417Meta, Pdf417Variant};
+use anyd::error::Error;
+use anyd::symbol::{Symbol, SymbolMeta};
+use anyd::symbology::Symbology;
+
+/// The 34 size variants of ISO/IEC 24728 in table order: `(columns, rows,
+/// error-correction codewords)`.
+const VARIANTS: [(usize, usize, usize); 34] = [
+    (1, 11, 7),
+    (1, 14, 7),
+    (1, 17, 7),
+    (1, 20, 8),
+    (1, 24, 8),
+    (1, 28, 8),
+    (2, 8, 8),
+    (2, 11, 9),
+    (2, 14, 9),
+    (2, 17, 10),
+    (2, 20, 11),
+    (2, 23, 13),
+    (2, 26, 15),
+    (3, 6, 12),
+    (3, 8, 14),
+    (3, 10, 16),
+    (3, 12, 18),
+    (3, 15, 21),
+    (3, 20, 26),
+    (3, 26, 32),
+    (3, 32, 38),
+    (3, 38, 44),
+    (3, 44, 50),
+    (4, 4, 8),
+    (4, 6, 12),
+    (4, 8, 14),
+    (4, 10, 16),
+    (4, 12, 18),
+    (4, 15, 21),
+    (4, 20, 26),
+    (4, 26, 32),
+    (4, 32, 38),
+    (4, 38, 44),
+    (4, 44, 50),
+];
+
+/// Module width of a symbol with the given number of data columns.
+const WIDTHS: [usize; 5] = [0, 38, 55, 82, 99];
+
+/// Builds a segment of the given length.
+type MakeSegment = fn(usize) -> Segment;
+
+fn micro_symbol(segments: Vec<Segment>, variant: usize) -> Symbol {
+    let (columns, rows, _) = VARIANTS[variant];
+    Symbol::new(
+        Symbology::MicroPdf417,
+        segments,
+        SymbolMeta::Pdf417(Pdf417Meta {
+            rows,
+            columns,
+            ec_level: EcLevel::new(0).unwrap(),
+            variant: Pdf417Variant::Micro(variant as u8),
+        }),
+    )
+}
+
+/// Every size variant, filled to its last data codeword, has the tabulated geometry
+/// and round-trips; one codeword more is a capacity error. (Text compaction: a latch
+/// plus one codeword per two characters.)
+#[test]
+fn every_variant_roundtrips_at_capacity() {
+    let enc = MicroPdf417Encoder::new();
+    let dec = MicroPdf417Decoder::new();
+    for (variant, &(columns, rows, ec)) in VARIANTS.iter().enumerate() {
+        let data_codewords = columns * rows - ec;
+        let full: Vec<u8> = (0..2 * (data_codewords - 1))
+            .map(|i| b'A' + (i % 26) as u8)
+            .collect();
+
+        let symbol = micro_symbol(vec![Segment::alphanumeric(full.clone())], variant);
+        let encoding = enc.encode(&symbol).unwrap();
+        let Encoding::Matrix(m) = &encoding else {
+            panic!("expected a matrix");
+        };
+        assert_eq!(m.width(), WIDTHS[columns], "variant {variant}");
+        assert_eq!(m.height() % rows, 0, "variant {variant}");
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(decoded, symbol, "variant {variant}");
+        assert_eq!(enc.encode(&decoded).unwrap(), encoding, "variant {variant}");
+
+        // A nearly empty symbol of the same variant pads and round-trips as well.
+        let sparse = micro_symbol(vec![Segment::numeric(b"7".to_vec())], variant);
+        let encoding = enc.encode(&sparse).unwrap();
+        assert_eq!(dec.decode(&encoding).unwrap(), sparse, "variant {variant}");
+
+        let mut over = full;
+        over.push(b'Z');
+        let err = enc
+            .encode(&micro_symbol(vec![Segment::alphanumeric(over)], variant))
+            .unwrap_err();
+        assert!(matches!(err, Error::Capacity { .. }), "variant {variant}");
+    }
+}
+
+/// The symbology maxima of ISO/IEC 24728 — 250 text characters, 366 digits, 150
+/// bytes — fit the largest variant; one more is a capacity error, as is anything
+/// past the tallest symbol of a pinned column count.
+#[test]
+fn capacity_boundaries() {
+    let enc = MicroPdf417Encoder::new();
+    let cases: [(MakeSegment, [usize; 4]); 3] = [
+        (|n| Segment::alphanumeric(vec![b'K'; n]), [38, 72, 162, 250]),
+        (|n| Segment::numeric(vec![b'3'; n]), [55, 105, 237, 366]),
+        (|n| Segment::byte(vec![0xC3; n]), [22, 43, 97, 150]),
+    ];
+    for (make, maxima) in cases {
+        for (i, &max) in maxima.iter().enumerate() {
+            let columns = i + 1;
+            assert_lossless(vec![make(max)], Some(columns));
+            let err = enc
+                .build_sized(vec![make(max + 1)], Some(columns))
+                .unwrap_err();
+            assert!(matches!(err, Error::Capacity { .. }), "{columns} columns");
+        }
+        assert_lossless(vec![make(maxima[3])], None);
+        for over in [maxima[3] + 1, maxima[3] + 9, 5000] {
+            let err = enc.build(vec![make(over)]).unwrap_err();
+            assert!(matches!(err, Error::Capacity { .. }), "{over}");
+        }
+    }
+    for columns in [0, 5, 99] {
+        assert!(
+            enc.build_sized(vec![Segment::numeric(b"1".to_vec())], Some(columns))
+                .is_err(),
+            "{columns} columns"
+        );
+    }
+    // No data at all is the smallest symbol, all padding.
+    assert_lossless(Vec::new(), None);
+}
+
+/// Each variant repairs `(k - 2) / 2` unreadable codewords anywhere in the symbol,
+/// `k` being its error-correction codeword count.
+#[test]
+fn every_variant_corrects_damaged_codewords() {
+    let enc = MicroPdf417Encoder::new();
+    let dec = MicroPdf417Decoder::new();
+    let mut rng = anyd::transform::Rng::new(0x24728);
+    for (variant, &(columns, rows, ec)) in VARIANTS.iter().enumerate() {
+        let symbol = micro_symbol(vec![Segment::alphanumeric(b"Ab;".to_vec())], variant);
+        let Encoding::Matrix(clean) = enc.encode(&symbol).unwrap() else {
+            panic!("expected a matrix");
+        };
+        let row_height = clean.height() / rows;
+        let cells = columns * rows;
+        let mut hit = vec![false; cells];
+        let mut left = (ec - 2) / 2;
+        while left > 0 {
+            let cell = (rng.next_u64() % cells as u64) as usize;
+            if !hit[cell] {
+                hit[cell] = true;
+                left -= 1;
+            }
+        }
+        let mut m = clean.clone();
+        for (cell, _) in hit.iter().enumerate().filter(|(_, h)| **h) {
+            let (row, col) = (cell / columns, cell % columns);
+            // Left RAP (10), earlier columns (17 each), and the centre RAP (10) that
+            // precedes the right half of 3- and 4-column symbols.
+            let mut x0 = 10 + 17 * col;
+            if (columns == 3 && col >= 1) || (columns == 4 && col >= 2) {
+                x0 += 10;
+            }
+            for x in x0..x0 + 17 {
+                for y in row * row_height..(row + 1) * row_height {
+                    m.set(x, y, false);
+                }
+            }
+        }
+        let decoded = dec
+            .decode(&Encoding::Matrix(m))
+            .unwrap_or_else(|e| panic!("variant {variant}: {e:?}"));
+        assert_eq!(decoded, symbol, "variant {variant}");
+    }
+}
+
+/// The parameter and input error paths of the public API.
+#[test]
+fn rejects_bad_parameters_and_input() {
+    let enc = MicroPdf417Encoder::new();
+    let dec = MicroPdf417Decoder::new();
+    let seg = || vec![Segment::alphanumeric(b"A".to_vec())];
+    let with_meta =
+        |meta: Pdf417Meta| Symbol::new(Symbology::MicroPdf417, seg(), SymbolMeta::Pdf417(meta));
+    let good = Pdf417Meta {
+        rows: 11,
+        columns: 1,
+        ec_level: EcLevel::new(0).unwrap(),
+        variant: Pdf417Variant::Micro(0),
+    };
+    assert!(enc.encode(&with_meta(good.clone())).is_ok());
+
+    // Metadata that names no variant, or contradicts the one it names, describes no
+    // symbol (and could not come back from a decode unchanged).
+    let bad_metas = [
+        Pdf417Meta {
+            variant: Pdf417Variant::Micro(34),
+            ..good.clone()
+        },
+        Pdf417Meta {
+            variant: Pdf417Variant::Micro(255),
+            ..good.clone()
+        },
+        Pdf417Meta {
+            variant: Pdf417Variant::Standard,
+            ..good.clone()
+        },
+        Pdf417Meta {
+            rows: 14,
+            ..good.clone()
+        },
+        Pdf417Meta {
+            columns: 2,
+            ..good.clone()
+        },
+        Pdf417Meta {
+            ec_level: EcLevel::new(3).unwrap(),
+            ..good.clone()
+        },
+    ];
+    for meta in bad_metas {
+        let err = enc.encode(&with_meta(meta.clone())).unwrap_err();
+        assert!(matches!(err, Error::InvalidParameter { .. }), "{meta:?}");
+    }
+    let mut other = with_meta(good.clone());
+    other.symbology = Symbology::Pdf417;
+    assert!(matches!(
+        enc.encode(&other),
+        Err(Error::InvalidParameter { .. })
+    ));
+    // ...and the standard encoder refuses a MicroPDF417 variant in turn.
+    let mut standard = with_meta(Pdf417Meta {
+        rows: 10,
+        columns: 3,
+        ..good.clone()
+    });
+    standard.symbology = Symbology::Pdf417;
+    assert!(matches!(
+        anyd::codes::pdf417::Pdf417Encoder::new().encode(&standard),
+        Err(Error::InvalidParameter { .. })
+    ));
+    let bare = Symbol::new(Symbology::MicroPdf417, seg(), SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(Error::InvalidParameter { .. })
+    ));
+    // Unencodable segment content.
+    assert!(enc.build(vec![Segment::numeric(b"1x".to_vec())]).is_err());
+    assert!(enc.build(vec![Segment::byte(Vec::new())]).is_err());
+
+    // Decoder input that cannot be a MicroPDF417 grid.
+    let linear = Encoding::Linear(anyd::output::LinearPattern {
+        modules: vec![true, false, true],
+        quiet_zone: 1,
+    });
+    assert!(matches!(
+        dec.decode(&linear),
+        Err(Error::Unsupported { .. })
+    ));
+    for (width, height) in [
+        (0, 0),
+        (37, 22),
+        (56, 16),
+        (38, 21),
+        (38, 24),
+        (99, 6),
+        (82, 90),
+    ] {
+        let m = BitMatrix::new(width, height, 1);
+        assert!(dec.decode_matrix(&m).is_err(), "{width}x{height}");
+    }
+    // A blank grid of valid dimensions has no readable codeword at all.
+    assert!(dec.decode_matrix(&BitMatrix::new(38, 22, 1)).is_err());
+}
+
+/// ECI escapes are part of the compaction layer MicroPDF417 shares with PDF417:
+/// they round-trip, and a zint symbol carrying one reads (zint 2.16.0,
+/// `zint -b MICROPDF417 --eci=26 -d é --dump`; 3 columns x 6 rows).
+#[test]
+fn eci_segments_roundtrip_and_read_from_zint() {
+    assert_lossless(
+        vec![
+            Segment::eci(26),
+            Segment::byte("é".as_bytes().to_vec()),
+            Segment::eci(900),
+            Segment::alphanumeric(b"Ab".to_vec()),
+            Segment::eci(811_799),
+        ],
+        None,
+    );
+
+    let dump = [
+        "C8 B1 C6 56 77 5C FA 08 45 91 4",
+        "E8 BA 0C 52 77 A1 B2 FD 61 D1 4",
+        "EC AC 11 D3 75 1B E2 76 1D D9 4",
+        "CC B1 43 11 77 BD 12 71 D1 99 4",
+        "DC B0 9C 91 37 90 8B E5 0D B9 4",
+        "DE BA 7C 51 B6 FC CA 0E B1 BD 4",
+    ];
+    let width = 82;
+    let mut m = BitMatrix::new(width, dump.len() * 2, 1);
+    for (y, row) in dump.iter().enumerate() {
+        // One hex digit per four modules, most-significant first.
+        let nibbles: Vec<u32> = row.chars().filter_map(|c| c.to_digit(16)).collect();
+        for x in 0..width {
+            if (nibbles[x / 4] >> (3 - x % 4)) & 1 == 1 {
+                m.set(x, 2 * y, true);
+                m.set(x, 2 * y + 1, true);
+            }
+        }
+    }
+    let decoded = MicroPdf417Decoder::new().decode_matrix(&m).unwrap();
+    assert_eq!(
+        decoded.segments,
+        vec![Segment::eci(26), Segment::byte("é".as_bytes().to_vec())]
+    );
+}

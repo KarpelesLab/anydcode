@@ -20,11 +20,15 @@
 //! → Byte, and [`Mode::Alphanumeric`](crate::Mode::Alphanumeric) → Text (PDF417 Text
 //! compaction covers the full printable-ASCII set plus tab/CR/LF). The encoder emits
 //! an explicit mode latch before every segment, so the decoder recovers the exact
-//! segment boundaries. Adjacent segments of the *same* mode are the one case that
-//! cannot be distinguished after the fact and are therefore not produced by the
-//! decoder; callers should merge same-mode runs (the round-trip identity
-//! `encode(decode(x)) == x` still holds because the decoder's canonical output
-//! re-encodes to the identical matrix).
+//! segment boundaries — including those between adjacent segments of the same mode,
+//! each of which carries its own latch. An Extended Channel Interpretation switch is
+//! a data-less [`Mode::Eci`](crate::Mode::Eci) segment between them, encoded as the
+//! 927 / 926 / 925 escape for its assignment number (up to 811799).
+//!
+//! The codeword stream itself is not pinned in the metadata: a symbol from another
+//! encoder that compacts differently (no leading Text latch, the 913 byte shift,
+//! other sub-mode choices) decodes to the right segments but re-encodes to this
+//! encoder's canonical codewords, not to the identical matrix.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
@@ -132,8 +136,8 @@ pub struct Pdf417Meta {
     /// row indicators); MicroPDF417: `1..=4`.
     pub columns: usize,
     /// Error-correction level. For MicroPDF417 the number of error-correction
-    /// codewords is fixed by the size variant, so this field is unused and left at
-    /// level 0.
+    /// codewords is fixed by the size variant, so this field carries nothing and
+    /// must be level 0.
     pub ec_level: EcLevel,
     /// Which family member this describes (standard PDF417 or a MicroPDF417 variant).
     pub variant: Pdf417Variant,

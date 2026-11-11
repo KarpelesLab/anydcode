@@ -9,7 +9,7 @@ use super::tables::{
     LTD_CHECK_WEIGHT, LTD_FINDER, LTD_G_SUM, LTD_MODULES, LTD_T_EVEN, LTD_WIDEST, OMN_CHECK_WEIGHT,
     OMN_FINDER, OMN_G_SUM, OMN_MODULES, OMN_T_EVEN_ODD, OMN_WIDEST, gtin_check_digit,
 };
-use super::widths::get_value;
+use super::widths::{get_value, get_widths};
 use super::{DataBarMeta, DataBarVariant};
 use crate::error::{Error, Result};
 use crate::output::Encoding;
@@ -81,6 +81,18 @@ fn run_lengths(modules: &[bool]) -> Result<Vec<i32>> {
     Ok(widths)
 }
 
+/// Whether `widths` is exactly the element group that encodes `value` — i.e. a
+/// genuine member of its (n, k) set, with no element wider than `max_width` and the
+/// narrow-element rule respected.
+///
+/// [`get_value`] assigns *some* number to any widths at all; only the tuples
+/// [`get_widths`] produces are data characters. Checking the round trip rejects
+/// malformed characters instead of reading a value out of them.
+fn is_canonical(widths: &[i32], value: i64, max_width: i32, no_narrow: bool) -> bool {
+    let n: i32 = widths.iter().sum();
+    value >= 0 && get_widths(value, n, widths.len(), max_width, no_narrow) == widths
+}
+
 /// Reconstruct a GTIN value's canonical 14-digit form (13-digit body + check).
 fn format_gtin(val: u64) -> [u8; 14] {
     let mut body = [b'0'; 13];
@@ -113,8 +125,20 @@ fn omn_char_value(dw: &[i32; 8], outside: bool) -> Result<i32> {
         .ok_or_else(|| Error::undecodable("invalid DataBar data character (bad module sum)"))?;
     let max_width = OMN_WIDEST[group];
     let no_narrow = !outside;
+    if even.iter().sum::<i32>() != OMN_MODULES[group + 9] {
+        return Err(Error::undecodable(
+            "invalid DataBar data character (bad module sum)",
+        ));
+    }
     let v_odd = get_value(&odd, max_width, no_narrow);
     let v_even = get_value(&even, 9 - max_width, !no_narrow);
+    if !is_canonical(&odd, v_odd, max_width, no_narrow)
+        || !is_canonical(&even, v_even, 9 - max_width, !no_narrow)
+    {
+        return Err(Error::undecodable(
+            "invalid DataBar data character (element widths out of range)",
+        ));
+    }
     let t = OMN_T_EVEN_ODD[group] as i64;
     let v = if outside {
         v_odd * t + v_even
@@ -203,8 +227,20 @@ fn ltd_pair_value(pw: &[i32; 14]) -> Result<i64> {
         .position(|&m| m == n_odd)
         .ok_or_else(|| Error::undecodable("invalid DataBar Limited character (bad module sum)"))?;
     let max_width = LTD_WIDEST[group];
+    if even.iter().sum::<i32>() != 26 - n_odd {
+        return Err(Error::undecodable(
+            "invalid DataBar Limited character (bad module sum)",
+        ));
+    }
     let odd_val = get_value(&odd, max_width, false);
     let even_val = get_value(&even, 9 - max_width, true);
+    if !is_canonical(&odd, odd_val, max_width, false)
+        || !is_canonical(&even, even_val, 9 - max_width, true)
+    {
+        return Err(Error::undecodable(
+            "invalid DataBar Limited character (element widths out of range)",
+        ));
+    }
     Ok(LTD_G_SUM[group] as i64 + odd_val * LTD_T_EVEN[group] as i64 + even_val)
 }
 

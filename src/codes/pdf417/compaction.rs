@@ -7,14 +7,17 @@
 //!   multiple of six),
 //! - [`Mode::Alphanumeric`] → Text compaction (latch 900), covering the full
 //!   printable-ASCII set plus HT/LF/CR via the Alpha/Lower/Mixed/Punctuation
-//!   sub-modes.
+//!   sub-modes,
+//! - [`Mode::Eci`] → an Extended Channel Interpretation escape (927 / 926 / 925 by
+//!   assignment number range, §5.5), which carries no data of its own.
 //!
-//! Content codewords are always below 900; only mode latches and padding are ≥ 900,
-//! which is what lets the decoder split the stream back into segments.
+//! Content codewords are always below 900; only mode latches, escapes and padding are
+//! ≥ 900, which is what lets the decoder split the stream back into segments.
 //!
 //! The decoder additionally reads what other encoders emit but this one does not: a
-//! leading Text run without its (default-mode) latch, and the 913 single-byte shift
-//! out of Text compaction.
+//! leading Text run without its (default-mode) latch, the 913 single-byte shift out
+//! of Text compaction, and data that carries on after an ECI escape without a new
+//! latch (the compaction mode, and in Text compaction the sub-mode, stay in force).
 
 use crate::error::{Error, Result};
 use crate::segment::{Mode, Segment};
@@ -26,6 +29,16 @@ const LATCH_NUMERIC: u32 = 902;
 const LATCH_BYTE_6: u32 = 924;
 /// Shift to Byte compaction for the single following codeword (from Text only).
 const SHIFT_BYTE: u32 = 913;
+/// ECI escape for assignments 0..=899: one following codeword, the number itself.
+const ECI_CHARSET: u32 = 927;
+/// ECI escape for assignments 900..=810 899: two following codewords `g1`, `g2`
+/// with number `(g1 + 1) * 900 + g2`.
+const ECI_GENERAL: u32 = 926;
+/// ECI escape for assignments 810 900..=811 799: one following codeword, the number
+/// less 810 900.
+const ECI_USER: u32 = 925;
+/// The largest ECI assignment number PDF417 can express.
+const ECI_MAX: u32 = 811_799;
 
 // Text sub-mode control values (used within Text compaction only).
 const TEXT_LL: u8 = 27; // latch to Lower
@@ -94,6 +107,13 @@ fn is_text(c: u8) -> bool {
 pub fn encode_segments(segments: &[Segment]) -> Result<Vec<u32>> {
     let mut out = Vec::new();
     for seg in segments {
+        if let Mode::Eci(assignment) = seg.mode {
+            if !seg.data.is_empty() {
+                return Err(Error::invalid_data("PDF417 ECI segment carries data"));
+            }
+            eci_encode(assignment, &mut out)?;
+            continue;
+        }
         if seg.data.is_empty() {
             return Err(Error::invalid_data("empty PDF417 segment"));
         }
@@ -122,14 +142,41 @@ pub fn encode_segments(segments: &[Segment]) -> Result<Vec<u32>> {
                     what: "PDF417 Kanji compaction",
                 });
             }
-            Mode::Eci(_) => {
-                return Err(Error::Unsupported {
-                    what: "PDF417 ECI segments",
-                });
-            }
+            Mode::Eci(_) => unreachable!("ECI segments are handled above"),
         }
     }
     Ok(out)
+}
+
+/// Append the ECI escape sequence for `assignment` (ISO/IEC 15438 §5.5.2).
+fn eci_encode(assignment: u32, out: &mut Vec<u32>) -> Result<()> {
+    match assignment {
+        0..=899 => out.extend_from_slice(&[ECI_CHARSET, assignment]),
+        900..=810_899 => {
+            out.extend_from_slice(&[ECI_GENERAL, assignment / 900 - 1, assignment % 900])
+        }
+        810_900..=ECI_MAX => out.extend_from_slice(&[ECI_USER, assignment - 810_900]),
+        _ => {
+            return Err(Error::invalid_data(
+                "PDF417 ECI assignment number exceeds 811799",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read the ECI escape at `cws[i]`, returning the assignment number and the index
+/// just past the sequence.
+fn eci_decode(cws: &[u32], i: usize) -> Result<(u32, usize)> {
+    let operand = |k: usize| match cws.get(i + k) {
+        Some(&cw) if cw < 900 => Ok(cw),
+        _ => Err(Error::undecodable("invalid PDF417 ECI escape sequence")),
+    };
+    Ok(match cws[i] {
+        ECI_CHARSET => (operand(1)?, i + 2),
+        ECI_GENERAL => ((operand(1)? + 1) * 900 + operand(2)?, i + 3),
+        _ => (810_900 + operand(1)?, i + 2),
+    })
 }
 
 /// Parse corrected data codewords (with the symbol-length descriptor at index 0)
@@ -145,40 +192,36 @@ pub fn decode_segments(data: &[u32]) -> Result<Vec<Segment>> {
     let cws = &data[1..n];
 
     let mut segments = Vec::new();
+    // The compaction mode in force (its latch codeword) and the Text sub-mode state.
+    // Text/Alpha is the default; both persist across an ECI escape, so content that
+    // follows one without a new latch continues where the run before it stopped.
+    let mut mode = LATCH_TEXT;
+    let mut text = TextState::default();
     let mut i = 0;
     while i < cws.len() {
-        let latch = cws[i];
-        match latch {
+        let cw = cws[i];
+        match cw {
             LATCH_TEXT => {
                 // An empty text run is padding and yields no segment.
-                i = text_run_decode(cws, i + 1, &mut segments)?;
+                mode = cw;
+                text = TextState::default();
+                i = text_run_decode(cws, i + 1, &mut segments, &mut text)?;
             }
-            LATCH_NUMERIC => {
-                i += 1;
-                let start = i;
-                while i < cws.len() && cws[i] < 900 {
-                    i += 1;
-                }
-                let digits = numeric_decode(&cws[start..i])?;
-                if !digits.is_empty() {
-                    segments.push(Segment::numeric(digits));
-                }
+            LATCH_NUMERIC | LATCH_BYTE | LATCH_BYTE_6 => {
+                mode = cw;
+                i = plain_run_decode(cws, i + 1, mode, &mut segments)?;
             }
-            LATCH_BYTE | LATCH_BYTE_6 => {
-                i += 1;
-                let start = i;
-                while i < cws.len() && cws[i] < 900 {
-                    i += 1;
-                }
-                let bytes = byte_decode(&cws[start..i], latch);
-                if !bytes.is_empty() {
-                    segments.push(Segment::byte(bytes));
-                }
+            ECI_CHARSET | ECI_GENERAL | ECI_USER => {
+                let (assignment, next) = eci_decode(cws, i)?;
+                segments.push(Segment::eci(assignment));
+                i = next;
             }
-            _ if latch < 900 || latch == SHIFT_BYTE => {
-                // A content codeword (or byte shift) with no active latch. The default
-                // PDF417 mode is Text; treat the run as text.
-                i = text_run_decode(cws, i, &mut segments)?;
+            // Content with no latch of its own: the mode in force takes it.
+            _ if mode == LATCH_TEXT && (cw < 900 || cw == SHIFT_BYTE) => {
+                i = text_run_decode(cws, i, &mut segments, &mut text)?;
+            }
+            _ if cw < 900 => {
+                i = plain_run_decode(cws, i, mode, &mut segments)?;
             }
             _ => {
                 // A ≥900 control codeword we do not handle.
@@ -187,6 +230,51 @@ pub fn decode_segments(data: &[u32]) -> Result<Vec<Segment>> {
         }
     }
     Ok(segments)
+}
+
+/// Decode one Numeric or Byte compaction run (per `mode`, its latch codeword)
+/// starting at `cws[i]`, pushing its segment and returning the index of the
+/// codeword that ends it.
+fn plain_run_decode(
+    cws: &[u32],
+    mut i: usize,
+    mode: u32,
+    segments: &mut Vec<Segment>,
+) -> Result<usize> {
+    let start = i;
+    while i < cws.len() && cws[i] < 900 {
+        i += 1;
+    }
+    let run = &cws[start..i];
+    if mode == LATCH_NUMERIC {
+        let digits = numeric_decode(run)?;
+        if !digits.is_empty() {
+            segments.push(Segment::numeric(digits));
+        }
+    } else {
+        let bytes = byte_decode(run, mode)?;
+        if !bytes.is_empty() {
+            segments.push(Segment::byte(bytes));
+        }
+    }
+    Ok(i)
+}
+
+/// Text compaction sub-mode state carried from one run to the next.
+#[derive(Debug, Clone, Copy)]
+struct TextState {
+    submode: SubMode,
+    /// The sub-mode a pending shift returns to.
+    prior: SubMode,
+}
+
+impl Default for TextState {
+    fn default() -> Self {
+        TextState {
+            submode: SubMode::Alpha,
+            prior: SubMode::Alpha,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -295,22 +383,30 @@ fn text_encode(data: &[u8], out: &mut Vec<u32>) -> Result<()> {
 }
 
 /// Decode one Text compaction run starting at `cws[i]`, pushing its segments and
-/// returning the index of the codeword that ends it (a mode latch, or the end).
+/// returning the index of the codeword that ends it (a mode latch, an escape, or the
+/// end). `state` is the sub-mode to start in and receives the one the run ends in.
 ///
 /// A 913 "shift to Byte" inside the run yields a one-byte [`Mode::Byte`] segment
-/// between the surrounding text; the Text sub-mode carries across it, while a
-/// sub-mode shift left pending before it (the odd-length pad) is dropped.
-fn text_run_decode(cws: &[u32], mut i: usize, segments: &mut Vec<Segment>) -> Result<usize> {
-    let mut submode = SubMode::Alpha;
-    let mut prior = SubMode::Alpha;
+/// between the surrounding text; the Text sub-mode carries across it. A sub-mode
+/// shift left pending where the run is interrupted or ends (the odd-length pad) is
+/// dropped.
+fn text_run_decode(
+    cws: &[u32],
+    mut i: usize,
+    segments: &mut Vec<Segment>,
+    state: &mut TextState,
+) -> Result<usize> {
     loop {
         let start = i;
         while i < cws.len() && cws[i] < 900 {
             i += 1;
         }
-        let bytes = text_decode(&cws[start..i], &mut submode, &mut prior);
+        let bytes = text_decode(&cws[start..i], &mut state.submode, &mut state.prior);
         if !bytes.is_empty() {
             segments.push(Segment::alphanumeric(bytes));
+        }
+        if matches!(state.submode, SubMode::AlphaShift | SubMode::PunctShift) {
+            state.submode = state.prior;
         }
         if i >= cws.len() || cws[i] != SHIFT_BYTE {
             return Ok(i);
@@ -320,9 +416,6 @@ fn text_run_decode(cws: &[u32], mut i: usize, segments: &mut Vec<Segment>) -> Re
             _ => return Err(Error::undecodable("invalid PDF417 byte shift")),
         }
         i += 2;
-        if matches!(submode, SubMode::AlphaShift | SubMode::PunctShift) {
-            submode = prior;
-        }
     }
 }
 
@@ -448,11 +541,15 @@ fn byte_encode(bytes: &[u8], out: &mut Vec<u32>) {
     }
 }
 
-fn byte_decode(slice: &[u32], mode: u32) -> Vec<u8> {
+/// Invert Byte compaction. A five-codeword group is a base-900 number below 256^6
+/// and a lone codeword is one byte; anything larger is not Byte compaction output
+/// and is rejected rather than truncated to fit.
+fn byte_decode(slice: &[u32], mode: u32) -> Result<Vec<u8>> {
     let len = slice.len();
     if len == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+    let bad = || Error::undecodable("invalid PDF417 byte compaction codeword");
     let groups = if mode == LATCH_BYTE_6 {
         len / 5
     } else {
@@ -465,14 +562,17 @@ fn byte_decode(slice: &[u32], mode: u32) -> Vec<u8> {
         for &c in cws {
             v = v * 900 + c as u64;
         }
+        if v >> 48 != 0 {
+            return Err(bad());
+        }
         for i in 0..6 {
             out.push((v >> (8 * (5 - i))) as u8);
         }
     }
     for &c in &slice[groups * 5..] {
-        out.push(c as u8);
+        out.push(u8::try_from(c).map_err(|_| bad())?);
     }
-    out
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +711,133 @@ mod tests {
         assert!(decode_segments(&[4, 810, 913, 256]).is_err());
     }
 
+    /// Byte compaction carries six bytes in five codewords (a base-900 number below
+    /// 256^6) and leftover bytes one per codeword (0..=255). Codewords outside those
+    /// ranges are not bytes; they must be refused, not truncated into some.
+    #[test]
+    fn byte_compaction_rejects_out_of_range_codewords() {
+        // A lone "byte" codeword of 300 (was read as 300 mod 256 = 44).
+        assert!(decode_segments(&[3, 901, 300]).is_err());
+        assert!(decode_segments(&[4, 901, 65, 899]).is_err());
+        // Five codewords whose base-900 value needs more than 48 bits (was read
+        // with the high bits dropped), under either latch.
+        assert!(decode_segments(&[7, 924, 899, 899, 899, 899, 899]).is_err());
+        assert!(decode_segments(&[8, 901, 899, 899, 899, 899, 899, 65]).is_err());
+        // The largest valid group, 256^6 - 1, still decodes.
+        assert_eq!(
+            decode_segments(&[7, 924, 429, 11, 71, 222, 855]).unwrap(),
+            vec![Segment::byte(vec![0xff; 6])]
+        );
+        assert_eq!(
+            encode_segments(&[Segment::byte(vec![0xff; 6])]).unwrap(),
+            vec![924, 429, 11, 71, 222, 855]
+        );
+        // One past it does not.
+        assert!(decode_segments(&[7, 924, 429, 11, 71, 222, 856]).is_err());
+    }
+
+    /// ECI escapes: 927 for assignments up to 899, 926 for up to 810 899 (two
+    /// codewords), 925 above. zint 2.16.0 reference streams
+    /// (`zint -b PDF417 --eci=26 -d é`, and `--eci=811799 -d 123456789012345
+    /// --seg1=810900,98765432109876`).
+    #[test]
+    fn eci_escapes_match_zint() {
+        let segs = decode_segments(&[6, 927, 26, 901, 195, 169]).unwrap();
+        assert_eq!(
+            segs,
+            vec![Segment::eci(26), Segment::byte(vec![0xc3, 0xa9])]
+        );
+        assert_eq!(encode_segments(&segs).unwrap(), [927, 26, 901, 195, 169]);
+
+        let stream = [
+            925, 899, 902, 1, 812, 292, 890, 124, 745, 925, 0, 902, 302, 854, 822, 322, 76,
+        ];
+        let segs = vec![
+            Segment::eci(811_799),
+            Segment::numeric(b"123456789012345".to_vec()),
+            Segment::eci(810_900),
+            Segment::numeric(b"98765432109876".to_vec()),
+        ];
+        assert_eq!(encode_segments(&segs).unwrap(), stream);
+        let mut data = vec![stream.len() as u32 + 1];
+        data.extend_from_slice(&stream);
+        assert_eq!(decode_segments(&data).unwrap(), segs);
+
+        // Every range boundary survives, and nothing past the last one encodes.
+        for n in [0, 3, 899, 900, 901, 1799, 1800, 810_899, 810_900, 811_799] {
+            let stream = encode_segments(&[Segment::eci(n)]).unwrap();
+            let mut data = vec![stream.len() as u32 + 1];
+            data.extend_from_slice(&stream);
+            assert_eq!(
+                decode_segments(&data).unwrap(),
+                vec![Segment::eci(n)],
+                "{n}"
+            );
+        }
+        assert_eq!(encode_segments(&[Segment::eci(900)]).unwrap(), [926, 0, 0]);
+        assert_eq!(
+            encode_segments(&[Segment::eci(810_899)]).unwrap(),
+            [926, 899, 899]
+        );
+        assert!(encode_segments(&[Segment::eci(811_800)]).is_err());
+        assert!(encode_segments(&[Segment::eci(u32::MAX)]).is_err());
+        // A truncated or out-of-range escape is malformed.
+        assert!(decode_segments(&[2, 927]).is_err());
+        assert!(decode_segments(&[3, 927, 900]).is_err());
+        assert!(decode_segments(&[3, 926, 5]).is_err());
+        assert!(decode_segments(&[2, 925]).is_err());
+    }
+
+    /// Data that carries on after an ECI escape without a new latch stays in the
+    /// compaction mode — and Text sub-mode — that was in force. zint 2.16.0,
+    /// `zint -b PDF417 --eci=3 -d abc --seg1=899,de7 --seg2=900,XYZ`: `de` follows
+    /// ECI 899 still in the Lower sub-mode, `XYZ` follows ECI 900 from Mixed.
+    #[test]
+    fn mode_and_submode_persist_across_eci() {
+        let segs = decode_segments(&[14, 927, 3, 810, 32, 927, 899, 94, 847, 926, 0, 0, 863, 745])
+            .unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::eci(3),
+                Segment::alphanumeric(b"abc".to_vec()),
+                Segment::eci(899),
+                Segment::alphanumeric(b"de7".to_vec()),
+                Segment::eci(900),
+                Segment::alphanumeric(b"XYZ".to_vec()),
+            ]
+        );
+        // The same for Byte and Numeric compaction: no re-latch needed.
+        let segs = decode_segments(&[8, 901, 65, 66, 927, 4, 67, 68]).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::byte(b"AB".to_vec()),
+                Segment::eci(4),
+                Segment::byte(b"CD".to_vec()),
+            ]
+        );
+        let segs = decode_segments(&[8, 902, 12, 434, 927, 4, 12, 434]).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::numeric(b"1234".to_vec()),
+                Segment::eci(4),
+                Segment::numeric(b"1234".to_vec()),
+            ]
+        );
+        // A latch after the escape still resets Text compaction to Alpha.
+        let segs = decode_segments(&[8, 810, 32, 927, 4, 900, 1, 63]).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                Segment::alphanumeric(b"abc".to_vec()),
+                Segment::eci(4),
+                Segment::alphanumeric(b"ABCD".to_vec()),
+            ]
+        );
+    }
+
     /// Garbage codeword streams must decode or fail cleanly, never panic.
     #[test]
     fn garbage_streams_never_panic() {
@@ -628,7 +855,7 @@ mod tests {
                     // Bias towards the mode latches so every branch is reached.
                     match next() % 8 {
                         0 => 900 + (next() % 29) as u32,
-                        1 => [900, 901, 902, 913, 924][(next() % 5) as usize],
+                        1 => [900, 901, 902, 913, 924, 925, 926, 927][(next() % 8) as usize],
                         _ => (next() % 900) as u32,
                     }
                 })

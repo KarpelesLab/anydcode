@@ -81,6 +81,11 @@ impl Encode for Pdf417Encoder {
             SymbolMeta::Pdf417(m) => m,
             _ => return Err(Error::invalid_parameter("PDF417 symbol missing Pdf417Meta")),
         };
+        if meta.variant != super::Pdf417Variant::Standard {
+            return Err(Error::invalid_parameter(
+                "PDF417 symbol carries a MicroPDF417 variant",
+            ));
+        }
         let matrix = render(&symbol.segments, meta)?;
         Ok(Encoding::Matrix(matrix))
     }

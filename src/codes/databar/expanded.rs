@@ -36,7 +36,7 @@ use super::tables::{
     EXP_CHECK_WEIGHT, EXP_FINDER, EXP_FINDER_SEQUENCE, EXP_G_SUM, EXP_MODULES, EXP_T_EVEN,
     EXP_WEIGHT_ROWS, EXP_WIDEST, gtin_check_digit,
 };
-use super::widths::{get_value, interleave};
+use super::widths::{get_value, get_widths, interleave};
 use super::{DataBarMeta, DataBarVariant};
 use crate::error::{Error, Result};
 #[cfg(all(feature = "alloc", feature = "encode"))]
@@ -263,6 +263,16 @@ fn digit_or_fnc1(c: u8) -> u32 {
 /// the ISO/IEC 24724:2011 §7.2.8 rule that pads a would-be single-character last row
 /// out to a full column pair.
 fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> {
+    // FNC1 separates two fields, so it can neither end the data nor repeat. Neither
+    // form has an encoding of its own: a numeric pair "digit, FNC1" at the end *is*
+    // the lone-trailing-digit terminator (§7.2.5.5.1 c), and a numeric pair of two
+    // FNC1s (value 128) does not fit the 7-bit pair field.
+    if reduced.last() == Some(&FNC1) || reduced.windows(2).any(|w| w == [FNC1, FNC1]) {
+        return Err(Error::invalid_data(
+            "DataBar Expanded: FNC1 must separate two fields (it cannot end the data or repeat)",
+        ));
+    }
+
     let mut bits: Vec<bool> = Vec::new();
     bits.push(false); // linkage flag: standalone (non-composite)
 
@@ -564,8 +574,20 @@ fn char_value(w: &[i32; 8]) -> Result<i32> {
         .iter()
         .position(|&m| m == n_odd)
         .ok_or_else(|| Error::undecodable("DataBar Expanded: bad symbol-character module sum"))?;
+    let bad = || Error::undecodable("DataBar Expanded: malformed symbol character");
+    if even.iter().sum::<i32>() != 17 - n_odd {
+        return Err(bad());
+    }
     let odd_val = get_value(&odd, EXP_WIDEST[group], true);
     let even_val = get_value(&even, 9 - EXP_WIDEST[group], false);
+    // Only the width tuples the encoder can produce are symbol characters.
+    if odd_val < 0
+        || even_val < 0
+        || get_widths(odd_val, n_odd, 4, EXP_WIDEST[group], true) != odd
+        || get_widths(even_val, 17 - n_odd, 4, 9 - EXP_WIDEST[group], false) != even
+    {
+        return Err(bad());
+    }
     Ok(EXP_G_SUM[group] + (odd_val * EXP_T_EVEN[group] as i64 + even_val) as i32)
 }
 

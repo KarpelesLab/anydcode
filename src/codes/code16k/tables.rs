@@ -106,7 +106,8 @@ pub(crate) const ROW_WIDTH: usize = 70;
 /// the encoder's `build` path so both produce identical payload segments.
 ///
 /// Mode values `0..=4` start in set A/B/C (optionally GS1); modes `5`/`6` start in
-/// set C with an implied Shift B on the first one / two data characters. Because
+/// set C with an implied Shift B on the first one / two data characters. An FNC1
+/// among the data is a GS1 field separator and decodes to the GS byte (`0x1D`). Because
 /// re-encoding renders from the stored symbol values rather than these segments,
 /// segment fidelity never affects the round-trip identity.
 pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
@@ -129,10 +130,13 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     let mut shift: Option<Set> = None;
     let mut fnc4 = Fnc4::default();
 
-    for &v in &values[1..] {
+    for (idx, &v) in values[1..].iter().enumerate() {
         if v == PAD {
             continue;
         }
+        // FNC1 as the very first character of a mode 0..=2 symbol flags GS1 data,
+        // exactly as modes 3/4 imply, and carries no payload.
+        let leading = idx == 0 && m <= 2;
         let active = if implied_b > 0 {
             implied_b -= 1;
             Set::B
@@ -147,7 +151,7 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
                 }
                 CODE_B => set = Set::B,
                 CODE_A => set = Set::A,
-                FNC1 => {}
+                FNC1 => push_fnc1(&mut bytes, leading),
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set C")),
             },
             Set::A => match v {
@@ -157,7 +161,7 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
                 CODE_C => set = Set::C,
                 CODE_B => set = Set::B,
                 101 => fnc4.toggle(), // FNC4 in Set A
-                FNC1 => {}
+                FNC1 => push_fnc1(&mut bytes, leading),
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set A")),
             },
             Set::B => match v {
@@ -167,7 +171,7 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
                 CODE_C => set = Set::C,
                 100 => fnc4.toggle(), // FNC4 in Set B
                 CODE_A => set = Set::A,
-                FNC1 => {}
+                FNC1 => push_fnc1(&mut bytes, leading),
                 _ => return Err(Error::undecodable("invalid symbol in Code 16K set B")),
             },
         }
@@ -178,6 +182,18 @@ pub(crate) fn reconstruct_segments(values: &[u8]) -> Result<Vec<Segment>> {
     } else {
         vec![Segment::byte(bytes)]
     })
+}
+
+/// GS1 field separator byte a non-leading FNC1 is transmitted as.
+const GS: u8 = 0x1D;
+
+/// Push the payload effect of an FNC1: the GS1 flag in the first position emits
+/// nothing; any later FNC1 separates variable-length fields and is transmitted as the
+/// GS control byte (as in Code 128, on which Code 16K's character set is built).
+fn push_fnc1(bytes: &mut Vec<u8>, leading: bool) {
+    if !leading {
+        bytes.push(GS);
+    }
 }
 
 /// Code 128 extended-ASCII (FNC4) state: a single FNC4 adds 128 to the next data

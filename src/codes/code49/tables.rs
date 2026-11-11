@@ -722,15 +722,12 @@ pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
         rev.insert((entry[0], entry[1]), b as u8);
     }
 
-    // Codeword -> INSET character.
-    let inset = |c: u8| {
-        INSET
-            .get(c as usize)
-            .copied()
-            .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))
-    };
-
-    let mut bytes = Vec::new();
+    // Pass 1: expand the codewords into the INSET character stream, turning every
+    // Numeric Encodation run back into its digit characters. The shift characters
+    // act on this stream, not on the codewords: an encoder forms the stream first
+    // and then compacts its digit runs, so the digit completing a Shift pair (`\\`
+    // is Shift 2 + `8`) may itself be the first digit of a numeric run.
+    let mut chars: Vec<u8> = Vec::with_capacity(codewords.len() * 2);
     let mut i = 0;
     while i < codewords.len() {
         if codewords[i] == PAD {
@@ -744,22 +741,40 @@ pub(crate) fn reconstruct_segments(meta: &Code49Meta) -> Result<Vec<Segment>> {
                 .iter()
                 .position(|&c| c == PAD)
                 .map_or(codewords.len(), |p| i + p);
-            numeric_decode(&codewords[i..end], &mut bytes)?;
+            numeric_decode(&codewords[i..end], &mut chars)?;
             i = end;
             continue;
         }
-        let c1 = inset(codewords[i])?;
+        chars.push(
+            INSET
+                .get(codewords[i] as usize)
+                .copied()
+                .ok_or_else(|| Error::undecodable("Code 49 codeword out of chart range"))?,
+        );
+        i += 1;
+    }
+
+    // Pass 2: resolve Shift pairs and FNC1 over the character stream.
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c1 = chars[i];
         if c1 == SHIFT1 || c1 == SHIFT2 {
-            let c2 = inset(
-                *codewords
-                    .get(i + 1)
-                    .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?,
-            )?;
+            let c2 = *chars
+                .get(i + 1)
+                .ok_or_else(|| Error::undecodable("Code 49 dangling shift character"))?;
             let b = *rev
                 .get(&(c1, c2))
                 .ok_or_else(|| Error::undecodable("Code 49 unknown shifted character"))?;
             bytes.push(b);
             i += 2;
+        } else if c1 == FNC1_CHAR {
+            // FNC1 in the first position flags GS1 data and carries no payload; a
+            // later one separates variable-length fields and is transmitted as GS.
+            if i != 0 {
+                bytes.push(GS);
+            }
+            i += 1;
         } else {
             match rev.get(&(c1, 0)) {
                 Some(&b) => bytes.push(b),
@@ -826,6 +841,12 @@ pub(crate) fn extract_codewords(grid: &[u8], rows: usize) -> Vec<u8> {
 const SHIFT1: u8 = b'!';
 
 const SHIFT2: u8 = b'&';
+
+/// FNC1 INSET character byte (codeword 45).
+const FNC1_CHAR: u8 = b'*';
+
+/// The GS control byte an FNC1 field separator is transmitted as.
+const GS: u8 = 0x1D;
 
 /// Pad / numeric-shift codeword value.
 const PAD: u8 = 48;

@@ -133,6 +133,13 @@ pub(crate) fn render(meta: &Code16kMeta) -> Result<BitMatrix> {
             ));
         }
     }
+    // The first character states the row count (`7 * (rows - 2) + mode`); a symbol
+    // whose first character disagrees with its height cannot be read back.
+    if meta.values[0] as usize / 7 + 2 != rows {
+        return Err(Error::invalid_parameter(
+            "Code 16K mode character disagrees with the row count",
+        ));
+    }
     let (c1, c2) = checksum(&meta.values);
     let mut full = meta.values.clone();
     full.push(c1);

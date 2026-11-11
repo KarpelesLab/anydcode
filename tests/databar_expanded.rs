@@ -435,3 +435,89 @@ fn decode_rejects_corrupted_expanded() {
     }
     assert!(dec.decode(&Encoding::Linear(p)).is_err());
 }
+
+/// FNC1 separates two fields. At the end of the data, or doubled, it has no encoding
+/// of its own: the numeric pair "digit, FNC1" closing the data *is* the terminator
+/// for a lone trailing digit (§7.2.5.5.1 c), and a pair of two FNC1s (value 128)
+/// does not fit the 7-bit pair field. Such input must be refused — it used to be
+/// accepted and then decode to something else (`010<FNC1>` to `010`, `01<FNC1>` to
+/// `0152`, `01<FNC1><FNC1>91` to `0191`), or overflow while encoding.
+#[test]
+fn rejects_trailing_and_doubled_fnc1() {
+    use anyd::error::Error;
+    use anyd::segment::Segment;
+    use anyd::symbol::Symbol;
+
+    let enc = DataBarEncoder::new();
+    let bad: &[&[u8]] = &[
+        b"\x1d",
+        b"01\x1d",
+        b"010\x1d",
+        b"10AB\x1d",
+        b"10ab\x1d",
+        b"01\x1d\x1d91",
+        b"10AB\x1d\x1d21X",
+        b"\x1d\x1d1012",
+        // A method 1 symbol whose general field ends in / doubles FNC1.
+        b"010950110153000310AB\x1d",
+        b"0109501101530003101\x1d\x1d2",
+    ];
+    for &reduced in bad {
+        assert!(
+            matches!(enc.build_expanded(reduced), Err(Error::InvalidData { .. })),
+            "{reduced:?}"
+        );
+        assert!(
+            matches!(
+                enc.build_expanded_stacked(reduced, 2),
+                Err(Error::InvalidData { .. })
+            ),
+            "{reduced:?}"
+        );
+        // The same payload handed straight to `encode` is refused as well.
+        let symbol = Symbol::new(
+            Symbology::DataBarExpanded,
+            vec![Segment::byte(reduced.to_vec())],
+            SymbolMeta::DataBar(DataBarMeta::new(DataBarVariant::Expanded)),
+        );
+        assert!(enc.encode(&symbol).is_err(), "{reduced:?}");
+    }
+    // A single FNC1 between two fields — in every mode, and as either half of a
+    // numeric pair — still round-trips.
+    for reduced in [
+        &b"1012\x1d2134"[..],
+        b"101\x1d2134",
+        b"10AB\x1d21X",
+        b"10ab\x1d21x",
+        b"\x1d1012",
+    ] {
+        assert_roundtrip(reduced);
+    }
+}
+
+/// Capacity boundary: 21 data characters (252 bits). With the (01) GTIN compressed
+/// by method 1 that is the 74 digits GS1 quotes as the numeric maximum; one digit
+/// more must be a capacity error, never a truncated symbol.
+#[test]
+fn numeric_capacity_is_74_digits() {
+    use anyd::error::Error;
+
+    let enc = DataBarEncoder::new();
+    let mut reduced = b"0109501101530003".to_vec();
+    reduced.extend((0..58).map(|i| b'0' + (i % 10) as u8));
+    assert_eq!(reduced.len(), 74);
+    assert_roundtrip(&reduced);
+    for extra in 1..=3 {
+        let mut longer = reduced.clone();
+        longer.extend(core::iter::repeat_n(b'7', extra));
+        assert!(
+            matches!(enc.build_expanded(&longer), Err(Error::Capacity { .. })),
+            "{} digits",
+            longer.len()
+        );
+        assert!(matches!(
+            enc.build_expanded_stacked(&longer, 2),
+            Err(Error::Capacity { .. })
+        ));
+    }
+}

@@ -7,7 +7,7 @@
 
 use super::Code49Meta;
 use super::tables::{ASCII_TO_INSET, EVEN_BITPATTERN, INSET, ODD_BITPATTERN, ROW_PARITY};
-use super::tables::{ROW_WIDTH, compute_grid, reconstruct_segments};
+use super::tables::{ROW_WIDTH, compute_grid, extract_codewords, reconstruct_segments};
 use crate::error::{Error, Result};
 use crate::output::{BitMatrix, Encoding};
 use crate::symbol::{Symbol, SymbolMeta};
@@ -133,6 +133,23 @@ pub(crate) fn render(meta: &Code49Meta) -> Result<BitMatrix> {
                 "Code 49 codeword value out of range",
             ));
         }
+    }
+
+    // The grid stores its own derived cells — the mode/row-count character and every
+    // row and symbol check character. Recompute them from the data cells: a grid
+    // that disagrees with itself is not a Code 49 symbol and cannot be read back.
+    let mode_char = meta.grid[(rows - 1) * 8 + 6];
+    let consistent = mode_char as usize / 7 + 2 == rows
+        && compute_grid(
+            &extract_codewords(&meta.grid, rows),
+            mode_char % 7,
+            Some(rows),
+        )
+        .is_ok_and(|(r, grid)| r == rows && grid == meta.grid);
+    if !consistent {
+        return Err(Error::invalid_parameter(
+            "Code 49 grid has inconsistent check or mode characters",
+        ));
     }
 
     let mut matrix = BitMatrix::new(ROW_WIDTH, rows, QUIET_ZONE);

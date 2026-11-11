@@ -183,3 +183,31 @@ fn zint_extended_ascii_fnc4() {
     ]);
     assert_eq!(decoded.payload_bytes(), b"\xE0\xE1\xE2\xE3\xE4\xE5x\xE6");
 }
+
+/// An FNC1 among the data is a GS1 field separator: it must reach the payload as the
+/// GS byte, or two variable-length fields run together. Reference symbol from zint
+/// 2.16.0 (`zint -b CODE16K --gs1 -d '[10]AB[21]X' --dump`): mode 3 (set B, implied
+/// leading FNC1), then `1 0 A B FNC1 2 1 X`.
+#[test]
+fn zint_gs1_fnc1_separator_decodes_as_gs() {
+    let dump = [
+        "E5 37 6C 65 89 AE 77 4E 34",
+        "CD 0A 26 35 8C 8E 92 F6 64",
+        "D9 2F 65 EC BD 8E 93 1A 4C",
+    ];
+    let decoded = decode_zint_dump(&dump);
+    let SymbolMeta::Code16k(meta) = &decoded.meta else {
+        panic!();
+    };
+    assert_eq!(meta.values[..9], [10, 17, 16, 33, 34, 102, 18, 17, 56]);
+    assert_eq!(decoded.payload_bytes(), b"10AB\x1d21X");
+    // The pinned symbol values still re-encode to the identical symbol.
+    let Encoding::Matrix(m) = Code16kEncoder::new().encode(&decoded).unwrap() else {
+        panic!("expected matrix");
+    };
+    for (row, hex) in dump.iter().enumerate() {
+        for (x, &b) in bits_from_hex(hex, 70).iter().enumerate() {
+            assert_eq!(m.get(x, row), b, "row {row} col {x} differs from zint");
+        }
+    }
+}

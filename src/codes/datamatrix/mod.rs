@@ -23,6 +23,18 @@
 //! `encode(decode(encoding)) == encoding` holds. Segments always use [`Mode::Byte`];
 //! [`DataMatrixMeta`] records the square size and the per-segment encodation.
 //!
+//! A symbol segmented any other way re-encodes identically too. The decoder merges
+//! adjacent ASCII runs, except where that would change how digits pair up: a digit
+//! encoded on its own and followed by another digit ends its segment, since the
+//! encoder packs two adjacent digits of one segment into a single codeword.
+//!
+//! A Base256 length field of 0 means "to the end of the symbol". A Base256 run that
+//! is the last segment and ends on the last data codeword is written that way, as
+//! zint, ZXing and libdmtx do (so their symbols re-encode identically); a run that
+//! carries its byte count there instead decodes with an empty ASCII segment after
+//! it. For the same reason an empty Base256 segment is only accepted as the last
+//! codewords of a symbol it fills exactly.
+//!
 //! [`Symbol`]: crate::Symbol
 //! [`BitMatrix`]: crate::output::BitMatrix
 //! [`Mode::Byte`]: crate::segment::Mode::Byte

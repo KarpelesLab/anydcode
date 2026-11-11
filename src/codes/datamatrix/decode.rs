@@ -100,19 +100,33 @@ fn deinterleave_and_correct(full: &[u8], spec: &SquareSpec) -> Result<Vec<u8>> {
 
 /// Parse corrected data codewords into segments and their encodations, stopping at
 /// the first pad codeword. ASCII is the base state; a Base256 latch introduces a
-/// length-prefixed randomized run and then returns to ASCII.
+/// length-prefixed randomized run and then returns to ASCII. An ASCII run is one
+/// segment unless it holds digits that were not paired the way the encoder pairs
+/// them, in which case it is split there so that it re-encodes codeword for codeword.
 fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
     let mut segments = Vec::new();
     let mut encodations = Vec::new();
     let mut ascii: Vec<u8> = Vec::new();
+    // Whether the previous codeword was a digit encoded on its own. The encoder
+    // packs two adjacent digits of one ASCII segment into a pair codeword, so a lone
+    // digit followed by more digits can only be reproduced as the end of a segment.
+    let mut lone_digit = false;
     let mut i = 0;
 
     while i < data.len() {
         let cw = data[i];
         i += 1;
+        let after_lone_digit = core::mem::take(&mut lone_digit);
+        if after_lone_digit && matches!(cw, 49..=58 | 130..=229) {
+            segments.push(Segment::byte(core::mem::take(&mut ascii)));
+            encodations.push(Encodation::Ascii);
+        }
         match cw {
             PAD => break,
-            1..=128 => ascii.push(cw - 1),
+            1..=128 => {
+                ascii.push(cw - 1);
+                lone_digit = matches!(cw, 49..=58);
+            }
             130..=229 => {
                 let v = cw - 130;
                 ascii.push(b'0' + v / 10);
@@ -128,9 +142,18 @@ fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
                     segments.push(Segment::byte(core::mem::take(&mut ascii)));
                     encodations.push(Encodation::Ascii);
                 }
-                let bytes = read_base256(data, &mut i)?;
+                let (bytes, counted) = read_base256(data, &mut i)?;
+                let short = bytes.len() < 250;
                 segments.push(Segment::byte(bytes));
                 encodations.push(Encodation::Base256);
+                // A run that reaches the end of the symbol is normally written with
+                // a zero length field, and that is what the encoder does for a final
+                // Base256 segment. One that carries its byte count instead is told
+                // apart by an empty ASCII segment after it.
+                if counted && short && i == data.len() {
+                    segments.push(Segment::byte(Vec::new()));
+                    encodations.push(Encodation::Ascii);
+                }
             }
             _ => {
                 return Err(Error::Unsupported {
@@ -153,13 +176,15 @@ fn parse_codewords(data: &[u8]) -> Result<(Vec<Segment>, Vec<Encodation>)> {
 }
 
 /// Read one Base256 run starting at `*i` (positioned just after the latch),
-/// advancing `*i` past it. Length field and payload are de-randomized.
-fn read_base256(data: &[u8], i: &mut usize) -> Result<Vec<u8>> {
+/// advancing `*i` past it. Length field and payload are de-randomized. Also returns
+/// whether the length field held a byte count (rather than 0, "to the end of the
+/// symbol").
+fn read_base256(data: &[u8], i: &mut usize) -> Result<(Vec<u8>, bool)> {
     let pos0 = *i + 1;
     let l1 = unrandomize_255(*data.get(*i).ok_or_else(trunc)?, pos0);
     *i += 1;
     let count = if l1 == 0 {
-        // "Rest of the symbol" length; encoder never emits this, but honor it.
+        // The run takes every remaining data codeword of the symbol.
         data.len() - *i
     } else if l1 <= 249 {
         l1 as usize
@@ -175,7 +200,7 @@ fn read_base256(data: &[u8], i: &mut usize) -> Result<Vec<u8>> {
         bytes.push(unrandomize_255(*data.get(*i).ok_or_else(trunc)?, pos));
         *i += 1;
     }
-    Ok(bytes)
+    Ok((bytes, l1 != 0))
 }
 
 /// Inverse of the Base256 "255-state" randomizing algorithm.

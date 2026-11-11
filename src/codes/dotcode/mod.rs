@@ -46,7 +46,9 @@
 //!
 //! - **Structured Append** and multi-segment **ECI** planning are not implemented in
 //!   the fresh-input builder (single-segment ECI is). Reader-init (FNC3) is decodable
-//!   but not exposed as a build option.
+//!   but not exposed as a build option. A Structured Append symbol decodes to its own
+//!   message: the position/count trailer is kept in [`DotCodeMeta::codewords`] (so
+//!   the symbol re-encodes exactly) but is neither part of the payload nor reported.
 //!
 //! [`Symbol`]: crate::Symbol
 //! [`Segment`]: crate::Segment

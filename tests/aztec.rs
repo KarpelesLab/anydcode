@@ -336,6 +336,71 @@ fn decodes_third_party_eci_escape() {
     assert_eq!(decoded.payload_bytes(), "héllo wörld".as_bytes());
 }
 
+/// `zint -b AZTEC --structapp=1,3 -d ABC`: symbol 1 of 3 (header "AC").
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND: &[&str] = &[
+    "000010110110011",
+    "110000111001011",
+    "101100000100110",
+    "111111111111110",
+    "111100000001101",
+    "010101111101011",
+    "001101000101011",
+    "010101010101011",
+    "000101000101101",
+    "011101111101010",
+    "000100000001111",
+    "000111111111110",
+    "010011011110010",
+    "001010001111101",
+    "100100010011111",
+];
+
+/// `zint -b AZTEC --structapp=2,3,ID -d ABC`: symbol 2 of 3 of file "ID" (header
+/// " ID BC").
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND_WITH_ID: &[&str] = &[
+    "001001111101110",
+    "110101101001010",
+    "101100001000100",
+    "111111111111100",
+    "111100000001101",
+    "010101111101110",
+    "000101000101111",
+    "001101010101001",
+    "101101000101011",
+    "100101111101000",
+    "100100000001011",
+    "000111111111111",
+    "100001100010010",
+    "001010100100101",
+    "100001000000100",
+];
+
+#[test]
+fn structured_append_header_is_not_read_as_payload() {
+    // The message of a Structured Append symbol opens with M/L U/L and a header
+    // (optional file id, position letter, count letter). Nothing in `AztecMeta` can
+    // hold it, so the symbol is reported as unsupported rather than decoded with the
+    // header glued onto the data ("ACABC") and re-encoded as an ordinary symbol.
+    for rows in [ZINT_STRUCTURED_APPEND, ZINT_STRUCTURED_APPEND_WITH_ID] {
+        let reference = Encoding::Matrix(matrix_from_rows(rows));
+        assert!(matches!(
+            AztecDecoder::new().decode(&reference),
+            Err(anyd::Error::Unsupported { .. })
+        ));
+    }
+    // An ordinary message that merely uses Mixed and Upper characters is unaffected.
+    let enc = AztecEncoder::new();
+    for payload in [&b"\x01A"[..], b"@ABC", b"\x1b\x1bXY", b"AC ABC"] {
+        let symbol = enc.build(vec![Segment::byte(payload)]).unwrap();
+        let decoded = AztecDecoder::new()
+            .decode(&enc.encode(&symbol).unwrap())
+            .unwrap();
+        assert_eq!(decoded.payload_bytes(), payload);
+    }
+}
+
 #[test]
 fn unsupported_layer_counts_are_errors_not_panics() {
     // Hand-built metadata outside the supported sizes (compact 1-4, full 1-22 layers)
@@ -472,4 +537,59 @@ fn every_length_up_to_capacity_round_trips() {
         }
         assert!(refused, "capacity limit never reached");
     }
+}
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::symbol::Symbol;
+    use anyd::symbology::Symbology;
+    let enc = AztecEncoder::new();
+    let good = enc.build_text("AZTEC").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::DataMatrix;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let bare = Symbol::new(Symbology::Aztec, good.segments.clone(), SymbolMeta::Generic);
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // ECI segments decode but cannot be encoded, when building or rendering.
+    let eci = vec![Segment::eci(26), Segment::byte(b"x".to_vec())];
+    assert!(matches!(
+        enc.build(eci.clone()),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    let with_eci = Symbol::new(Symbology::Aztec, eci, good.meta.clone());
+    assert!(matches!(
+        enc.encode(&with_eci),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    // No symbol holds zero data codewords, so an empty message is refused.
+    assert!(matches!(
+        enc.build(vec![Segment::byte(Vec::new())]),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(matches!(
+        enc.build(Vec::new()),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    // Segments of any data mode are flattened into the one byte payload.
+    let mixed = enc
+        .build(vec![
+            Segment::numeric(b"123".to_vec()),
+            Segment::alphanumeric(b"AB".to_vec()),
+            Segment::byte(b"c".to_vec()),
+        ])
+        .unwrap();
+    assert_eq!(mixed.segments, vec![Segment::byte(b"123ABc".to_vec())]);
+    // A linear pattern is not an Aztec symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        AztecDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
 }

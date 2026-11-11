@@ -164,6 +164,109 @@ fn decodes_iso_figureb2_ups_symbol() {
     assert!(text.contains("PITTSBURGH"), "missing city: {text:?}");
 }
 
+/// `zint -b MAXICODE --mode=4 --structapp=2,5 -d abc`: symbol 2 of 5.
+const ZINT_MODE4_STRUCTURED_APPEND: [&str; 33] = [
+    "010101010101010101010101010111",
+    "000000000000000000000000000000",
+    "101010101010101010101010101010",
+    "010101010101010101010101010110",
+    "000000000000000000000000000001",
+    "101010101010101010101010101000",
+    "010101010101010101010101010110",
+    "000000000000000000000000000010",
+    "101010101010101010101010101001",
+    "010101010011000000000101010100",
+    "000000000011110010000000000000",
+    "101010100110000000101110101010",
+    "010101110100000000111101010110",
+    "000000010000000000110100000000",
+    "101010001000000000010010101000",
+    "010101110000000000001001010110",
+    "000000001000000000001000000010",
+    "101010000000000000001110101000",
+    "010101000100000000001101010111",
+    "000000111100000000000100000010",
+    "101010011000000000111010101011",
+    "010101011100000000111001010100",
+    "000000000110010111111100000011",
+    "101010101010000001000010101010",
+    "010101010101010101011111010111",
+    "000000000000000000001111010110",
+    "101010101010101010100000000010",
+    "111111110000111100000101000000",
+    "010110101111000011110101010100",
+    "101010100000010101011111101010",
+    "111101011010000011110101101010",
+    "010110101111010110101010111100",
+    "010100000000010110101010010100",
+];
+
+/// `zint -b MAXICODE --mode=2 --primary=152382802840001 --structapp=3,8 -d abc`:
+/// symbol 3 of 8, the indicator leading the secondary message.
+const ZINT_MODE2_STRUCTURED_APPEND: [&str; 33] = [
+    "011011000000010101010101010111",
+    "001011000000000000000000000010",
+    "101111100111101010101010101011",
+    "010101010101010101010101010110",
+    "000000000000000000000000000001",
+    "101010101010101010101010101010",
+    "010101010101010101010101010110",
+    "000000000000000000000000000010",
+    "101010101010101010101010101011",
+    "010101010011010000011001010100",
+    "000000000011110000001100000011",
+    "101010101000000001011110101000",
+    "010101000000000000010101010110",
+    "000000100000000000011000000000",
+    "101010010000000000000110101000",
+    "010101010000000000011101010100",
+    "000000001000000000001000000010",
+    "101010101000000000001010101000",
+    "010101111100000000001101010111",
+    "000000101100000000001000000000",
+    "101010111010000000011110101001",
+    "010101010000000000110101010110",
+    "000000001110100101100100000010",
+    "101010100010101001100010101000",
+    "010101010101010101010000010001",
+    "000000000000000000001000001010",
+    "101010101010101010100000111011",
+    "110001111101101110011001111100",
+    "000100000010000110100010001100",
+    "010110101100101101100000111010",
+    "100101001011000100110001010010",
+    "010100101010110010101110100000",
+    "001001101100011000110110001000",
+];
+
+#[test]
+fn structured_append_indicator_is_not_payload() {
+    // A Pad in the first data position followed by a sequence codeword (position and
+    // count, three bits each) marks a Structured Append symbol. The sequence
+    // codeword is not a Code Set A character of the message ("L" for 2 of 5).
+    let enc = MaxiCodeEncoder::new();
+    let dec = MaxiCodeDecoder::new();
+    for (rows, mode, sequence) in [
+        (&ZINT_MODE4_STRUCTURED_APPEND, 4u8, 0o14u8),
+        (&ZINT_MODE2_STRUCTURED_APPEND, 2, 0o27),
+    ] {
+        let reference = Encoding::Matrix(matrix_from_rows(rows));
+        let sym = dec.decode(&reference).unwrap();
+        assert_eq!(sym.payload_bytes(), b"abc", "mode {mode}");
+        // The indicator stays in the body, so the symbol re-encodes whole.
+        let meta = meta(&sym);
+        assert_eq!(meta.mode, mode);
+        assert_eq!(meta.body[..2], [33, sequence], "mode {mode}");
+        assert_eq!(enc.encode(&sym).unwrap(), reference, "mode {mode}");
+    }
+    // A leading Pad not followed by a sequence codeword is just padding: position 5
+    // of 2 (an all-pad body) or 1 of 1 mean nothing.
+    assert_eq!(enc.build(b"").unwrap().payload_bytes(), b"");
+    let plain = with_meta(&enc.build(b"").unwrap(), |m| m.body[1] = 0);
+    let decoded = dec.decode(&enc.encode(&plain).unwrap()).unwrap();
+    assert_eq!(decoded.payload_bytes(), b"\r");
+}
+
 /// Full lossless invariant: decode recovers identical segments + meta, and the
 /// decoded symbol re-encodes byte-for-byte.
 fn assert_lossless(sym: &anyd::Symbol) {
@@ -404,5 +507,94 @@ fn decoder_never_panics_on_garbage() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::symbology::Symbology;
+    let enc = MaxiCodeEncoder::new();
+    let good = enc.build(b"MAXI").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut bare = good.clone();
+    bare.meta = SymbolMeta::Generic;
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // Modes outside 2..=6, a body of the wrong length, a carrier-less mode 2/3.
+    for mode in [0u8, 1, 7, 255] {
+        let broken = with_meta(&good, |m| m.mode = mode);
+        assert!(enc.encode(&broken).is_err(), "mode {mode}");
+        assert!(enc.build_mode(b"X", mode).is_err(), "mode {mode}");
+    }
+    for mode in [2u8, 3] {
+        assert!(enc.build_mode(b"X", mode).is_err(), "build_mode({mode})");
+    }
+    for mode in [0u8, 1, 4, 5, 6, 7] {
+        assert!(
+            enc.build_structured(mode, "12345", 840, 1, b"X").is_err(),
+            "build_structured({mode})"
+        );
+    }
+    let broken = with_meta(&good, |m| m.body.pop().map(|_| ()).unwrap());
+    assert!(enc.encode(&broken).is_err());
+    let broken = with_meta(&good, |m| m.mode = 5);
+    assert!(
+        enc.encode(&broken).is_err(),
+        "mode 5 with a 93-codeword body"
+    );
+    let structured = enc.build_structured(2, "12345", 840, 1, b"X").unwrap();
+    let broken = with_meta(&structured, |m| m.carrier = None);
+    assert!(enc.encode(&broken).is_err());
+    assert!(enc.build_structured(2, "12345", 1000, 1, b"X").is_err());
+    assert!(enc.build_structured(2, "12345", 1, 1000, b"X").is_err());
+    assert!(enc.build_structured(2, "1234567890", 1, 1, b"X").is_err());
+    assert!(enc.build_structured(3, "ABCDEFG", 1, 1, b"X").is_err());
+    assert!(enc.build_structured(3, "ab{c", 1, 1, b"X").is_err());
+    // Mode 3 postcodes are upper-cased and space-padded to six characters.
+    let padded = enc.build_structured(3, "b1050", 56, 999, b"X").unwrap();
+    assert_eq!(meta(&padded).carrier.as_ref().unwrap().postcode, "B1050 ");
+    assert_lossless(&padded);
+    // The default metadata is an encodable, empty Mode 4 symbol.
+    let empty = anyd::Symbol::new(
+        Symbology::MaxiCode,
+        Vec::new(),
+        SymbolMeta::MaxiCode(MaxiCodeMeta::default()),
+    );
+    let decoded = MaxiCodeDecoder::new()
+        .decode(&enc.encode(&empty).unwrap())
+        .unwrap();
+    assert_eq!(meta(&decoded), &MaxiCodeMeta::default());
+    // A linear pattern is not a MaxiCode symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        MaxiCodeDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn every_byte_value_round_trips_in_every_mode() {
+    // Each of the 256 byte values lives in one of the five code sets; reaching it
+    // from Code Set A and from Code Set B, then leaving it again, exercises every
+    // latch the encoder emits.
+    let enc = MaxiCodeEncoder::new();
+    for b in 0..=255u8 {
+        let payload = [b, b'A', b, b, b'a', b];
+        for mode in 4..=6 {
+            let sym = enc.build_mode(&payload, mode).unwrap();
+            assert_eq!(sym.payload_bytes(), payload, "byte {b:#04x} mode {mode}");
+            assert_lossless(&sym);
+        }
+        let sym = enc.build_structured(3, "AB12", 124, 7, &payload).unwrap();
+        assert_eq!(sym.payload_bytes(), payload, "byte {b:#04x} mode 3");
+        assert_lossless(&sym);
     }
 }

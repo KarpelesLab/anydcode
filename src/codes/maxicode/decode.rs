@@ -47,7 +47,7 @@ impl MaxiCodeDecoder {
             let carrier = if mode == 2 {
                 decode_primary_2(&cw)?
             } else {
-                decode_primary_3(&cw)
+                decode_primary_3(&cw)?
             };
             (Some(carrier), cw[20..104].to_vec())
         } else {
@@ -97,17 +97,37 @@ fn decode_primary_2(cw: &[u8; TOTAL_CW]) -> Result<Carrier> {
             "MaxiCode mode 2 postcode length invalid",
         ));
     }
-    let country = ((g(6) >> 4) & 0x03) | (g(7) << 2) | ((g(8) & 0x03) << 8);
-    let service = ((g(8) >> 2) & 0x0F) | (g(9) << 4);
+    // The length field counts the postcode's digits: a value that needs more is not
+    // a postcode of that length (and would re-encode with a different length).
+    if pcn >= 10u32.pow(len as u32) {
+        return Err(Error::undecodable(
+            "MaxiCode mode 2 postcode exceeds its length field",
+        ));
+    }
+    let (country, service) = country_and_service(cw)?;
     Ok(Carrier {
         postcode: format!("{pcn:0len$}"),
-        country: country as u16,
-        service: service as u16,
+        country,
+        service,
     })
 }
 
+/// The 10-bit country code and service class shared by modes 2 and 3. Both are
+/// three-digit numbers, so `1000..=1023` cannot come from a Structured Carrier.
+fn country_and_service(cw: &[u8; TOTAL_CW]) -> Result<(u16, u16)> {
+    let g = |i: usize| cw[i] as u16;
+    let country = ((g(6) >> 4) & 0x03) | (g(7) << 2) | ((g(8) & 0x03) << 8);
+    let service = ((g(8) >> 2) & 0x0F) | (g(9) << 4);
+    if country > 999 || service > 999 {
+        return Err(Error::undecodable(
+            "MaxiCode country code or service class above 999",
+        ));
+    }
+    Ok((country, service))
+}
+
 /// Reconstruct the alphanumeric Structured Carrier (Mode 3) primary fields.
-fn decode_primary_3(cw: &[u8; TOTAL_CW]) -> Carrier {
+fn decode_primary_3(cw: &[u8; TOTAL_CW]) -> Result<Carrier> {
     let g = |i: usize| cw[i] as u32;
     let vals = [
         ((g(5) >> 4) & 0x03) | ((g(6) & 0x0F) << 2), // p0
@@ -120,25 +140,113 @@ fn decode_primary_3(cw: &[u8; TOTAL_CW]) -> Carrier {
     let sets = tables::sets();
     let mut postcode = String::with_capacity(6);
     for v in vals {
-        if let Cw::Byte(b) = sets[0][(v & 0x3F) as usize] {
-            postcode.push(b as char);
-        }
+        // Each of the six positions holds a Code Set A character; a shift, latch or
+        // pad value there is not one (dropping it would shorten the postcode).
+        let Cw::Byte(b) = sets[0][(v & 0x3F) as usize] else {
+            return Err(Error::undecodable(
+                "MaxiCode mode 3 postcode holds a non-character codeword",
+            ));
+        };
+        postcode.push(b as char);
     }
-    let country = ((g(6) >> 4) & 0x03) | (g(7) << 2) | ((g(8) & 0x03) << 8);
-    let service = ((g(8) >> 2) & 0x0F) | (g(9) << 4);
-    Carrier {
+    let (country, service) = country_and_service(cw)?;
+    Ok(Carrier {
         postcode,
-        country: country as u16,
-        service: service as u16,
-    }
+        country,
+        service,
+    })
 }
 
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
-    use crate::codes::maxicode::{MaxiCodeEncoder, render_matrix};
+    use crate::codes::maxicode::{MaxiCodeEncoder, add_error_correction, render_matrix};
     use crate::traits::Encode;
     use alloc::vec::Vec;
+
+    /// A Structured Carrier symbol with the given primary data codewords (`cw[0]` is
+    /// completed with the mode) and an all-pad secondary, with valid Reed–Solomon.
+    fn structured(mode: u8, primary: [u8; 10]) -> BitMatrix {
+        let mut cw = [33u8; TOTAL_CW];
+        cw[..10].copy_from_slice(&primary);
+        cw[0] = (cw[0] & 0x30) | mode;
+        add_error_correction(&mut cw, mode);
+        render_matrix(&cw)
+    }
+
+    /// A primary message can hold values no Structured Carrier has: a 10-bit country
+    /// or service above 999, a Mode 2 postcode with more digits than its length
+    /// field, a Mode 3 postcode "character" that is a shift or pad. Those are not
+    /// readable symbols: whatever does decode must re-encode to the same modules.
+    #[test]
+    fn structured_primary_decodes_only_what_reencodes() {
+        let enc = MaxiCodeEncoder::new();
+        let dec = MaxiCodeDecoder::new();
+        // Mode 2: postcode 12345 (binary 0x3039) declared as 3 digits long.
+        let pcn = 12345u32;
+        let mut p = [0u8; 10];
+        p[0] = ((pcn & 0x03) << 4) as u8;
+        p[1] = ((pcn >> 2) & 0x3F) as u8;
+        p[2] = ((pcn >> 8) & 0x3F) as u8;
+        p[5] = 3 << 4;
+        assert!(dec.decode_matrix(&structured(2, p)).is_err());
+        // The same postcode with a length that holds it reads back.
+        p[5] = (5 & 0x03) << 4;
+        p[6] = 5 >> 2;
+        let sym = dec.decode_matrix(&structured(2, p)).unwrap();
+        let SymbolMeta::MaxiCode(meta) = &sym.meta else {
+            panic!("expected MaxiCodeMeta");
+        };
+        assert_eq!(meta.carrier.as_ref().unwrap().postcode, "12345");
+        // Country 1023 / service 1023 are not three-digit numbers.
+        let mut bad = p;
+        bad[6] |= 0x30;
+        bad[7] = 0x3F;
+        bad[8] |= 0x03;
+        assert!(dec.decode_matrix(&structured(2, bad)).is_err());
+        let mut bad = p;
+        bad[8] |= 0x3C;
+        bad[9] = 0x3F;
+        assert!(dec.decode_matrix(&structured(2, bad)).is_err());
+        // Mode 3: all six postcode values 63 (Latch B in Code Set A).
+        let all = [0x30, 0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x0F, 0, 0, 0];
+        assert!(dec.decode_matrix(&structured(3, all)).is_err());
+
+        // Random primaries: an accepted one always re-encodes identically.
+        let mut seed = 0x3A81_C0DE_0002_0003u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut accepted = 0;
+        for round in 0..600 {
+            let mode = 2 + (round % 2) as u8;
+            let mut p = [0u8; 10];
+            for c in &mut p {
+                *c = (next() % 64) as u8;
+            }
+            if round % 3 == 0 {
+                // Keep the numeric fields small so plenty of primaries are valid.
+                p[7] &= 0x0F;
+                p[9] &= 0x0F;
+                p[4] = 0;
+                p[5] &= 0x30;
+                p[6] = (p[6] & 0x30) | 2;
+            }
+            let m = structured(mode, p);
+            if let Ok(sym) = dec.decode_matrix(&m) {
+                accepted += 1;
+                assert_eq!(
+                    enc.encode(&sym),
+                    Ok(Encoding::Matrix(m)),
+                    "mode {mode} primary {p:?}"
+                );
+            }
+        }
+        assert!(accepted > 50, "only {accepted} primaries accepted");
+    }
 
     /// The primary block corrects 5 codeword errors and each secondary interleave 10
     /// (Standard EC) or 14 (Enhanced EC, mode 5) simultaneously; one more error in

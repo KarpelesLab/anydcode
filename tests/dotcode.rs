@@ -462,3 +462,281 @@ fn macro_messages_decode_to_the_original_bytes() {
         assert_roundtrip(&symbol);
     }
 }
+
+/// A dot matrix from `'0'`/`'1'` rows.
+fn matrix_from_rows(rows: &[&str]) -> Encoding {
+    let mut m = anyd::output::BitMatrix::new(rows[0].len(), rows.len(), 3);
+    for (y, row) in rows.iter().enumerate() {
+        for (x, c) in row.bytes().enumerate() {
+            m.set(x, y, c == b'1');
+        }
+    }
+    Encoding::Matrix(m)
+}
+
+/// `zint -b DOTCODE --binary --esc -d '\r\n2'` (zint 2.16, 13 x 10).
+#[rustfmt::skip]
+const ZINT_CRLF_DIGIT: &[&str] = &[
+    "1000000000001",
+    "0101010000010",
+    "1000101010101",
+    "0101010001010",
+    "0010101010001",
+    "0101010100010",
+    "0010000000001",
+    "0000000101010",
+    "1000001000001",
+    "0100010101010",
+];
+
+/// `zint -b DOTCODE --binary --esc -d '12\r\n34\r\n'` (20 x 13).
+#[rustfmt::skip]
+const ZINT_DIGITS_CRLF: &[&str] = &[
+    "10100010101010101010",
+    "00000101000100010001",
+    "10001000001000101010",
+    "01000101000101000001",
+    "00100010100000101000",
+    "01000001010000000101",
+    "10000000101000101010",
+    "01000000010101010001",
+    "10101000001010000010",
+    "00010001000001010001",
+    "10001010100010001000",
+    "00000000000100010101",
+    "10101010001010101010",
+];
+
+/// `zint -b DOTCODE --binary --esc -d '\x80\r\n\r\n\r\n'` (20 x 13).
+#[rustfmt::skip]
+const ZINT_BINARY_CRLF: &[&str] = &[
+    "10101010101010101010",
+    "00010000000001010001",
+    "00001010101000001010",
+    "00010100010101000001",
+    "00101000101000001010",
+    "00010100000100000001",
+    "10000000101000101010",
+    "00010001010101000001",
+    "00100010100010100000",
+    "00000100010000010101",
+    "00101010100010100010",
+    "01000001000100000101",
+    "10101010101000001010",
+];
+
+#[test]
+fn matches_zint_when_cr_lf_pairs_weigh_set_a_against_set_b() {
+    // Choosing between Code Set A and B, the encodation counts how many *data
+    // characters* each set can take next. A CR/LF pair is two of them in either set,
+    // although Set B spends a single codeword on it: counting codewords instead
+    // makes Set A look longer and trades the compact CR/LF for a Latch A.
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    let cases: [(&[u8], &[&str], &[u8]); 3] = [
+        // 2x Shift B, CR/LF, '2'.
+        (b"\r\n2", ZINT_CRLF_DIGIT, &[103, 96, 18]),
+        // FNC1, "12", 4x Shift B, CR/LF, '3', '4', CR/LF.
+        (
+            b"12\r\n34\r\n",
+            ZINT_DIGITS_CRLF,
+            &[107, 12, 105, 96, 19, 20, 96],
+        ),
+        // Binary latch, 0x80 (two base-103 codewords), terminate with Latch B.
+        (
+            b"\x80\r\n\r\n\r\n",
+            ZINT_BINARY_CRLF,
+            &[112, 1, 25, 110, 96, 96, 96],
+        ),
+    ];
+    for (payload, rows, codewords) in cases {
+        let reference = matrix_from_rows(rows);
+        // The reference itself reads back, pinning the expected codewords.
+        let decoded = dec.decode(&reference).unwrap();
+        assert_eq!(decoded.payload_bytes(), payload);
+        let SymbolMeta::DotCode(meta) = &decoded.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        assert_eq!(meta.codewords, codewords, "payload {payload:?}");
+        assert_eq!(enc.encode(&decoded).unwrap(), reference);
+        // And a fresh build makes the same choices.
+        let built = enc.build_bytes(payload).unwrap();
+        assert_eq!(built.meta, decoded.meta, "payload {payload:?}");
+        assert_eq!(
+            enc.encode(&built).unwrap(),
+            reference,
+            "payload {payload:?}"
+        );
+    }
+}
+
+/// `zint -b DOTCODE --structapp=2,5 -d ABC` (21 x 14): symbol 2 of 5, no padding.
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND: &[&str] = &[
+    "100010001010101010101",
+    "010100000001000001010",
+    "001000001000001010000",
+    "010101000101010101000",
+    "000010101010000010000",
+    "000001010000010000010",
+    "000010101010001000100",
+    "000101000100000100010",
+    "101000100000101000000",
+    "000000000100000001010",
+    "100010101000101000001",
+    "010001000101000001000",
+    "101000000010101010101",
+    "000101010001000101010",
+];
+
+/// `zint -b DOTCODE --cols=30 --structapp=3,4 -d ABCD` (30 x 11): symbol 3 of 4,
+/// followed by pad codewords.
+#[rustfmt::skip]
+const ZINT_STRUCTURED_APPEND_PADDED: &[&str] = &[
+    "101000001000101010000010000010",
+    "010001000100010100010001000100",
+    "001000101010001000100010001000",
+    "010000000101010001010001010000",
+    "000010001000101010000010001010",
+    "000100010101000100000101000101",
+    "001000101000100000101000001010",
+    "000101010001010001000100010001",
+    "001000101010001000001010001000",
+    "000100000101010001010000010101",
+    "100010100000001010101000001010",
+];
+
+#[test]
+fn structured_append_trailer_is_not_payload() {
+    // FNC2 as the last data codeword marks a Structured Append symbol; the two
+    // characters before it are its position and the symbol count, not message data
+    // (and the pad codewords after it are not an ECI number).
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for (rows, payload) in [
+        (ZINT_STRUCTURED_APPEND, &b"ABC"[..]),
+        (ZINT_STRUCTURED_APPEND_PADDED, b"ABCD"),
+    ] {
+        let reference = matrix_from_rows(rows);
+        let decoded = dec.decode(&reference).unwrap();
+        assert_eq!(decoded.segments, vec![anyd::Segment::byte(payload)]);
+        // The trailer stays in the pinned codewords, so the symbol re-encodes whole.
+        let SymbolMeta::DotCode(meta) = &decoded.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        assert!(meta.codewords.contains(&108), "FNC2 kept in {meta:?}");
+        assert_eq!(enc.encode(&decoded).unwrap(), reference);
+    }
+}
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::codes::dotcode::{DotCodeMeta, MAX_SIZE, MIN_SIZE};
+    let enc = DotCodeEncoder::new();
+    let good = enc.build_bytes(b"DOTCODE").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut bare = good.clone();
+    bare.meta = SymbolMeta::Generic;
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // Empty input and out-of-range widths.
+    assert!(matches!(
+        enc.build_bytes(b""),
+        Err(anyd::Error::InvalidData { .. })
+    ));
+    assert!(enc.build_gs1_reduced(b"").is_err());
+    for width in [0usize, MIN_SIZE - 1, MAX_SIZE + 1] {
+        assert!(
+            matches!(
+                enc.build_bytes_width(b"A", width),
+                Err(anyd::Error::InvalidParameter { .. })
+            ),
+            "width {width}"
+        );
+    }
+    // A width too narrow for the data needs more than 200 rows.
+    assert!(matches!(
+        enc.build_bytes_width(&[b'x'; 300], MIN_SIZE),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(enc.build_bytes_width(b"A", MIN_SIZE).is_ok());
+    assert!(enc.build_bytes_width(b"A", MAX_SIZE).is_ok());
+    // Hand-built metadata: every field is checked.
+    let SymbolMeta::DotCode(meta) = &good.meta else {
+        panic!("expected DotCodeMeta");
+    };
+    let edit = |f: &dyn Fn(&mut DotCodeMeta)| {
+        let mut m = meta.clone();
+        f(&mut m);
+        anyd::Symbol::new(Symbology::DotCode, Vec::new(), SymbolMeta::DotCode(m))
+    };
+    assert!(enc.encode(&edit(&|_| {})).is_ok());
+    assert!(enc.encode(&edit(&|m| m.mask = 8)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords[0] = 113)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords.clear())).is_err());
+    assert!(enc.encode(&edit(&|m| m.width += 1)).is_err(), "even w + h");
+    assert!(enc.encode(&edit(&|m| m.width = MAX_SIZE + 1)).is_err());
+    assert!(enc.encode(&edit(&|m| m.height = MIN_SIZE - 1)).is_err());
+    assert!(enc.encode(&edit(&|m| m.codewords.push(106))).is_err());
+    // The default metadata names no symbol: it has no codewords.
+    let default = anyd::Symbol::new(
+        Symbology::DotCode,
+        Vec::new(),
+        SymbolMeta::DotCode(DotCodeMeta::default()),
+    );
+    assert!(enc.encode(&default).is_err());
+    // A linear pattern is not a DotCode symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        DotCodeDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}
+
+#[test]
+fn every_mask_round_trips() {
+    // Masks 0-3 and their corner-forced variants 4-7, at both fold directions. A
+    // forced mask that changes nothing (the corners were already lit) reads back as
+    // the plain mask; anything else must come back exactly.
+    let enc = DotCodeEncoder::new();
+    let dec = DotCodeDecoder::new();
+    for (payload, width) in [
+        (&b"Mask test 12345"[..], None),
+        (b"Ba", None),
+        (b"fold", Some(12)),
+    ] {
+        let built = match width {
+            Some(w) => enc.build_bytes_width(payload, w).unwrap(),
+            None => enc.build_bytes(payload).unwrap(),
+        };
+        let SymbolMeta::DotCode(meta) = &built.meta else {
+            panic!("expected DotCodeMeta");
+        };
+        for mask in 0..8u8 {
+            let mut m = meta.clone();
+            m.mask = mask;
+            let symbol = anyd::Symbol::new(Symbology::DotCode, Vec::new(), SymbolMeta::DotCode(m));
+            let encoding = enc.encode(&symbol).unwrap();
+            let decoded = dec.decode(&encoding).unwrap();
+            assert_eq!(decoded.payload_bytes(), payload, "mask {mask}");
+            let SymbolMeta::DotCode(got) = &decoded.meta else {
+                panic!("expected DotCodeMeta");
+            };
+            assert!(
+                got.mask == mask || got.mask + 4 == mask,
+                "mask {mask} read as {}",
+                got.mask
+            );
+            assert_eq!(got.codewords, meta.codewords, "mask {mask}");
+            assert_eq!(enc.encode(&decoded).unwrap(), encoding, "mask {mask}");
+        }
+    }
+}

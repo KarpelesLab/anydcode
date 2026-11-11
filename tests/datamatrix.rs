@@ -580,3 +580,435 @@ fn exactly_full_and_one_over_at_every_size() {
         assert!(enc.build_sized(&vec![0xA5u8; cap - field], size).is_err());
     }
 }
+
+/// A hand-segmented symbol: `segments` paired with their encodations at `size`.
+fn hand_built(
+    segments: &[(anyd::codes::datamatrix::Encodation, &[u8])],
+    size: usize,
+) -> anyd::symbol::Symbol {
+    anyd::symbol::Symbol::new(
+        anyd::symbology::Symbology::DataMatrix,
+        segments
+            .iter()
+            .map(|&(_, bytes)| anyd::segment::Segment::byte(bytes.to_vec()))
+            .collect(),
+        anyd::symbol::SymbolMeta::DataMatrix(anyd::codes::datamatrix::DataMatrixMeta {
+            symbol_size: size,
+            encodations: segments.iter().map(|&(e, _)| e).collect(),
+        }),
+    )
+}
+
+#[test]
+fn unpaired_digits_reencode_identically() {
+    // ASCII encodation packs two adjacent digits into one codeword, but nothing
+    // obliges an encoder to: "1" then "23" (a segment boundary between them) is three
+    // digits in two codewords, "1","2","3" in three. Whatever the pairing, decoding
+    // and re-encoding must give back the same modules — which a single merged "123"
+    // segment (re-paired as "12","3") does not.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let cases: &[&[(anyd::codes::datamatrix::Encodation, &[u8])]] = &[
+        &[(Ascii, b"1"), (Ascii, b"23")],
+        &[(Ascii, b"1"), (Ascii, b"2"), (Ascii, b"3")],
+        &[(Ascii, b"A1"), (Ascii, b"2")],
+        &[(Ascii, b"12"), (Ascii, b"3"), (Ascii, b"45")],
+        &[(Ascii, b"0"), (Ascii, b"09\x80")],
+        &[
+            (Ascii, b"7"),
+            (Base256, b"\xff"),
+            (Ascii, b"7"),
+            (Ascii, b"7"),
+        ],
+        // Boundaries that change nothing still merge into one segment.
+        &[(Ascii, b"12"), (Ascii, b"34")],
+        &[(Ascii, b"1"), (Ascii, b"A"), (Ascii, b"2")],
+    ];
+    for segments in cases {
+        let symbol = hand_built(segments, 16);
+        let encoding = enc.encode(&symbol).unwrap();
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(decoded.payload_bytes(), symbol.payload_bytes());
+        assert_eq!(
+            enc.encode(&decoded).unwrap(),
+            encoding,
+            "segments {segments:?} decoded as {:?}",
+            decoded.segments
+        );
+    }
+    // The split happens only where the pairing demands it.
+    let merged = dec
+        .decode(&enc.encode(&hand_built(cases[6], 16)).unwrap())
+        .unwrap();
+    assert_eq!(merged.segments.len(), 1);
+    let split = dec
+        .decode(&enc.encode(&hand_built(cases[0], 16)).unwrap())
+        .unwrap();
+    assert_eq!(split, hand_built(cases[0], 16));
+}
+
+#[test]
+fn empty_base256_segment_must_end_the_symbol() {
+    // A Base256 length field of 0 means "to the end of the symbol", so an empty
+    // Base256 run is only expressible as the last two codewords of a full symbol.
+    // Anywhere else the reader would take the rest of the symbol (the following
+    // segments, the padding) as the run's bytes.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let refused: &[&[(anyd::codes::datamatrix::Encodation, &[u8])]] = &[
+        &[(Base256, b"")],
+        &[(Base256, b""), (Ascii, b"A")],
+        &[(Ascii, b"A"), (Base256, b""), (Base256, b"")],
+        &[(Ascii, b"AB"), (Base256, b"")],
+    ];
+    for segments in refused {
+        let symbol = hand_built(segments, 12);
+        assert!(
+            matches!(enc.encode(&symbol), Err(anyd::Error::InvalidData { .. })),
+            "segments {segments:?}"
+        );
+        // The heap-free path agrees.
+        let views: Vec<_> = symbol.segments.iter().map(|s| s.view()).collect();
+        let encodations: Vec<_> = segments.iter().map(|&(e, _)| e).collect();
+        let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+        let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+        assert!(
+            enc.encode_into(&views, &encodations, 12, &mut scratch, &mut storage)
+                .is_err()
+        );
+    }
+    // 12x12 holds five data codewords: "ABC", the latch and the zero length.
+    let symbol = hand_built(&[(Ascii, b"ABC"), (Base256, b"")], 12);
+    let encoding = enc.encode(&symbol).unwrap();
+    let decoded = dec.decode(&encoding).unwrap();
+    assert_eq!(decoded, symbol);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+}
+
+// ---- zint reference symbols across sizes -------------------------------------
+
+/// The digit payload of a reference symbol: `n` digits, `0369258147…`.
+fn reference_digits(n: usize) -> Vec<u8> {
+    (0..n).map(|i| b"0123456789"[(i * 3) % 10]).collect()
+}
+
+/// The Base256 payload of a reference symbol: `n` bytes from `0x80` up.
+fn reference_high_bytes(n: usize) -> Vec<u8> {
+    (0..n).map(|i| 0x80 + ((i * 7) % 128) as u8).collect()
+}
+
+/// `zint -b DATAMATRIX --binary --esc --vers=N -d <payload>` (zint 2.16), as
+/// `(symbol size, payload length, payload is high bytes, hex rows)`: each row is one
+/// hex string, most-significant bit = leftmost module, set = dark.
+///
+/// Together they cover what a self round-trip cannot see: every corner case of the
+/// module placement (mapping sizes 8, 10, 12, 14 and 16), a four-region symbol
+/// (32×32), two interleaved blocks (52×52), the pad codeword randomisation (16×16,
+/// 18×18 and 32×32 are padded), the Base256 randomisation, and a Base256 run that
+/// ends the symbol (52×52, and 64×64 where its 278 bytes need the zero length field
+/// to fit at all).
+#[rustfmt::skip]
+const ZINT_SIZES: &[(usize, usize, bool, &[&str])] = &[
+    // --vers=1 is ISO/IEC 16022's own worked example, "123456".
+    // --vers=1: 6 digits
+    (10, 6, false, &[
+        "aa8", "cb4", "c10", "c74", "c20", "83c", "ec0", "f64", "9d0", "ffc",
+    ]),
+    // --vers=2: 10 digits
+    (12, 10, false, &[
+        "aaa", "ed5", "898", "fdd", "83c", "c71", "8c2", "9db", "e72", "c75", "bfa", "fff",
+    ]),
+    // --vers=3: 5 high
+    (14, 5, true, &[
+        "aaa8", "85e4", "e750", "9ec4", "85c8", "d5a4", "bb30", "c0bc", "9770", "9c3c", "9f88",
+        "8efc", "c038", "fffc",
+    ]),
+    // --vers=4: 20 digits
+    (16, 20, false, &[
+        "aaaa", "ed7b", "89a2", "fd15", "a28c", "c4ed", "e888", "9165", "fbda", "e525", "a67e",
+        "b8f9", "f00a", "a57d", "b3c2", "ffff",
+    ]),
+    // --vers=5: 14 high
+    (18, 14, true, &[
+        "aaaa8", "85b1c", "f7300", "affdc", "842b0", "d0c1c", "bc088", "d66cc", "86998",
+        "e63fc", "de4b8", "d64ec", "ad028", "bf8a4", "a1650", "ebbc4", "c3be8", "ffffc",
+    ]),
+    // --vers=10: 100 digits
+    (32, 100, false, &[
+        "aaaaaaaa", "ed4fdb49", "89b8a262", "fdb1df45", "a23a88de", "c5c5d025", "e8beba9e",
+        "9579c32d", "fb6abf30", "e54dfc1d", "a9bcf1c2", "bdb5b6a9", "e2269942", "c5f5fdc5",
+        "e88ed8e8", "ffffffff", "aaaaaaaa", "950190ed", "fbb2b702", "e449e1bb", "ab8a8cae",
+        "b717a50d", "f780f75e", "d66bef8f", "9a08faac", "d36fb9a5", "aff4aa92", "ed8b8523",
+        "8a8490c6", "fd4fe5df", "c4f8abbc", "ffffffff",
+    ]),
+    // --vers=15: 202 high
+    (52, 202, true, &[
+        "aaaaaaaaaaaaa", "85b1af67ff94d", "d73077a3759e2", "cffde4e9a800f", "843b39241c32c",
+        "d0d2b37d66bbf", "bc4889299bf4e", "d6b531707f80b", "84d4b62a0c776", "e48292ed4a96d",
+        "d99d26bec070e", "d8c083e354053", "9f7db4b5d8022", "87e6e16216dd9", "e25abfbe49708",
+        "83e617ef3e08f", "98fc72a5c96a0", "d9ca08ef44ba7", "ba380029b4208", "ae5ee96f5c2af",
+        "d2197ba12b2be", "d25e41e3a8d55", "ecc94b2f8769e", "dcc56aebb9f93", "c6dbdf3bfa524",
+        "fffffffffffff", "aaaaaaaaaaaaa", "8143f4f169167", "d129c43d914ae", "bbb49877c8fad",
+        "ff8e092000c70", "8bf5046481777", "dbe488aa5e410", "b2477bf427e8f", "9d04b12c57eac",
+        "9aafbce6419eb", "cadd1f329affc", "93e52b60bd76d", "849f67a35c3e8", "a0b583f7ca555",
+        "f61a3928f9b9e", "955984e9954f5", "ee1b90b3831d8", "e2b036e68dea7", "f63434b2113c6",
+        "c306f47d92c4b", "f3facb303b572", "e0f97f74f58bf", "b396d2bed0002", "8f5b2265d9521",
+        "c3de0e3b1092c", "fffffffffffff",
+    ]),
+    // --vers=16: 278 high
+    (64, 278, true, &[
+        "aaaaaaaaaaaaaaaa", "85b1ebc7ffe5cce9", "d7309de2dd66e346", "cffdf929ea018e7f",
+        "843ace44870ca9fc", "d0d3acddd9afa57f", "bc48a248e6fcd99a", "d6b5cc519fe183a7",
+        "84d4ad8a831ca02a", "e483a4add2a3c443", "d99cc9beb01eabca", "d8c1a0e3d51ff42b",
+        "9f7ced34f60ccbd2", "87e7b8438589bb01", "e25aaffe927eddf8", "ffffffffffffffff",
+        "aaaaaaaaaaaaaaaa", "83e785efcf6bbe07", "98fc9ca4f326c1f0", "d9cb822fd047a187",
+        "ba388008e838a11e", "ae5fba4fcd85df47", "d218dee0d794a546", "d25f9063e047f81d",
+        "ecc8d2ce941cb7f6", "dcc5daa9c7c5ac43", "c6daf7dcfb9cfe3c", "8143fd37fa35d003",
+        "d128f10a9210feb0", "bbb5a669d323c245", "ff8e8262daf4c9c8", "ffffffffffffffff",
+        "aaaaaaaaaaaaaaaa", "8bf5c0ed9adfaac7", "dbe4a2d6b5a0b40c", "b247dc4ba3b5926b",
+        "9d04affef1b6d950", "9aafe5bde789b621", "cadcd292abf4e0c8", "93e5c0a58101a7f5",
+        "849e8000bcf89658", "a0b7b947d4f1da35", "f61cbb6ccc62c472", "954fc0398d71d1fd",
+        "ee04d1d0b398e140", "e2c9eb4d8931e745", "f65ed5f28dd0aeb8", "ffffffffffffffff",
+        "aaaaaaaaaaaaaaaa", "c36ffb7fe50de7db", "f2a6a194dc1ce912", "e655a42f8497813f",
+        "b63ea170c9d4cf62", "8cc5edafcb1dffb5", "cf8cea6cc972cfcc", "c125b9f7e895e215",
+        "f4fcba2ca80ca838", "bbc9b4c5dd39d061", "caecbc2cccdeed8a", "cbc58c8f96858fef",
+        "9016ff6a81f89eb6", "8b7da8b59c5ba303", "c3fe8b92c224ae0a", "ffffffffffffffff",
+    ]),
+];
+
+#[test]
+fn matches_zint_across_sizes_and_encodations() {
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    for &(size, len, high, rows) in ZINT_SIZES {
+        let payload = match (high, size) {
+            (true, _) => reference_high_bytes(len),
+            (false, 10) => b"123456".to_vec(),
+            (false, _) => reference_digits(len),
+        };
+        let mut m = anyd::output::BitMatrix::new(size, size, 1);
+        assert_eq!(rows.len(), size);
+        for (y, row) in rows.iter().enumerate() {
+            for x in 0..size {
+                let nibble = u8::from_str_radix(&row[x / 4..x / 4 + 1], 16).unwrap();
+                m.set(x, y, nibble & (8 >> (x % 4)) != 0);
+            }
+        }
+        let reference = Encoding::Matrix(m);
+        let decoded = dec.decode(&reference).unwrap();
+        assert_eq!(decoded.payload_bytes(), payload, "size {size}");
+        // The third-party symbol re-encodes module for module.
+        assert_eq!(enc.encode(&decoded).unwrap(), reference, "size {size}");
+        // And a fresh build of the same payload is the same symbol — except at
+        // 64×64, where `build_sized` budgets for an explicit two-codeword length
+        // and so refuses the 278 bytes that zint fits with the zero length field.
+        match enc.build_sized(&payload, size) {
+            Ok(built) => {
+                assert_eq!(built, decoded, "size {size}");
+                assert_eq!(enc.encode(&built).unwrap(), reference, "size {size}");
+            }
+            Err(e) => {
+                assert_eq!(size, 64, "{e}");
+                assert!(matches!(e, anyd::Error::Capacity { .. }));
+            }
+        }
+    }
+}
+
+#[test]
+fn base256_run_closed_with_its_count_at_the_symbol_end_stays_closed() {
+    // A Base256 run reaching the last data codeword may also carry its byte count
+    // instead of the usual zero length field. The two are different symbols; the
+    // counted one is segmented as the run plus an empty ASCII segment.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let to_end = hand_built(&[(Ascii, b"A"), (Base256, b"\x80\x81")], 12);
+    let counted = hand_built(&[(Ascii, b"A"), (Base256, b"\x80\x81"), (Ascii, b"")], 12);
+    let to_end_encoding = enc.encode(&to_end).unwrap();
+    let counted_encoding = enc.encode(&counted).unwrap();
+    assert_ne!(to_end_encoding, counted_encoding);
+    for (symbol, encoding) in [(&to_end, &to_end_encoding), (&counted, &counted_encoding)] {
+        let decoded = dec.decode(encoding).unwrap();
+        assert_eq!(&decoded, symbol);
+        assert_eq!(decoded.payload_bytes(), b"A\x80\x81");
+        assert_eq!(&enc.encode(&decoded).unwrap(), encoding);
+    }
+    // Short of the symbol end there is only the counted form, and no marker.
+    let padded = hand_built(&[(Base256, b"\x80\x81")], 12);
+    let decoded = dec.decode(&enc.encode(&padded).unwrap()).unwrap();
+    assert_eq!(decoded, padded);
+    let marked = hand_built(&[(Base256, b"\x80\x81"), (Ascii, b"")], 12);
+    assert_eq!(enc.encode(&marked).unwrap(), enc.encode(&padded).unwrap());
+}
+
+#[test]
+fn any_segmentation_round_trips() {
+    // Hand-built symbols with arbitrary segment boundaries and encodations (digits
+    // split mid-pair, high bytes in ASCII segments, ASCII bytes in Base256 ones,
+    // empty segments, runs ending exactly at capacity): whatever the encoder
+    // accepts must decode to the same bytes and re-encode to the same modules, and
+    // a refusal must be a clean error.
+    use anyd::codes::datamatrix::Encodation::{Ascii, Base256};
+    let mut rng = anyd::transform::Rng::new(0xDA7A_5E65_0000_0001);
+    let mut below = move |n: usize| (rng.next_u64() % n as u64) as usize;
+    let alphabets: [&[u8]; 4] = [b"0123456789", b"AB01", b"\x80\xff\x00A1", b"09\x80"];
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let (mut accepted, mut refused) = (0, 0);
+    for _ in 0..1500 {
+        let segments: Vec<(anyd::codes::datamatrix::Encodation, Vec<u8>)> = (0..1 + below(4))
+            .map(|_| {
+                let alphabet = alphabets[below(4)];
+                let bytes = (0..below(6))
+                    .map(|_| alphabet[below(alphabet.len())])
+                    .collect();
+                (if below(2) == 0 { Ascii } else { Base256 }, bytes)
+            })
+            .collect();
+        let borrowed: Vec<_> = segments.iter().map(|(e, b)| (*e, &b[..])).collect();
+        let size = [10, 12, 14, 16, 18, 20][below(6)];
+        let symbol = hand_built(&borrowed, size);
+        let encoding = match enc.encode(&symbol) {
+            Ok(encoding) => encoding,
+            Err(anyd::Error::Capacity { .. } | anyd::Error::InvalidData { .. }) => {
+                refused += 1;
+                continue;
+            }
+            Err(e) => panic!("unexpected error {e} for {segments:?}"),
+        };
+        accepted += 1;
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(
+            decoded.payload_bytes(),
+            symbol.payload_bytes(),
+            "{segments:?} at {size}"
+        );
+        assert_eq!(
+            enc.encode(&decoded).unwrap(),
+            encoding,
+            "{segments:?} at {size} decoded as {:?}",
+            decoded.segments
+        );
+    }
+    assert!(accepted > 500 && refused > 100, "{accepted} / {refused}");
+}
+
+#[test]
+fn api_misuse_is_an_error() {
+    use anyd::codes::datamatrix::Encodation;
+    use anyd::segment::{Segment, SegmentView};
+    use anyd::symbol::{Symbol, SymbolMeta};
+    use anyd::symbology::Symbology;
+    let enc = DataMatrixEncoder::new();
+    let good = enc.build(b"DATA").unwrap();
+    // The wrong symbology, or the right one without its metadata.
+    let mut wrong = good.clone();
+    wrong.symbology = Symbology::Aztec;
+    assert!(matches!(
+        enc.encode(&wrong),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let bare = Symbol::new(
+        Symbology::DataMatrix,
+        good.segments.clone(),
+        SymbolMeta::Generic,
+    );
+    assert!(matches!(
+        enc.encode(&bare),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    // One encodation per segment, byte segments only, a real square size.
+    let mut extra = good.clone();
+    extra.segments.push(Segment::byte(b"x".to_vec()));
+    assert!(matches!(
+        enc.encode(&extra),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let mut numeric = good.clone();
+    numeric.segments = vec![Segment::numeric(b"12".to_vec())];
+    assert!(matches!(
+        enc.encode(&numeric),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    for size in [0usize, 9, 11, 28, 146] {
+        assert!(matches!(
+            enc.build_sized(b"A", size),
+            Err(anyd::Error::InvalidParameter { .. })
+        ));
+        assert_eq!(DataMatrixEncoder::scratch_len(size), None);
+        assert_eq!(DataMatrixEncoder::storage_len(size), None);
+    }
+    // The heap-free entry points report the same problems, plus short buffers.
+    let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
+    let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
+    let view = [SegmentView::byte(b"DATA")];
+    assert!(matches!(
+        enc.encode_into(&view, &[], 12, &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        enc.encode_into(&view, &[Encodation::Ascii], 13, &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    assert!(matches!(
+        enc.encode_into(
+            &[SegmentView::numeric(b"12")],
+            &[Encodation::Ascii],
+            12,
+            &mut scratch,
+            &mut storage
+        ),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+    assert!(matches!(
+        enc.encode_data_into(b"DATA", Some(13), &mut scratch, &mut storage),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    let need = DataMatrixEncoder::scratch_len(12).unwrap();
+    assert!(matches!(
+        enc.encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch[..need - 1],
+            &mut storage
+        ),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    assert!(matches!(
+        enc.encode_data_into(b"DATA", None, &mut scratch[..2], &mut storage),
+        Err(anyd::Error::Capacity { .. })
+    ));
+    let need = DataMatrixEncoder::storage_len(12).unwrap();
+    assert!(
+        enc.encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch,
+            &mut storage[..need - 1]
+        )
+        .is_err()
+    );
+    // Exactly the advertised buffers are enough.
+    let scratch_len = DataMatrixEncoder::scratch_len(12).unwrap();
+    let buf = enc
+        .encode_into(
+            &view,
+            &[Encodation::Ascii],
+            12,
+            &mut scratch[..scratch_len],
+            &mut storage[..need],
+        )
+        .unwrap();
+    assert_eq!((buf.width(), buf.height()), (12, 12));
+    // A linear pattern is not a Data Matrix symbol.
+    let linear = Encoding::Linear(anyd::output::LinearPattern::new());
+    assert!(matches!(
+        DataMatrixDecoder::new().decode(&linear),
+        Err(anyd::Error::Unsupported { .. })
+    ));
+}

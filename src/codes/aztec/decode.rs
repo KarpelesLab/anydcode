@@ -106,6 +106,18 @@ impl AztecDecoder {
             }
         }
         let hl = unstuff_bits(&stuffed, w);
+        // A message opening with M/L then U/L (a latch to Mixed and straight back) is
+        // a Structured Append symbol: what follows is an optional file identifier and
+        // two letters giving its position and the symbol count, then one part of a
+        // longer message. [`AztecMeta`] cannot carry that header, so reading it as
+        // payload would be wrong and re-encoding would lose it.
+        const MIXED_THEN_UPPER: [bool; 10] =
+            [true, true, true, false, true, true, true, true, false, true];
+        if hl.starts_with(&MIXED_THEN_UPPER) {
+            return Err(Error::Unsupported {
+                what: "Aztec Structured Append",
+            });
+        }
         let segments = highlevel::decode(&hl);
 
         let meta = AztecMeta {

@@ -455,3 +455,85 @@ fn svg_generation_structure() {
     }
     assert!(appclip::Options::with_template(18).is_none());
 }
+
+/// Random payloads with `significant` trailing non-zero bytes (so both codec
+/// versions occur: up to 14 bytes is version 0, 15-16 version 1).
+fn random_payload(rng: &mut anyd::transform::Rng, significant: usize) -> [u8; 16] {
+    let mut payload = [0u8; 16];
+    for b in payload.iter_mut().skip(16 - significant) {
+        *b = rng.next_u64() as u8;
+    }
+    if significant > 0 {
+        payload[16 - significant] |= 1;
+    }
+    payload
+}
+
+/// Every payload survives the ring-bit codec, and each Reed–Solomon block (the
+/// GF(16) metadata, the gaps block, the arcs block in the color stream) repairs a
+/// damaged symbol: no single flipped bit among the 128 gap positions or the 56 arc
+/// bits changes the decoded payload.
+#[test]
+fn payload_codec_round_trips_and_corrects_any_single_bit() {
+    let mut rng = anyd::transform::Rng::new(0xA99C_11B0_0000_0001);
+    for significant in [0usize, 1, 2, 9, 13, 14, 15, 16, 16, 16] {
+        let payload = random_payload(&mut rng, significant);
+        let bits = appclip::encode_payload(&payload).unwrap();
+        assert!(bits.len() >= 185);
+        assert!(!bits[128], "separator bit");
+        assert_eq!(appclip::decode_payload(&bits).unwrap(), payload);
+        for i in (0..185).filter(|&i| i != 128) {
+            let mut damaged = bits.clone();
+            damaged[i] = !damaged[i];
+            assert_eq!(
+                appclip::decode_payload(&damaged).unwrap(),
+                payload,
+                "bit {i} of a {significant}-byte payload"
+            );
+        }
+        // The separator is fixed: a set bit there is not a code.
+        let mut damaged = bits.clone();
+        damaged[128] = true;
+        assert!(appclip::decode_payload(&damaged).is_err());
+    }
+    // Leading zero bytes are not significant, so longer slices are fine as long as
+    // at most 16 bytes remain; a 17th is a capacity error, not a truncation.
+    let mut long = vec![0u8; 8];
+    long.extend_from_slice(&[0x5A; 16]);
+    assert_eq!(
+        appclip::decode_payload(&appclip::encode_payload(&long).unwrap()).unwrap(),
+        [0x5A; 16]
+    );
+    assert!(matches!(
+        appclip::encode_payload(&[1u8; 17]),
+        Err(anyd::Error::Capacity { .. })
+    ));
+}
+
+/// Hostile input never panics: arbitrary ring-bit vectors of any length, and
+/// arbitrary 16-byte payloads fed to the URL decompressor (truncated Huffman codes,
+/// unknown TLD or wordbook indices, runaway LEB128 numbers). Whatever decompresses
+/// is an HTTPS URL.
+#[test]
+fn decoders_never_panic_on_garbage() {
+    let mut rng = anyd::transform::Rng::new(0xA99C_11B0_0000_0002);
+    let mut decoded = 0;
+    for round in 0..170 {
+        let len = [0usize, 1, 127, 128, 184, 185, 186, 220, 300][round % 9];
+        let bits: Vec<bool> = (0..len).map(|_| rng.next_u64() & 1 == 1).collect();
+        let _ = appclip::decode_payload(&bits);
+        let _ = appclip::decode_bits(&bits);
+
+        let payload = random_payload(&mut rng, round % 17);
+        if let Ok(url) = appclip::decompress_url(&payload) {
+            decoded += 1;
+            assert!(url.starts_with("https://"), "{url:?}");
+            // Recompressing may fail (not every decodable stream is canonical), but
+            // it must not panic either.
+            let _ = appclip::compress_url(&url);
+        }
+    }
+    assert!(decoded > 30, "only {decoded} payloads decompressed");
+    // No begin marker at all.
+    assert!(appclip::decompress_url(&[0; 16]).is_err());
+}

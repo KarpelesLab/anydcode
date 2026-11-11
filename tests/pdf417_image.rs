@@ -21,9 +21,12 @@
 //! | Combined             | 6° rotation + σ1.0 blur + σ12 noise         |
 //!
 //! PDF417 has no finder patterns; the sampler leans entirely on the full-height start
-//! and stop guards, so its rotation tolerance is deliberately narrower than QR's, and
-//! the geometry model is affine — perspective tilt is out of scope and not asserted. The
+//! and stop guards, so its rotation tolerance is deliberately narrower than QR's. The
 //! magnitudes above sit a comfortable margin inside the measured failure points.
+//!
+//! A second group of cases, at the end of the file, covers what a camera delivers
+//! instead of a render: 3 px modules under soft focus, motion blur, low contrast and
+//! grain, perspective tilt, and crops derotated on an estimated axis.
 #![cfg(all(feature = "encode", feature = "scan", feature = "pdf417"))]
 
 use anyd::GrayImage;
@@ -207,4 +210,170 @@ fn detect_and_analyze_traits() {
     let symbol = scanner.analyze(&frame, cand).expect("analyze");
     assert_eq!(symbol.payload_bytes(), expected);
     assert_eq!(symbol.symbology, anyd::Symbology::Pdf417);
+}
+
+// ===================================================================================
+// Low-quality captures (the grey-level scan-line reader)
+// ===================================================================================
+//
+// What a phone camera actually delivers: small modules, soft focus, motion blur, low
+// contrast, sensor grain, and a symbol that is not parallel to the sensor. None of
+// these binarize into a clean module grid, so they exercise the sampler's second
+// stage — edge-to-edge codeword reading along the rows, voted per codeword, with
+// blurred-template matching behind it. Each case is rendered at 3 px/module.
+
+/// Pixels per module for the low-quality cases.
+const SMALL: usize = 3;
+
+/// Render `matrix` at [`SMALL`] px/module.
+fn small_image(matrix: &BitMatrix) -> GrayImage {
+    render_matrix(matrix, SMALL)
+}
+
+/// A horizontal box blur `len` pixels long — camera shake along the reading direction,
+/// the direction that hurts.
+fn motion_blur(img: &GrayImage, len: usize) -> GrayImage {
+    let (w, h) = (img.width(), img.height());
+    let mut out = GrayImage::filled(w, h, 255);
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = 0u32;
+            for k in 0..len {
+                let xx = (x + k).saturating_sub(len / 2).min(w - 1);
+                sum += u32::from(img.get(xx, y));
+            }
+            out.set(x, y, (sum / len as u32) as u8);
+        }
+    }
+    out
+}
+
+#[test]
+fn small_modules_soft_focus() {
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let mut rng = Rng::new(0x50F7);
+        let img = transform::gaussian_blur(&small_image(&matrix), 1.6);
+        let img = transform::add_noise(&img, 8.0, &mut rng);
+        assert_decodes(&img, &expected, "3px soft focus");
+    }
+}
+
+#[test]
+fn small_modules_motion_blur() {
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let mut rng = Rng::new(0x5A4E);
+        let img = motion_blur(&transform::gaussian_blur(&small_image(&matrix), 0.6), 4);
+        let img = transform::add_noise(&img, 4.0, &mut rng);
+        assert_decodes(&img, &expected, "3px motion blur");
+    }
+}
+
+#[test]
+fn small_modules_low_contrast() {
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let mut rng = Rng::new(0xD1A);
+        let img = transform::gaussian_blur(&small_image(&matrix), 0.8);
+        let img = transform::brightness_contrast(&img, -20.0, 0.33);
+        let img = transform::add_noise(&img, 6.0, &mut rng);
+        assert_decodes(&img, &expected, "3px low contrast");
+    }
+}
+
+#[test]
+fn small_modules_grain() {
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let mut rng = Rng::new(0x6A1);
+        let img = transform::gaussian_blur(&small_image(&matrix), 0.8);
+        let img = transform::brightness_contrast(&img, -30.0, 0.6);
+        let img = transform::add_noise(&img, 16.0, &mut rng);
+        assert_decodes(&img, &expected, "3px grain");
+    }
+}
+
+#[test]
+fn perspective_tilt() {
+    // Yaw: the far (right) edge is 30% shorter and its modules correspondingly
+    // narrower, so neither the outline nor the module pitch is affine.
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        for scale in [SMALL, SCALE] {
+            let mut rng = Rng::new(0x7117);
+            let img = transform::tilt_right(&render_matrix(&matrix, scale), 0.3);
+            let img = transform::add_noise(&transform::gaussian_blur(&img, 0.8), 4.0, &mut rng);
+            assert_decodes(&img, &expected, &format!("{scale}px tilt"));
+        }
+    }
+}
+
+#[test]
+fn tilt_with_rotation_and_gradient() {
+    // The lot at once, as a hand-held capture has it: yaw, a few degrees of roll and
+    // a 2:1 illumination falloff across the symbol.
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let img = transform::tilt_right(&render_matrix(&matrix, 4), 0.2);
+        let mut img = transform::rotate(&img, 5.0f32.to_radians());
+        let w = img.width();
+        for y in 0..img.height() {
+            for x in 0..w {
+                let f = 0.5 + 0.5 * (x as f32 / w as f32);
+                img.set(x, y, (f32::from(img.get(x, y)) * f) as u8);
+            }
+        }
+        let mut rng = Rng::new(0x6AD);
+        let img = transform::add_noise(&transform::gaussian_blur(&img, 0.8), 4.0, &mut rng);
+        assert_decodes(&img, &expected, "tilt + roll + gradient");
+    }
+}
+
+/// Decode `img` the way the live pipeline does for a located linear region whose
+/// reading axis it estimated as `axis_deg`: derotate, then sample.
+fn assert_decodes_at(img: &GrayImage, axis_deg: f32, expected: &[u8], label: &str) {
+    let found = anyd::pipeline::scan_stacked_at(&img.as_frame(), axis_deg.to_radians());
+    assert!(
+        found.iter().any(|s| s.payload_bytes() == expected),
+        "{label}: not read after derotation"
+    );
+}
+
+#[test]
+fn rotated_low_contrast_capture_reads_after_derotation() {
+    // A locator's axis is good to a couple of degrees, and derotating resamples the
+    // crop — so what reaches the sampler is slightly skewed, slightly softer, on a
+    // blank canvas, and here at a third of the contrast under a lighting falloff.
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let mut img = transform::rotate(&small_image(&matrix), 17.0f32.to_radians());
+        let w = img.width();
+        for y in 0..img.height() {
+            for x in 0..w {
+                let f = 0.45 + 0.55 * (x as f32 / w as f32);
+                img.set(x, y, (f32::from(img.get(x, y)) * f) as u8);
+            }
+        }
+        let mut rng = Rng::new(0xD1A2);
+        let img = transform::gaussian_blur(&img, 0.8);
+        let img = transform::brightness_contrast(&img, -20.0, 0.33);
+        let img = transform::add_noise(&img, 6.0, &mut rng);
+        assert_decodes_at(&img, 14.5, &expected, "3px dim, 17° read at 14.5°");
+    }
+}
+
+#[test]
+fn rotated_grainy_capture_reads_after_derotation() {
+    // As above with heavy sensor grain, which derotation turns into correlated noise
+    // that a per-pixel estimate badly underrates.
+    for (segs, ec) in cases() {
+        let (matrix, expected) = encode(segs, ec);
+        let img = transform::rotate(&small_image(&matrix), 45.0f32.to_radians());
+        let mut rng = Rng::new(0x6A12);
+        let img = transform::gaussian_blur(&img, 0.8);
+        let img = transform::brightness_contrast(&img, -30.0, 0.6);
+        let img = transform::add_noise(&img, 16.0, &mut rng);
+        assert_decodes_at(&img, 45.3, &expected, "3px grain, 45° read at 45.3°");
+    }
 }

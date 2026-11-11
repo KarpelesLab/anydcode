@@ -108,6 +108,15 @@ impl Analyze for QrScanner {
     }
 }
 
+/// `sym` with the location of the hypothesis it was read from. Every read says where it
+/// is: a live front-end has nothing to draw otherwise. (For the curved-surface
+/// fallbacks this is the planar outline through the finders — the symbol's position,
+/// if not its exact shape.)
+fn placed(mut sym: Symbol, located: &Located) -> Symbol {
+    sym.location.get_or_insert_with(|| located.as_location());
+    sym
+}
+
 /// Locate, sample and structurally decode the QR symbol in `frame`.
 ///
 /// Real camera photos rarely binarize cleanly under one global threshold (glare,
@@ -153,7 +162,7 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
             }
             let matrix = located.sample(frame, &thr);
             match decoder.decode_matrix(&matrix) {
-                Ok(sym) => return Ok(sym),
+                Ok(sym) => return Ok(placed(sym, &located)),
                 Err(e) => {
                     last = e;
                     // The single-homography sample failed. If this symbol carries
@@ -168,7 +177,7 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                         dewarps += 1;
                         if let Some(sym) = dewarp_decode(frame, &bin, &located, &integral, &decoder)
                         {
-                            return Ok(sym);
+                            return Ok(placed(sym, &located));
                         }
                     }
                     if located.dimension > 21 && pending.len() < REFINE_HYPOTHESES {
@@ -191,7 +200,7 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
     let mut budget = REFINE_MODULE_BUDGET;
     for located in &pending {
         if let Some(sym) = refine_fourth_corner(frame, located, &integral, &decoder, &mut budget) {
-            return Ok(sym);
+            return Ok(placed(sym, located));
         }
         if budget == 0 {
             break;

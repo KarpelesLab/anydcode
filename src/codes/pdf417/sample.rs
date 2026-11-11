@@ -149,8 +149,14 @@ pub fn scan(frame: &GrayFrame<'_>) -> Option<Symbol> {
 
 /// Locate, sample and decode under one already-built binarization.
 fn scan_with(frame: &GrayFrame<'_>, bin: &Binary) -> Option<Symbol> {
-    let matrix = locate(frame, bin)?.sample(frame);
-    Pdf417Decoder::new().decode(&Encoding::Matrix(matrix)).ok()
+    let located = locate(frame, bin)?;
+    let matrix = located.sample(frame);
+    let mut sym = Pdf417Decoder::new()
+        .decode(&Encoding::Matrix(matrix))
+        .ok()?;
+    // Every read says where it is: a live front-end has nothing to draw otherwise.
+    sym.location.get_or_insert_with(|| located.as_location());
+    Some(sym)
 }
 
 /// Locate the PDF417 symbol in `frame` and sample it to a clean [`BitMatrix`].
@@ -1585,7 +1591,23 @@ fn scan_lines(frame: &GrayFrame<'_>) -> Option<Symbol> {
         return None;
     }
     let g = find_guards(frame, noise, range)?;
+    let mut sym = read_between_guards(frame, noise, range, &g)?;
+    // The guards' outer edges are the symbol's outline.
+    sym.location.get_or_insert_with(|| Location {
+        outline: Quad::new([g.tl, g.tr, g.br, g.bl]),
+        rotation: Some((g.tr.y - g.tl.y).atan2(g.tr.x - g.tl.x)),
+        module_size: Some((g.unit_l + g.unit_r) / 2.0),
+    });
+    Some(sym)
+}
 
+/// Read the symbol whose guards are `g`: scan lines along the rows, voted per codeword.
+fn read_between_guards(
+    frame: &GrayFrame<'_>,
+    noise: Noise,
+    range: f32,
+    g: &Guards,
+) -> Option<Symbol> {
     // Module pitch across each guard (perpendicular to its edge), from the pitch along
     // image rows.
     let across = |top: Point, bottom: Point, unit: f32| {

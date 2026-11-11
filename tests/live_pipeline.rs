@@ -464,3 +464,138 @@ fn degenerate_frames_do_not_panic() {
         let _ = anyd::scan1d::refine_axis(&f, 45.0);
     }
 }
+
+/// A front-end draws what it read where it read it: every symbol the whole-frame 2D
+/// pass returns must say where it is, whichever sampler — and whichever fallback inside
+/// that sampler — produced it. (A read without a location is one the demo cannot show.)
+#[test]
+fn whole_frame_reads_carry_their_location() {
+    use anyd::codes::aztec::AztecEncoder;
+    use anyd::codes::datamatrix::DataMatrixEncoder;
+    use anyd::codes::microqr::{MicroEcLevel, MicroQrEncoder};
+    use anyd::codes::pdf417::MicroPdf417Encoder;
+    use anyd::codes::qr::{EcLevel, QrEncoder};
+    use anyd::codes::rmqr::{RmqrEcLevel, RmqrEncoder};
+    use anyd::segment::Segment;
+
+    let qr = QrEncoder::new();
+    let dm = DataMatrixEncoder::new();
+    let az = AztecEncoder::new();
+    let pdf = Pdf417Encoder::new();
+    let mpdf = MicroPdf417Encoder::new();
+    let mqr = MicroQrEncoder::new();
+    let rmqr = RmqrEncoder::new();
+    let byte = |t: &str| vec![Segment::byte(t.as_bytes().to_vec())];
+    let sprites: Vec<(&str, &str, GrayImage)> = vec![
+        (
+            "qr",
+            "https://anyd.dev/where",
+            render(
+                &qr.encode(&qr.build_text("https://anyd.dev/where", EcLevel::M).unwrap())
+                    .unwrap(),
+                5,
+            ),
+        ),
+        (
+            "datamatrix",
+            "DM-WHERE",
+            render(&dm.encode(&dm.build_text("DM-WHERE").unwrap()).unwrap(), 6),
+        ),
+        (
+            "aztec",
+            "AZTEC WHERE",
+            render(
+                &az.encode(&az.build_text("AZTEC WHERE").unwrap()).unwrap(),
+                6,
+            ),
+        ),
+        (
+            "pdf417",
+            "PDF417 WHERE",
+            render(
+                &pdf.encode(
+                    &pdf.build_text("PDF417 WHERE", pdf417::EcLevel::new(2).unwrap())
+                        .unwrap(),
+                )
+                .unwrap(),
+                4,
+            ),
+        ),
+        (
+            "micropdf417",
+            "MICROPDF",
+            render(
+                &mpdf
+                    .encode(&mpdf.build_sized(byte("MICROPDF"), None).unwrap())
+                    .unwrap(),
+                4,
+            ),
+        ),
+        (
+            "microqr",
+            "MQR",
+            render(
+                &mqr.encode(&mqr.build(byte("MQR"), MicroEcLevel::L).unwrap())
+                    .unwrap(),
+                6,
+            ),
+        ),
+        (
+            "rmqr",
+            "RMQR WHERE",
+            render(
+                &rmqr
+                    .encode(&rmqr.build_text("RMQR WHERE", RmqrEcLevel::M).unwrap())
+                    .unwrap(),
+                6,
+            ),
+        ),
+    ];
+    // Sharp, then soft: the second sends the samplers down their fallback paths.
+    for (sigma, noise) in [(0.6f32, 2.0f32), (1.3, 5.0)] {
+        for (seed, (name, text, sprite)) in sprites.iter().enumerate() {
+            let mut rng = Rng::new(700 + seed as u64);
+            let mut canvas = GrayImage::filled(800, 480, 235);
+            let (left, top) = (90 + 37 * seed, 60 + 23 * seed);
+            for y in 0..sprite.height() {
+                for x in 0..sprite.width() {
+                    canvas.set(left + x, top + y, sprite.get(x, y));
+                }
+            }
+            let image = add_noise(&gaussian_blur(&canvas, sigma), noise, &mut rng);
+            let got = anyd::pipeline::scan_2d(&image.as_frame());
+            let Some(sym) = got.iter().find(|s| s.text().as_deref() == Some(*text)) else {
+                // Whether a soft capture reads at all is the samplers' own tests'
+                // business; a sharp one must.
+                assert!(sigma > 1.0, "{name}: not read from a sharp frame");
+                continue;
+            };
+            let loc = sym
+                .location
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} (blur {sigma}): read without a location"));
+            let cs = loc.outline.corners;
+            let b = [
+                cs.iter().map(|p| p.x).fold(f32::MAX, f32::min),
+                cs.iter().map(|p| p.y).fold(f32::MAX, f32::min),
+                cs.iter().map(|p| p.x).fold(f32::MIN, f32::max),
+                cs.iter().map(|p| p.y).fold(f32::MIN, f32::max),
+            ];
+            // The sprite includes its quiet zone, so the symbol's box lies inside the
+            // sprite's and covers a good part of it.
+            let t = [
+                left as f32,
+                top as f32,
+                (left + sprite.width()) as f32,
+                (top + sprite.height()) as f32,
+            ];
+            let ix = (b[2].min(t[2]) - b[0].max(t[0])).max(0.0);
+            let iy = (b[3].min(t[3]) - b[1].max(t[1])).max(0.0);
+            let (area, t_area) = ((b[2] - b[0]) * (b[3] - b[1]), (t[2] - t[0]) * (t[3] - t[1]));
+            assert!(
+                area > 0.0 && ix * iy >= 0.9 * area && area >= 0.25 * t_area,
+                "{name} (blur {sigma}): location {b:?} is not the symbol at {t:?}"
+            );
+        }
+    }
+}

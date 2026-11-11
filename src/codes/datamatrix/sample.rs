@@ -113,7 +113,11 @@ impl Analyze for DataMatrixScanner {
 
 /// Locate, sample and structurally decode the Data Matrix symbol in `frame`.
 pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
-    solve(frame).map(|(_, symbol)| symbol)
+    solve(frame).map(|(located, mut symbol)| {
+        // Every read says where it is: a live front-end has nothing to draw otherwise.
+        symbol.location.get_or_insert_with(|| located.as_location());
+        symbol
+    })
 }
 
 /// Locate the Data Matrix symbol in `frame` and sample it to a clean [`BitMatrix`].

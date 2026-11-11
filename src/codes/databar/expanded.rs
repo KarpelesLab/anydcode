@@ -263,6 +263,16 @@ fn digit_or_fnc1(c: u8) -> u32 {
 /// the ISO/IEC 24724:2011 §7.2.8 rule that pads a would-be single-character last row
 /// out to a full column pair.
 fn build_binary(reduced: &[u8], characters_per_row: usize) -> Result<Vec<bool>> {
+    // FNC1 separates two fields, so it can neither end the data nor repeat. Neither
+    // form has an encoding of its own: a numeric pair "digit, FNC1" at the end *is*
+    // the lone-trailing-digit terminator (§7.2.5.5.1 c), and a numeric pair of two
+    // FNC1s (value 128) does not fit the 7-bit pair field.
+    if reduced.last() == Some(&FNC1) || reduced.windows(2).any(|w| w == [FNC1, FNC1]) {
+        return Err(Error::invalid_data(
+            "DataBar Expanded: FNC1 must separate two fields (it cannot end the data or repeat)",
+        ));
+    }
+
     let mut bits: Vec<bool> = Vec::new();
     bits.push(false); // linkage flag: standalone (non-composite)
 

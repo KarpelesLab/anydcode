@@ -493,3 +493,46 @@ fn rejects_bad_parameters_and_input() {
     // A blank grid of valid dimensions has no readable codeword at all.
     assert!(dec.decode_matrix(&BitMatrix::new(38, 22, 1)).is_err());
 }
+
+/// ECI escapes are part of the compaction layer MicroPDF417 shares with PDF417:
+/// they round-trip, and a zint symbol carrying one reads (zint 2.16.0,
+/// `zint -b MICROPDF417 --eci=26 -d é --dump`; 3 columns x 6 rows).
+#[test]
+fn eci_segments_roundtrip_and_read_from_zint() {
+    assert_lossless(
+        vec![
+            Segment::eci(26),
+            Segment::byte("é".as_bytes().to_vec()),
+            Segment::eci(900),
+            Segment::alphanumeric(b"Ab".to_vec()),
+            Segment::eci(811_799),
+        ],
+        None,
+    );
+
+    let dump = [
+        "C8 B1 C6 56 77 5C FA 08 45 91 4",
+        "E8 BA 0C 52 77 A1 B2 FD 61 D1 4",
+        "EC AC 11 D3 75 1B E2 76 1D D9 4",
+        "CC B1 43 11 77 BD 12 71 D1 99 4",
+        "DC B0 9C 91 37 90 8B E5 0D B9 4",
+        "DE BA 7C 51 B6 FC CA 0E B1 BD 4",
+    ];
+    let width = 82;
+    let mut m = BitMatrix::new(width, dump.len() * 2, 1);
+    for (y, row) in dump.iter().enumerate() {
+        // One hex digit per four modules, most-significant first.
+        let nibbles: Vec<u32> = row.chars().filter_map(|c| c.to_digit(16)).collect();
+        for x in 0..width {
+            if (nibbles[x / 4] >> (3 - x % 4)) & 1 == 1 {
+                m.set(x, 2 * y, true);
+                m.set(x, 2 * y + 1, true);
+            }
+        }
+    }
+    let decoded = MicroPdf417Decoder::new().decode_matrix(&m).unwrap();
+    assert_eq!(
+        decoded.segments,
+        vec![Segment::eci(26), Segment::byte("é".as_bytes().to_vec())]
+    );
+}

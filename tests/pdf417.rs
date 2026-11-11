@@ -550,21 +550,15 @@ fn rejects_bad_parameters_and_input() {
             },
             true,
         ),
-        // ECI is not implemented; with its (empty) data it is refused as invalid.
-        (
-            Segment {
-                mode: Mode::Eci(26),
-                data: Vec::new(),
-            },
-            false,
-        ),
+        // An ECI escape carries no data, and PDF417 numbers them up to 811799.
         (
             Segment {
                 mode: Mode::Eci(26),
                 data: vec![b'A'],
             },
-            true,
+            false,
         ),
+        (Segment::eci(811_800), false),
     ];
     for (segment, unsupported) in bad_segments {
         let err = enc.build(vec![segment.clone()], level(1)).unwrap_err();
@@ -632,4 +626,83 @@ fn rejects_bad_parameters_and_input() {
     // A blank grid of valid dimensions has no readable codeword at all.
     let blank = anyd::output::BitMatrix::new(17 * 4 + 69, 30, 2);
     assert!(dec.decode_matrix(&blank).is_err());
+}
+
+/// Extended Channel Interpretation escapes ride between the data segments as
+/// [`Mode::Eci`] segments and survive the round trip wherever they stand: leading,
+/// between two runs of the same or different modes, doubled, trailing, and across
+/// all three escape forms (927: up to 899, 926: up to 810899, 925: above).
+#[test]
+fn eci_segments_roundtrip() {
+    let text = |s: &str| Segment::alphanumeric(s.as_bytes().to_vec());
+    assert_lossless(
+        vec![
+            Segment::eci(26),
+            Segment::byte("héllo — 日本語".as_bytes().to_vec()),
+        ],
+        level(2),
+    );
+    assert_lossless(
+        vec![
+            text("plain"),
+            Segment::eci(3),
+            text("abc"),
+            Segment::eci(899),
+            text("de7"),
+            Segment::eci(900),
+            Segment::numeric(b"0012345".to_vec()),
+            Segment::eci(810_899),
+            Segment::eci(810_900),
+            Segment::byte(vec![0xE9, 0xE8, 0x00]),
+            Segment::eci(811_799),
+        ],
+        level(3),
+    );
+    assert_lossless(vec![Segment::eci(0)], level(0));
+
+    let symbol = Pdf417Encoder::new()
+        .build(vec![Segment::eci(26), text("ok")], level(1))
+        .unwrap();
+    assert_eq!(symbol.modes(), [Mode::Eci(26), Mode::Alphanumeric]);
+    assert_eq!(symbol.payload_bytes(), b"ok");
+}
+
+/// A third-party symbol with three ECI escapes, the data after each carrying on
+/// without a new latch (zint 2.16.0, `zint -b PDF417 --eci=3 -d abc
+/// --seg1=899,de7 --seg2=900,XYZ --dump`; data codewords `927 3 810 32 927 899 94 847
+/// 926 0 0 863 745`). `de` only reads if the Lower sub-mode outlives the escape.
+#[test]
+fn decodes_zint_symbol_with_eci_escapes() {
+    let dump = [
+        "FF 54 7D 5F 3A CF 18 E3 2E A7 07 D5 F3 FA 29",
+        "FF 54 7E A3 B0 5C 9E B9 C9 F9 67 A9 03 FA 29",
+        "FF 54 54 F0 33 F6 94 41 EE FC 97 51 FB FA 29",
+        "FF 54 6B CF B3 CE 9D 5C 0E AE 06 BC FB FA 29",
+        "FF 54 75 C3 2F A3 9C 67 4B F5 87 AE 73 FA 29",
+        "FF 54 7D 7B 31 F2 54 EF CB 08 77 5F 43 FA 29",
+        "FF 54 74 EF AE 7B 13 DF 6C A3 07 4E FB FA 29",
+        "FF 54 7D 2C 32 38 5E 16 6E 9E 75 7E E3 FA 29",
+    ];
+    let m = matrix_from_zint_dump(&dump, 17 * 3 + 69);
+    let decoded = Pdf417Decoder::new().decode(&Encoding::Matrix(m)).unwrap();
+    assert_eq!(
+        decoded.segments,
+        vec![
+            Segment::eci(3),
+            Segment::alphanumeric(b"abc".to_vec()),
+            Segment::eci(899),
+            Segment::alphanumeric(b"de7".to_vec()),
+            Segment::eci(900),
+            Segment::alphanumeric(b"XYZ".to_vec()),
+        ]
+    );
+    // The segments rebuild into a symbol of this encoder's own that reads the same.
+    // (The geometry is chosen afresh: this encoder latches before every segment, so
+    // its codeword stream is longer than zint's and need not fit the original grid.)
+    let enc = Pdf417Encoder::new();
+    let rebuilt = enc.build(decoded.segments.clone(), level(2)).unwrap();
+    let again = Pdf417Decoder::new()
+        .decode(&enc.encode(&rebuilt).unwrap())
+        .unwrap();
+    assert_eq!(again.segments, decoded.segments);
 }

@@ -21,7 +21,9 @@
 //! compaction covers the full printable-ASCII set plus tab/CR/LF). The encoder emits
 //! an explicit mode latch before every segment, so the decoder recovers the exact
 //! segment boundaries — including those between adjacent segments of the same mode,
-//! each of which carries its own latch.
+//! each of which carries its own latch. An Extended Channel Interpretation switch is
+//! a data-less [`Mode::Eci`](crate::Mode::Eci) segment between them, encoded as the
+//! 927 / 926 / 925 escape for its assignment number (up to 811799).
 //!
 //! The codeword stream itself is not pinned in the metadata: a symbol from another
 //! encoder that compacts differently (no leading Text latch, the 913 byte shift,

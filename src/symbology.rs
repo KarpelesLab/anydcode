@@ -379,6 +379,85 @@ mod tests {
         }
     }
 
+    /// `ALL` is hand-maintained beside the enum. The discriminants are append-only
+    /// and gap-free, so "every id in `0..ALL.len()` appears once" is exactly "no
+    /// variant is missing from `ALL`" — a variant added to the enum but not to the
+    /// list would leave a hole (or, numbered past the end, exceed the range).
+    #[test]
+    fn all_lists_every_variant() {
+        let mut ids: std::vec::Vec<u8> = Symbology::ALL.iter().map(|&s| s as u8).collect();
+        ids.sort_unstable();
+        let want: std::vec::Vec<u8> = (0..Symbology::ALL.len() as u8).collect();
+        assert_eq!(ids, want);
+        assert_eq!(Symbology::ALL.len(), 52);
+    }
+
+    #[test]
+    fn dimensions_route_each_family() {
+        use Symbology::*;
+        let count = |d| Symbology::ALL.iter().filter(|s| s.dimension() == d).count();
+        assert_eq!(count(Dimension::Matrix), 11);
+        assert_eq!(count(Dimension::Stacked), 8);
+        assert_eq!(count(Dimension::Postal), 8);
+        assert_eq!(count(Dimension::Linear), 25);
+        for (sym, dim) in [
+            (QrCode, Dimension::Matrix),
+            (AppClipCode, Dimension::Matrix),
+            (AztecRunes, Dimension::Matrix),
+            (Pdf417, Dimension::Stacked),
+            (MicroPdf417, Dimension::Stacked),
+            (DataBarStacked, Dimension::Stacked),
+            (DataBarStackedOmni, Dimension::Stacked),
+            (DataBarExpandedStacked, Dimension::Stacked),
+            (DataBarOmni, Dimension::Linear),
+            (DataBarLimited, Dimension::Linear),
+            (DataBarExpanded, Dimension::Linear),
+            (Ean2, Dimension::Linear),
+            (PharmacodeTwoTrack, Dimension::Linear),
+            (DxFilmEdge, Dimension::Linear),
+            (Postnet, Dimension::Postal),
+            (IntelligentMail, Dimension::Postal),
+            (KixCode, Dimension::Postal),
+        ] {
+            assert_eq!(sym.dimension(), dim, "{sym:?}");
+        }
+    }
+
+    #[test]
+    fn display_is_the_name() {
+        use std::string::ToString;
+        for &s in Symbology::ALL {
+            assert_eq!(s.to_string(), s.name());
+            assert_eq!(s.name().trim(), s.name());
+            assert!(s.name().is_ascii(), "{s:?}");
+        }
+        assert_eq!(Symbology::QrCode.to_string(), "QR Code");
+        assert_eq!(Symbology::Gs1_128.to_string(), "GS1-128");
+    }
+
+    /// `is_implemented` follows the cargo feature of each family, whatever the slice.
+    #[test]
+    fn is_implemented_tracks_feature_gates() {
+        use Symbology::*;
+        for (sym, on) in [
+            (QrCode, cfg!(feature = "qr")),
+            (MicroQrCode, cfg!(feature = "microqr")),
+            (RectMicroQrCode, cfg!(feature = "rmqr")),
+            (AztecRunes, cfg!(feature = "aztec")),
+            (MicroPdf417, cfg!(feature = "pdf417")),
+            (UpcE, cfg!(feature = "ean")),
+            (Gs1_128, cfg!(feature = "code128")),
+            (Matrix2of5, cfg!(feature = "twoof5")),
+            (Plessey, cfg!(feature = "msi")),
+            (PharmacodeTwoTrack, cfg!(feature = "pharmacode")),
+            (DataBarExpandedStacked, cfg!(feature = "databar")),
+            (JapanPost, cfg!(feature = "postal")),
+            (AppClipCode, cfg!(feature = "appclip")),
+        ] {
+            assert_eq!(sym.is_implemented(), on, "{sym:?}");
+        }
+    }
+
     /// The discriminants are persisted-data / wire API: spot-check the anchors of
     /// each family block and prove the whole space stays collision-free, so an
     /// accidental insertion (rather than append) can never renumber a variant again.

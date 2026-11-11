@@ -162,3 +162,95 @@ impl Symbol {
         self.segments.iter().map(|s| s.mode).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{Point, Quad};
+    use alloc::vec;
+
+    fn symbol(segments: Vec<Segment>) -> Symbol {
+        Symbol::new(Symbology::QrCode, segments, SymbolMeta::Generic)
+    }
+
+    #[test]
+    fn payload_concatenates_data_segments_and_skips_eci() {
+        let s = symbol(vec![
+            Segment::eci(26),
+            Segment::numeric(b"123".to_vec()),
+            Segment::alphanumeric(b"AB".to_vec()),
+            Segment::eci(3),
+            Segment::byte(b"c\xc3\xa9".to_vec()),
+            Segment::kanji(vec![]),
+        ]);
+        assert_eq!(s.payload_bytes(), b"123ABc\xc3\xa9");
+        assert_eq!(s.text().as_deref(), Some("123ABc\u{e9}"));
+        assert_eq!(
+            s.modes(),
+            [
+                Mode::Eci(26),
+                Mode::Numeric,
+                Mode::Alphanumeric,
+                Mode::Eci(3),
+                Mode::Byte,
+                Mode::Kanji
+            ]
+        );
+        assert_eq!(s.location, None);
+        // An ECI segment that (wrongly) carries data still contributes nothing.
+        let mut eci = Segment::eci(26);
+        eci.data = b"junk".to_vec();
+        assert_eq!(symbol(vec![eci]).payload_bytes(), b"");
+    }
+
+    #[test]
+    fn empty_symbol_has_empty_text() {
+        let s = symbol(Vec::new());
+        assert!(s.payload_bytes().is_empty() && s.modes().is_empty());
+        assert_eq!(s.text().as_deref(), Some(""));
+    }
+
+    /// `text()` is strict UTF-8 over the *whole* payload: Latin-1, Shift-JIS, a lone
+    /// surrogate, or a character split across the payload's end are all `None` (the
+    /// bytes stay available through `payload_bytes`).
+    #[test]
+    fn text_is_none_unless_the_whole_payload_is_utf8() {
+        for bad in [
+            &b"caf\xe9"[..],
+            b"\x93\xfa\x96\x7b",
+            b"\xed\xa0\x80",
+            b"ok \xf0\x9f\x98",
+            b"\xff",
+        ] {
+            let s = symbol(vec![Segment::byte(bad.to_vec())]);
+            assert_eq!(s.text(), None, "{bad:?}");
+            assert_eq!(s.payload_bytes(), bad);
+        }
+        // A UTF-8 character split across two segments is still one character.
+        let split = symbol(vec![
+            Segment::byte(b"\xe6\x97".to_vec()),
+            Segment::byte(b"\xa5".to_vec()),
+        ]);
+        assert_eq!(split.text().as_deref(), Some("\u{65e5}"));
+    }
+
+    #[test]
+    fn equality_covers_payload_meta_and_location() {
+        let a = symbol(vec![Segment::byte(b"x".to_vec())]);
+        let mut b = a.clone();
+        assert_eq!(a, b);
+        b.location = Some(Location {
+            outline: Quad::new([Point::new(0.0, 0.0); 4]),
+            rotation: None,
+            module_size: Some(2.0),
+        });
+        assert_ne!(a, b);
+        let mut c = a.clone();
+        c.symbology = Symbology::Aztec;
+        assert_ne!(a, c);
+        // Same bytes, different segmentation: not the same symbol.
+        let d = symbol(vec![Segment::alphanumeric(b"x".to_vec())]);
+        assert_ne!(a, d);
+        assert_eq!(a.payload_bytes(), d.payload_bytes());
+    }
+}

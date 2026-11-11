@@ -127,3 +127,66 @@ impl fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::string::ToString;
+
+    #[test]
+    fn constructors_build_the_matching_variant() {
+        assert!(matches!(Error::capacity("a"), Error::Capacity { detail } if detail == "a"));
+        assert!(matches!(Error::invalid_data("b"), Error::InvalidData { detail } if detail == "b"));
+        assert!(matches!(Error::undecodable("c"), Error::Undecodable { detail } if detail == "c"));
+        assert!(matches!(
+            Error::invalid_parameter("d"),
+            Error::InvalidParameter { detail } if detail == "d"
+        ));
+    }
+
+    /// With `alloc`, the constructors take anything displayable, not just `&str`.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn constructors_accept_any_display() {
+        assert_eq!(
+            Error::capacity(format_args!("{} > {}", 9, 7)),
+            Error::Capacity {
+                detail: "9 > 7".into()
+            }
+        );
+        assert_eq!(Error::invalid_data(42), Error::invalid_data("42"));
+        assert_ne!(Error::invalid_data("x"), Error::undecodable("x"));
+    }
+
+    #[test]
+    fn display_names_the_failure_and_its_detail() {
+        let cases = [
+            (Error::Unsupported { what: "Code 1" }, "unsupported: Code 1"),
+            (Error::capacity("too long"), "capacity exceeded: too long"),
+            (Error::invalid_data("bad byte"), "invalid data: bad byte"),
+            (
+                Error::undecodable("no finder"),
+                "undecodable symbol: no finder",
+            ),
+            (Error::ErrorCorrectionFailed, "error correction failed"),
+            (Error::invalid_parameter("ec"), "invalid parameter: ec"),
+        ];
+        for (error, text) in cases {
+            assert_eq!(error.to_string(), text);
+        }
+        // `InvalidFrame` has no constructor helper; `GrayFrame` builds it directly.
+        let frame = crate::GrayFrame::new(&[], 0, 0).unwrap_err();
+        assert_eq!(frame.to_string(), "invalid frame: zero-sized frame");
+    }
+
+    #[test]
+    fn is_a_standard_error() {
+        fn source_of(e: &dyn core::error::Error) -> bool {
+            e.source().is_some()
+        }
+        assert!(!source_of(&Error::ErrorCorrectionFailed));
+        let boxed: std::boxed::Box<dyn std::error::Error + Send + Sync> =
+            std::boxed::Box::new(Error::capacity("x"));
+        assert_eq!(boxed.to_string(), "capacity exceeded: x");
+    }
+}

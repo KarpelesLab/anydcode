@@ -307,6 +307,85 @@ mod tests {
     }
 
     #[test]
+    fn eci_is_the_only_non_data_mode() {
+        for mode in [Mode::Numeric, Mode::Alphanumeric, Mode::Byte, Mode::Kanji] {
+            assert!(mode.is_data(), "{mode:?}");
+        }
+        assert!(!Mode::Eci(0).is_data() && !Mode::Eci(u32::MAX).is_data());
+    }
+
+    #[test]
+    fn constructors_tag_the_mode_and_views_borrow_it() {
+        let owned = [
+            (Segment::numeric(b"12".to_vec()), Mode::Numeric),
+            (Segment::alphanumeric("A1"), Mode::Alphanumeric),
+            (Segment::byte(vec![0u8, 255]), Mode::Byte),
+            (Segment::kanji(vec![0x93u8, 0xfa]), Mode::Kanji),
+        ];
+        for (segment, mode) in &owned {
+            assert_eq!(segment.mode, *mode);
+            assert_eq!(segment.data.len(), 2);
+            let view = segment.view();
+            assert_eq!((view.mode, view.data), (*mode, segment.data.as_slice()));
+        }
+        let eci = Segment::eci(26);
+        assert_eq!(eci.mode, Mode::Eci(26));
+        assert!(eci.data.is_empty());
+        assert_eq!(eci.view(), SegmentView::eci(26));
+
+        // The borrowed constructors are `const` and agree with the owned ones.
+        const DIGITS: SegmentView<'static> = SegmentView::numeric(b"12");
+        assert_eq!(DIGITS, owned[0].0.view());
+        assert_eq!(SegmentView::alphanumeric(b"A1"), owned[1].0.view());
+        assert_eq!(SegmentView::byte(&[0, 255]), owned[2].0.view());
+        assert_eq!(SegmentView::kanji(&[0x93, 0xfa]), owned[3].0.view());
+        assert_ne!(SegmentView::byte(b"12"), DIGITS);
+        assert_ne!(SegmentView::eci(3), SegmentView::eci(26));
+    }
+
+    #[test]
+    fn no_modes_on_offer_cannot_encode_anything() {
+        assert_eq!(optimize_segments(b"", &[]), Some(Vec::new()));
+        assert_eq!(optimize_segments(b"1", &[]), None);
+    }
+
+    /// A self-terminating mode's `tail_bits` are paid once per segment, so a costly
+    /// terminator keeps a short run from being split out.
+    #[test]
+    fn tail_bits_discourage_switching() {
+        let costs = |tail_bits| {
+            vec![
+                ModeCost {
+                    mode: Mode::Numeric,
+                    head_bits: 4,
+                    tail_bits,
+                    char_cost_sixths: 20,
+                    accepts: is_digit,
+                },
+                ModeCost {
+                    mode: Mode::Byte,
+                    head_bits: 4,
+                    tail_bits: 0,
+                    char_cost_sixths: 48,
+                    accepts: any,
+                },
+            ]
+        };
+        let data = b"ab1234cd";
+        let cheap = optimize_segments(data, &costs(0)).unwrap();
+        assert_eq!(
+            cheap.iter().map(|s| s.mode).collect::<Vec<_>>(),
+            [Mode::Byte, Mode::Numeric, Mode::Byte]
+        );
+        let dear = optimize_segments(data, &costs(40)).unwrap();
+        assert_eq!(dear, vec![Segment::byte(data.to_vec())]);
+        for segments in [cheap, dear] {
+            let flat: Vec<u8> = segments.iter().flat_map(|s| s.data.clone()).collect();
+            assert_eq!(flat, data);
+        }
+    }
+
+    #[test]
     fn empty_input_yields_no_segments() {
         assert_eq!(optimize_segments(b"", &qr_costs()), Some(Vec::new()));
     }

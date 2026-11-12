@@ -458,16 +458,25 @@ fn build(sym: &str, data: &str, opts: &str) -> Result<Encoding, String> {
         }
         "datamatrix" => {
             let e = datamatrix::DataMatrixEncoder::new();
-            let s = match opt(opts, "size") {
-                o if is_auto(o) => e.build_text(data).map_err(es)?,
+            // "auto", a square's side ("24"), or rows×columns ("8x18").
+            let size = match opt(opts, "size") {
+                o if is_auto(o) => None,
                 Some(v) => {
-                    let n: usize = v
-                        .parse()
-                        .map_err(|_| "Data Matrix size must be a number or 'auto'".to_string())?;
-                    e.build_sized(b, n).map_err(es)?
+                    let bad = || "Data Matrix size must be 'auto', N or ROWSxCOLS".to_string();
+                    let (rows, cols) = v.split_once('x').unwrap_or((v, v));
+                    let rows: usize = rows.parse().map_err(|_| bad())?;
+                    let cols: usize = cols.parse().map_err(|_| bad())?;
+                    Some((cols, rows))
                 }
                 None => unreachable!(),
             };
+            let s = match (opt(opts, "mode"), size) {
+                (Some("gs1"), None) => e.build_gs1(b),
+                (Some("gs1"), Some((w, h))) => e.build_gs1_sized(b, w, h),
+                (_, None) => e.build(b),
+                (_, Some((w, h))) => e.build_rectangular(b, w, h),
+            }
+            .map_err(es)?;
             e.encode(&s).map_err(es)
         }
         "maxicode" => {
@@ -1469,6 +1478,9 @@ mod tests {
              mode=255;version=255;check=255",
             "mode=gs1;fullascii=off;check=on;start=D;stop=B",
             "mode=3;size=144;cols=30;rows=16",
+            "mode=gs1;size=8x18",
+            "size=12x26",
+            "size=x;mode=gs1",
             "=;;==;&&;ec",
         ];
         for &(name, _) in NAMES {

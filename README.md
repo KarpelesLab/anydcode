@@ -37,7 +37,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Symbology | Encode | Decode | Detect |
 |-----------|:------:|:------:|:------:|
 | QR Code (v1–40, all EC levels & masks) | ✅ | ✅ | ✅¹ |
-| Data Matrix (ECC 200, square sizes, ASCII+Base256) | ✅ | ✅ | ✅³ |
+| Data Matrix (ECC 200, square + rectangular + DMRE, all encodations, GS1) | ✅ | ✅ | ✅³ |
 | Aztec (compact + full range, all modes) · Aztec Runes | ✅ | ✅ | ✅⁶ |
 | Micro QR Code (M1–M4) | ✅ | ✅ | ✅⁶ |
 | Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ✅⁶ |

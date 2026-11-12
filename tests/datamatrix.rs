@@ -1,6 +1,6 @@
 //! End-to-end Data Matrix round-trip tests: encode → decode → re-encode must be
-//! byte-identical, across square sizes and ASCII / Base256 encodation, and must
-//! survive correctable errors.
+//! byte-identical, across every symbol size and encodation, and must survive
+//! correctable errors.
 #![cfg(all(feature = "decode", feature = "encode", feature = "datamatrix"))]
 
 use anyd::codes::datamatrix::{DataMatrixDecoder, DataMatrixEncoder};
@@ -177,16 +177,17 @@ fn encode_into_matches_encode() {
         let SymbolMeta::DataMatrix(meta) = &symbol.meta else {
             panic!("expected Data Matrix meta");
         };
-        let size = meta.symbol_size;
+        assert_eq!(meta.width, meta.height);
+        let size = meta.width;
         let views: Vec<SegmentView> = symbol.segments.iter().map(|s| s.view()).collect();
 
         // Exactly-sized buffers suffice.
-        let mut sc = vec![0u8; DataMatrixEncoder::scratch_len(size).unwrap()];
-        let mut st = vec![0u8; DataMatrixEncoder::storage_len(size).unwrap()];
+        let mut sc = vec![0u8; DataMatrixEncoder::scratch_len(size, size).unwrap()];
+        let mut st = vec![0u8; DataMatrixEncoder::storage_len(size, size).unwrap()];
         assert!(sc.len() <= DataMatrixEncoder::MAX_SCRATCH_LEN);
         assert_eq!(st.len(), MatrixBuf::bytes_for(size, size));
         let buf = enc
-            .encode_into(&views, &meta.encodations, size, &mut sc, &mut st)
+            .encode_into(&views, &meta.encodations, size, size, &mut sc, &mut st)
             .unwrap();
         assert_eq!(buf, expected, "encode_into, size {size}");
 
@@ -201,6 +202,7 @@ fn encode_into_matches_encode() {
             &views,
             &meta.encodations,
             size,
+            size,
             &mut sc[..short],
             &mut storage,
         );
@@ -211,6 +213,7 @@ fn encode_into_matches_encode() {
         let err = enc.encode_into(
             &views,
             &meta.encodations,
+            size,
             size,
             &mut scratch,
             &mut st[..short],
@@ -246,6 +249,7 @@ fn encode_into_matches_encode() {
             &segs,
             &[Encodation::Ascii],
             size,
+            size,
             &mut scratch,
             &mut storage,
         );
@@ -262,10 +266,11 @@ fn encode_into_matches_encode() {
     assert!(matches!(err, Err(anyd::Error::Capacity { .. })));
     let err = enc.encode_data_into(b"HELLO", Some(11), &mut scratch, &mut storage);
     assert!(matches!(err, Err(anyd::Error::InvalidParameter { .. })));
-    assert_eq!(DataMatrixEncoder::scratch_len(11), None);
+    assert_eq!(DataMatrixEncoder::scratch_len(11, 11), None);
     let err = enc.encode_into(
         &[SegmentView::byte(b"A")],
         &[],
+        10,
         10,
         &mut scratch,
         &mut storage,
@@ -274,6 +279,7 @@ fn encode_into_matches_encode() {
     let err = enc.encode_into(
         &[SegmentView::numeric(b"1")],
         &[Encodation::Ascii],
+        10,
         10,
         &mut scratch,
         &mut storage,
@@ -555,7 +561,7 @@ fn exactly_full_and_one_over_at_every_size() {
     ];
     let enc = DataMatrixEncoder::new();
     let size_of = |s: &anyd::symbol::Symbol| match &s.meta {
-        anyd::symbol::SymbolMeta::DataMatrix(m) => m.symbol_size,
+        anyd::symbol::SymbolMeta::DataMatrix(m) => m.width,
         _ => unreachable!(),
     };
     for (i, &(size, cap)) in caps.iter().enumerate() {
@@ -593,7 +599,8 @@ fn hand_built(
             .map(|&(_, bytes)| anyd::segment::Segment::byte(bytes.to_vec()))
             .collect(),
         anyd::symbol::SymbolMeta::DataMatrix(anyd::codes::datamatrix::DataMatrixMeta {
-            symbol_size: size,
+            width: size,
+            height: size,
             encodations: segments.iter().map(|&(e, _)| e).collect(),
         }),
     )
@@ -675,7 +682,7 @@ fn empty_base256_segment_must_end_the_symbol() {
         let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
         let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
         assert!(
-            enc.encode_into(&views, &encodations, 12, &mut scratch, &mut storage)
+            enc.encode_into(&views, &encodations, 12, 12, &mut scratch, &mut storage)
                 .is_err()
         );
     }
@@ -938,25 +945,33 @@ fn api_misuse_is_an_error() {
             enc.build_sized(b"A", size),
             Err(anyd::Error::InvalidParameter { .. })
         ));
-        assert_eq!(DataMatrixEncoder::scratch_len(size), None);
-        assert_eq!(DataMatrixEncoder::storage_len(size), None);
+        assert_eq!(DataMatrixEncoder::scratch_len(size, size), None);
+        assert_eq!(DataMatrixEncoder::storage_len(size, size), None);
     }
     // The heap-free entry points report the same problems, plus short buffers.
     let mut scratch = [0u8; DataMatrixEncoder::MAX_SCRATCH_LEN];
     let mut storage = [0u8; DataMatrixEncoder::MAX_STORAGE_LEN];
     let view = [SegmentView::byte(b"DATA")];
     assert!(matches!(
-        enc.encode_into(&view, &[], 12, &mut scratch, &mut storage),
+        enc.encode_into(&view, &[], 12, 12, &mut scratch, &mut storage),
         Err(anyd::Error::InvalidParameter { .. })
     ));
     assert!(matches!(
-        enc.encode_into(&view, &[Encodation::Ascii], 13, &mut scratch, &mut storage),
+        enc.encode_into(
+            &view,
+            &[Encodation::Ascii],
+            13,
+            13,
+            &mut scratch,
+            &mut storage
+        ),
         Err(anyd::Error::InvalidParameter { .. })
     ));
     assert!(matches!(
         enc.encode_into(
             &[SegmentView::numeric(b"12")],
             &[Encodation::Ascii],
+            12,
             12,
             &mut scratch,
             &mut storage
@@ -967,11 +982,12 @@ fn api_misuse_is_an_error() {
         enc.encode_data_into(b"DATA", Some(13), &mut scratch, &mut storage),
         Err(anyd::Error::InvalidParameter { .. })
     ));
-    let need = DataMatrixEncoder::scratch_len(12).unwrap();
+    let need = DataMatrixEncoder::scratch_len(12, 12).unwrap();
     assert!(matches!(
         enc.encode_into(
             &view,
             &[Encodation::Ascii],
+            12,
             12,
             &mut scratch[..need - 1],
             &mut storage
@@ -982,11 +998,12 @@ fn api_misuse_is_an_error() {
         enc.encode_data_into(b"DATA", None, &mut scratch[..2], &mut storage),
         Err(anyd::Error::Capacity { .. })
     ));
-    let need = DataMatrixEncoder::storage_len(12).unwrap();
+    let need = DataMatrixEncoder::storage_len(12, 12).unwrap();
     assert!(
         enc.encode_into(
             &view,
             &[Encodation::Ascii],
+            12,
             12,
             &mut scratch,
             &mut storage[..need - 1]
@@ -994,11 +1011,12 @@ fn api_misuse_is_an_error() {
         .is_err()
     );
     // Exactly the advertised buffers are enough.
-    let scratch_len = DataMatrixEncoder::scratch_len(12).unwrap();
+    let scratch_len = DataMatrixEncoder::scratch_len(12, 12).unwrap();
     let buf = enc
         .encode_into(
             &view,
             &[Encodation::Ascii],
+            12,
             12,
             &mut scratch[..scratch_len],
             &mut storage[..need],
@@ -1012,3 +1030,354 @@ fn api_misuse_is_an_error() {
         Err(anyd::Error::Unsupported { .. })
     ));
 }
+
+// ---- zint reference symbols across encodations and shapes ---------------------
+
+/// One zint symbol of `tests/fixtures/datamatrix_zint.txt`: the command that made
+/// it, the payload a reader reports, and the module grid.
+fn zint_fixtures() -> Vec<(&'static str, Vec<u8>, anyd::output::BitMatrix)> {
+    let text = include_str!("fixtures/datamatrix_zint.txt");
+    let mut out = Vec::new();
+    let mut command = "";
+    for line in text.lines() {
+        if let Some(c) = line.strip_prefix("# ") {
+            command = c;
+            continue;
+        }
+        let (payload, rows) = line.split_once(' ').expect("payload and rows");
+        let payload: Vec<u8> = if payload == "-" {
+            Vec::new()
+        } else {
+            (0..payload.len() / 2)
+                .map(|i| u8::from_str_radix(&payload[2 * i..2 * i + 2], 16).unwrap())
+                .collect()
+        };
+        let rows: Vec<&str> = rows.split(',').collect();
+        // Rows are hex, most-significant bit leftmost, padded to a whole nibble; the
+        // true width is the last dark module of the solid bottom row.
+        let bits = |row: &str, x: usize| {
+            u8::from_str_radix(&row[x / 4..x / 4 + 1], 16).unwrap() & (8 >> (x % 4)) != 0
+        };
+        let last = rows.last().unwrap();
+        let width = (0..last.len() * 4).filter(|&x| bits(last, x)).count();
+        let mut m = anyd::output::BitMatrix::new(width, rows.len(), 1);
+        for (y, row) in rows.iter().enumerate() {
+            for x in 0..width {
+                m.set(x, y, bits(row, x));
+            }
+        }
+        out.push((command, payload, m));
+    }
+    out
+}
+
+/// Symbols zint 2.16 makes with every encodation — C40, Text, X12 and EDIFACT runs
+/// of every length against the end of the symbol, FNC1 (GS1) inside and outside C40,
+/// Macros, ECIs — and in every rectangular size, ISO/IEC 16022 and DMRE: each reads
+/// to its payload and re-encodes module for module.
+#[test]
+fn reads_and_rewrites_zint_symbols_in_every_encodation_and_shape() {
+    use anyd::codes::datamatrix::Encodation;
+    use anyd::segment::Mode;
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let fixtures = zint_fixtures();
+    assert!(fixtures.len() > 300);
+    let mut seen = Vec::new();
+    let mut shapes = Vec::new();
+    for (command, payload, m) in fixtures {
+        let shape = (m.width(), m.height());
+        let reference = Encoding::Matrix(m);
+        let decoded = dec
+            .decode(&reference)
+            .unwrap_or_else(|e| panic!("{command}: {e}"));
+        assert_eq!(decoded.payload_bytes(), payload, "{command}");
+        let again = enc
+            .encode(&decoded)
+            .unwrap_or_else(|e| panic!("{command}: {e}"));
+        assert_eq!(again, reference, "{command}: {decoded:?}");
+        let anyd::symbol::SymbolMeta::DataMatrix(meta) = &decoded.meta else {
+            panic!("{command}: no Data Matrix meta");
+        };
+        assert_eq!((meta.width, meta.height), shape, "{command}");
+        for e in &meta.encodations {
+            if !seen.contains(e) {
+                seen.push(*e);
+            }
+        }
+        if decoded
+            .segments
+            .iter()
+            .any(|s| matches!(s.mode, Mode::Eci(_)))
+        {
+            assert!(command.contains("--eci="), "{command}");
+        } else {
+            assert!(!command.contains("--eci="), "{command}");
+        }
+        if !shapes.contains(&shape) {
+            shapes.push(shape);
+        }
+    }
+    for e in [
+        Encodation::Ascii,
+        Encodation::Base256,
+        Encodation::C40,
+        Encodation::Text,
+        Encodation::X12,
+        Encodation::Edifact,
+        Encodation::Fnc1,
+        Encodation::Macro05,
+        Encodation::Macro06,
+    ] {
+        assert!(seen.contains(&e), "{e:?} not exercised");
+    }
+    // All 24 rectangular sizes, and a spread of squares.
+    assert_eq!(shapes.iter().filter(|(w, h)| w != h).count(), 24);
+    assert!(shapes.iter().filter(|(w, h)| w == h).count() >= 12);
+}
+
+/// A square symbol's grid from hex rows (most-significant bit leftmost).
+fn grid_from_hex(rows: &[&str]) -> Encoding {
+    let size = rows.len();
+    let mut m = anyd::output::BitMatrix::new(size, size, 1);
+    for (y, row) in rows.iter().enumerate() {
+        for x in 0..size {
+            let nibble = u8::from_str_radix(&row[x / 4..x / 4 + 1], 16).unwrap();
+            m.set(x, y, nibble & (8 >> (x % 4)) != 0);
+        }
+    }
+    Encoding::Matrix(m)
+}
+
+#[test]
+fn structured_append_and_reader_programming_are_reported_unsupported() {
+    // `zint -b DATAMATRIX --structapp=1,2 -d AB` and `--init -d AB`: neither is a
+    // message to hand on as if it were whole.
+    let append = grid_from_hex(STRUCTURED_APPEND_AB);
+    let init = grid_from_hex(READER_INIT_AB);
+    for (grid, what) in [(append, "Structured Append"), (init, "Reader Programming")] {
+        match DataMatrixDecoder::new().decode(&grid) {
+            Err(anyd::Error::Unsupported { what: w }) => assert!(w.contains(what), "{w}"),
+            other => panic!("{what}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn gs1_builder_opens_with_fnc1_and_separates_fields_with_it() {
+    use anyd::codes::datamatrix::Encodation::{Ascii, Fnc1};
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let data = b"0109501101530003\x1d10ABC123\x1d2112345";
+    let symbol = enc.build_gs1(data).unwrap();
+    let anyd::symbol::SymbolMeta::DataMatrix(meta) = &symbol.meta else {
+        panic!("no Data Matrix meta");
+    };
+    assert_eq!(meta.encodations, [Fnc1, Ascii, Fnc1, Ascii, Fnc1, Ascii]);
+    // The leading FNC1 is a flag, not data; the others are transmitted as GS.
+    assert!(symbol.segments[0].data.is_empty());
+    assert_eq!(symbol.payload_bytes(), data);
+    let encoding = enc.encode(&symbol).unwrap();
+    let decoded = dec.decode(&encoding).unwrap();
+    assert_eq!(decoded, symbol);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+
+    // Where zint too stays in ASCII, the two make the same symbol.
+    let zint = zint_fixtures()
+        .into_iter()
+        .find(|(command, ..)| command.ends_with("--gs1 -d [01]09501101530003"))
+        .expect("the GS1 fixture");
+    // (zint prefers the 8×32 rectangle for it.)
+    let gtin = enc.build_gs1_sized(b"0109501101530003", 32, 8).unwrap();
+    assert_eq!(enc.encode(&gtin).unwrap(), Encoding::Matrix(zint.2));
+
+    // Sized, square or rectangular; and only ASCII.
+    let wide = enc.build_gs1_sized(b"0109501101530003", 36, 12).unwrap();
+    let Encoding::Matrix(m) = enc.encode(&wide).unwrap() else {
+        panic!("expected a matrix");
+    };
+    assert_eq!((m.width(), m.height()), (36, 12));
+    assert_eq!(dec.decode_matrix(&m).unwrap(), wide);
+    assert!(matches!(
+        enc.build_gs1(b"10caf\xe9"),
+        Err(anyd::Error::InvalidData { .. })
+    ));
+    assert!(matches!(
+        enc.build_gs1_sized(data, 18, 8),
+        Err(anyd::Error::Capacity { .. })
+    ));
+}
+
+/// A symbol whose segments name their encodations, `width × height`.
+fn encoded_as(
+    segments: Vec<(anyd::codes::datamatrix::Encodation, anyd::segment::Segment)>,
+    (width, height): (usize, usize),
+) -> anyd::symbol::Symbol {
+    let (encodations, segments) = segments.into_iter().unzip();
+    anyd::symbol::Symbol::new(
+        anyd::symbology::Symbology::DataMatrix,
+        segments,
+        anyd::symbol::SymbolMeta::DataMatrix(anyd::codes::datamatrix::DataMatrixMeta {
+            width,
+            height,
+            encodations,
+        }),
+    )
+}
+
+#[test]
+fn every_encodation_round_trips_from_a_hand_built_symbol() {
+    use anyd::codes::datamatrix::Encodation::*;
+    use anyd::segment::Segment;
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    let byte = |b: &[u8]| Segment::byte(b.to_vec());
+    let symbol = encoded_as(
+        vec![
+            (Macro05, byte(b"[)>\x1e05\x1d")),
+            (Ascii, Segment::eci(26)),
+            (C40, byte(b"UPPER CASE 123 & more\xe9")),
+            (Fnc1, byte(b"\x1d")),
+            (C40, byte(b"AFTER FNC1")),
+            (Text, byte(b"lower case 456 AND MORE")),
+            (X12, byte(b"X12*SEGMENT>01\r")),
+            (Edifact, byte(b"EDIFACT+DATA:1.5'")),
+            (Fnc1, byte(b"\x1d")),
+            (Base256, byte(&[0x00, 0xFF, 0x80])),
+            (Ascii, byte(b"ascii 7890")),
+            (Macro05, byte(b"\x1e\x04")),
+        ],
+        (64, 26),
+    );
+    let encoding = enc.encode(&symbol).unwrap();
+    let decoded = dec.decode(&encoding).unwrap();
+    assert_eq!(decoded, symbol);
+    assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+    assert_eq!(
+        decoded.payload_bytes(),
+        b"[)>\x1e05\x1dUPPER CASE 123 & more\xe9\x1dAFTER FNC1lower case 456 AND MORE\
+          X12*SEGMENT>01\rEDIFACT+DATA:1.5'\x1d\x00\xff\x80ascii 7890\x1e\x04"
+    );
+
+    // The heap-free path writes the same modules.
+    let views: Vec<_> = symbol.segments.iter().map(Segment::view).collect();
+    let anyd::symbol::SymbolMeta::DataMatrix(meta) = &symbol.meta else {
+        unreachable!();
+    };
+    let mut scratch = vec![0u8; DataMatrixEncoder::scratch_len(64, 26).unwrap()];
+    let mut storage = vec![0u8; DataMatrixEncoder::storage_len(64, 26).unwrap()];
+    let buf = enc
+        .encode_into(
+            &views,
+            &meta.encodations,
+            64,
+            26,
+            &mut scratch,
+            &mut storage,
+        )
+        .unwrap();
+    assert_eq!(
+        Encoding::Matrix(anyd::output::BitMatrix::from(&buf)),
+        encoding
+    );
+}
+
+#[test]
+fn segments_an_encodation_cannot_express_are_rejected() {
+    use anyd::codes::datamatrix::Encodation::*;
+    use anyd::segment::Segment;
+    let enc = DataMatrixEncoder::new();
+    let byte = |b: &[u8]| Segment::byte(b.to_vec());
+    let invalid = |segments| {
+        let r = enc.encode(&encoded_as(segments, (32, 32)));
+        assert!(matches!(r, Err(anyd::Error::InvalidData { .. })), "{r:?}");
+    };
+    // Outside the X12 and EDIFACT character sets.
+    invalid(vec![(X12, byte(b"abc"))]);
+    invalid(vec![(Edifact, byte(b"_"))]);
+    // X12 has no pad; C40 and Text pad two left-over values but not one.
+    invalid(vec![(X12, byte(b"AB"))]);
+    invalid(vec![(C40, byte(b"ABCD"))]);
+    invalid(vec![(Text, byte(b"a"))]);
+    // An FNC1 is nothing or GS; a Macro is the first and last segments, as written.
+    invalid(vec![(Fnc1, byte(b"x"))]);
+    invalid(vec![(Macro05, byte(b"[)>\x1e05\x1d")), (Ascii, byte(b"A"))]);
+    invalid(vec![(Ascii, byte(b"A")), (Macro05, byte(b"\x1e\x04"))]);
+    invalid(vec![
+        (Macro05, byte(b"[)>\x1e06\x1d")),
+        (Macro05, byte(b"\x1e\x04")),
+    ]);
+    invalid(vec![
+        (Macro05, byte(b"[)>\x1e05\x1d")),
+        (Macro06, byte(b"\x1e\x04")),
+    ]);
+    // An ECI is written in ASCII, and stops at 999999.
+    invalid(vec![(C40, Segment::eci(3))]);
+    invalid(vec![(Ascii, Segment::eci(1_000_000))]);
+    // Segments are bytes or ECIs.
+    let r = enc.encode(&encoded_as(
+        vec![(Ascii, Segment::numeric(b"12".to_vec()))],
+        (32, 32),
+    ));
+    assert!(matches!(r, Err(anyd::Error::Unsupported { .. })), "{r:?}");
+}
+
+#[test]
+fn rectangular_sizes_build_fill_and_round_trip() {
+    let enc = DataMatrixEncoder::new();
+    let dec = DataMatrixDecoder::new();
+    // (width, height, data codewords)
+    for (w, h, capacity) in [
+        (18, 8, 5),
+        (32, 8, 10),
+        (26, 12, 16),
+        (36, 12, 22),
+        (36, 16, 32),
+        (48, 16, 49),
+        (144, 8, 63),
+        (64, 26, 118),
+    ] {
+        let payload: Vec<u8> = (0..capacity).map(|i| b'A' + (i % 26) as u8).collect();
+        let symbol = enc.build_rectangular(&payload, w, h).unwrap();
+        let Encoding::Matrix(m) = enc.encode(&symbol).unwrap() else {
+            panic!("expected a matrix");
+        };
+        assert_eq!((m.width(), m.height()), (w, h));
+        let decoded = dec.decode_matrix(&m).unwrap();
+        assert_eq!(decoded, symbol, "{w}x{h}");
+        assert_eq!(decoded.payload_bytes(), payload);
+        // One byte more does not fit.
+        let mut over = payload.clone();
+        over.push(b'Z');
+        assert!(matches!(
+            enc.build_rectangular(&over, w, h),
+            Err(anyd::Error::Capacity { .. })
+        ));
+    }
+    // Width first: 8×18 is 18 wide and 8 high, and there is no 18×8.
+    assert!(matches!(
+        enc.build_rectangular(b"A", 8, 18),
+        Err(anyd::Error::InvalidParameter { .. })
+    ));
+    assert_eq!(DataMatrixEncoder::scratch_len(8, 18), None);
+    assert!(DataMatrixEncoder::storage_len(18, 8).is_some());
+    // The automatic size is always a square.
+    for n in [1usize, 5, 20, 60] {
+        let symbol = enc.build(&vec![b'x'; n]).unwrap();
+        let anyd::symbol::SymbolMeta::DataMatrix(meta) = &symbol.meta else {
+            panic!("no Data Matrix meta");
+        };
+        assert_eq!(meta.width, meta.height);
+    }
+}
+
+/// `zint -b DATAMATRIX --dump --structapp=1,2 -d AB` (zint 2.16).
+const STRUCTURED_APPEND_AB: &[&str] = &[
+    "aaa8", "841c", "94e0", "f1f4", "d5e0", "c794", "99d8", "883c", "bb90", "d1a4", "88a8", "be04",
+    "9400", "fffc",
+];
+
+/// `zint -b DATAMATRIX --dump --init -d AB` (zint 2.16).
+const READER_INIT_AB: &[&str] = &[
+    "aa8", "aec", "8f8", "adc", "e50", "bac", "cf0", "eac", "e18", "ffc",
+];

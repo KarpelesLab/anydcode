@@ -10,8 +10,8 @@
 //!
 //! ## Working envelope (what the sampler is asserted to handle)
 //!
-//! Square symbols only, rendered at 6 px/module with the standard 1-module quiet zone.
-//! Within that, decoding is asserted for:
+//! Symbols rendered at 6 px/module with the standard 1-module quiet zone. For the
+//! square sizes, decoding is asserted for:
 //!
 //! | Transform            | Envelope                                                  |
 //! |----------------------|-----------------------------------------------------------|
@@ -22,6 +22,10 @@
 //! | Brightness/contrast  | ±40 brightness, 0.6–1.4 contrast                          |
 //! | Perspective tilt     | ≤ 0.30 on either axis, all sizes, at any rotation         |
 //! | Combined             | 8° rotation + σ1.0 blur + σ12 noise                       |
+//!
+//! The rectangular sizes (ISO/IEC 16022 and DMRE) are held to the same transforms in
+//! the `rectangles_*` tests, perspective excepted for the five 8-row sizes of 64
+//! columns and more.
 //!
 //! A Data Matrix has no interior alignment anchor, so the fourth (timing-meeting)
 //! corner is recovered from the two timing borders alone: seeded where the tangents
@@ -427,4 +431,117 @@ fn cases() -> Vec<Vec<u8>> {
         b"0123456789 abcdefghij KLMNOPQRSTUV extra content here!!".to_vec(), // dim 32
         b"The quick brown fox jumps over the lazy dog 0123456789 AAAAAAAAAAAAAAAAAAAA".to_vec(), // dim 36
     ]
+}
+
+// ===================================================================================
+// Rectangular symbols
+// ===================================================================================
+
+/// Every rectangular size, ISO/IEC 16022 and DMRE, as `(width, height)`.
+const RECTANGLES: &[(usize, usize)] = &[
+    (18, 8),
+    (32, 8),
+    (26, 12),
+    (36, 12),
+    (36, 16),
+    (48, 16),
+    (48, 8),
+    (64, 8),
+    (80, 8),
+    (96, 8),
+    (120, 8),
+    (144, 8),
+    (64, 12),
+    (88, 12),
+    (64, 16),
+    (36, 20),
+    (44, 20),
+    (64, 20),
+    (48, 22),
+    (48, 24),
+    (64, 24),
+    (40, 26),
+    (48, 26),
+    (64, 26),
+];
+
+/// A `width × height` symbol about three-quarters full of mixed text.
+fn rectangle(width: usize, height: usize) -> (BitMatrix, Vec<u8>) {
+    let enc = DataMatrixEncoder::new();
+    let text = b"Rect 8x18 DMRE: 0123456789 abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    // The longest prefix that fits, less a quarter.
+    let fits = (1..=text.len())
+        .take_while(|&n| enc.build_rectangular(&text[..n], width, height).is_ok())
+        .last()
+        .expect("a rectangle holds something");
+    let payload = text[..(fits * 3).div_ceil(4)].to_vec();
+    let symbol = enc.build_rectangular(&payload, width, height).unwrap();
+    match enc.encode(&symbol).expect("encode") {
+        Encoding::Matrix(m) => (m, payload),
+        Encoding::Linear(_) => unreachable!("Data Matrix encodes to a matrix"),
+    }
+}
+
+#[test]
+fn rectangles_upright_are_pixel_exact() {
+    for &(w, h) in RECTANGLES {
+        let (matrix, _) = rectangle(w, h);
+        assert_eq!((matrix.width(), matrix.height()), (w, h));
+        let img = render_matrix(&matrix, SCALE);
+        let sampled = sample_grid(&img.as_frame()).unwrap_or_else(|e| panic!("{w}x{h}: {e}"));
+        assert_eq!(sampled, matrix, "{w}x{h}: upright sampling not pixel-exact");
+    }
+}
+
+#[test]
+fn rectangles_rotated_scaled_and_degraded() {
+    for &(w, h) in RECTANGLES {
+        let (matrix, expected) = rectangle(w, h);
+        let base = render_matrix(&matrix, SCALE);
+        for deg in [5.0f32, -15.0, 30.0, -45.0, 90.0, 180.0, 250.0] {
+            let img = transform::rotate(&base, deg.to_radians());
+            assert_decodes(&img, &expected, &format!("{w}x{h} rot{deg}"));
+        }
+        for factor in [0.75f32, 1.5] {
+            let img = transform::scale(&base, factor);
+            assert_decodes(&img, &expected, &format!("{w}x{h} scale{factor}"));
+        }
+        let img = transform::gaussian_blur(&base, 1.2);
+        assert_decodes(&img, &expected, &format!("{w}x{h} blur"));
+        let mut rng = Rng::new(7);
+        let img = transform::add_noise(&base, 20.0, &mut rng);
+        assert_decodes(&img, &expected, &format!("{w}x{h} noise"));
+        let img = transform::rotate(&transform::gaussian_blur(&base, 1.0), 8f32.to_radians());
+        let img = transform::add_noise(&img, 12.0, &mut rng);
+        assert_decodes(&img, &expected, &format!("{w}x{h} combined"));
+    }
+}
+
+/// A tilt foreshortens a symbol in proportion to the depth it spans: its width for
+/// a yaw, its height for a pitch. The pitch is scaled to the rectangle's height, so
+/// that both are the tilts the squares are held to. The five 8-row DMRE sizes of 64
+/// columns and more are left out: over such a length the four corners no longer pin
+/// down the foreshortening along the row.
+#[test]
+fn rectangles_under_perspective() {
+    for &(w, h) in RECTANGLES.iter().filter(|&&(w, h)| w < 8 * h) {
+        let (matrix, expected) = rectangle(w, h);
+        let base = render_matrix(&matrix, SCALE);
+        for amount in [0.1f32, 0.2, 0.3] {
+            let pitch = amount * h as f32 / w as f32;
+            let tilts = [
+                transform::tilt_right(&base, amount),
+                transform::tilt_bottom(&base, pitch),
+            ];
+            for (axis, img) in tilts.iter().enumerate() {
+                assert_decodes(img, &expected, &format!("{w}x{h} tilt{axis} {amount}"));
+                let img = transform::rotate(img, 20f32.to_radians());
+                assert_decodes(
+                    &img,
+                    &expected,
+                    &format!("{w}x{h} tilt{axis} {amount} rot20"),
+                );
+            }
+        }
+    }
 }

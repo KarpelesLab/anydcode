@@ -54,10 +54,22 @@ pub fn sample_grid(
     threshold: u8,
     quiet_zone: usize,
 ) -> BitMatrix {
-    let mut matrix = BitMatrix::new(dim, dim, quiet_zone);
+    sample_grid_rect(frame, homography, dim, dim, threshold, quiet_zone)
+}
+
+/// [`sample_grid`] for a `width × height` module grid.
+pub fn sample_grid_rect(
+    frame: &GrayFrame<'_>,
+    homography: &Homography,
+    width: usize,
+    height: usize,
+    threshold: u8,
+    quiet_zone: usize,
+) -> BitMatrix {
+    let mut matrix = BitMatrix::new(width, height, quiet_zone);
     let thr = f64::from(threshold);
-    for row in 0..dim {
-        for col in 0..dim {
+    for row in 0..height {
+        for col in 0..width {
             let gx = col as f64 + 0.5;
             let gy = row as f64 + 0.5;
             let (px, py) = homography.map_f64(gx, gy);

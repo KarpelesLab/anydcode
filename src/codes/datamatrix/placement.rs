@@ -10,7 +10,7 @@
 //! coordinates, and [`draw_borders`] paints the L-shaped solid finder and the
 //! alternating timing pattern for every data region.
 
-use super::tables::SquareSpec;
+use super::tables::SymbolSpec;
 #[cfg(feature = "encode")]
 use crate::output::MatrixBuf;
 
@@ -51,6 +51,11 @@ impl<F: FnMut(usize, usize, usize, usize)> Placer<'_, F> {
         if col < 0 {
             col += ncol;
             row += 4 - ((ncol + 4) % 8);
+        }
+        // Only in the wide DMRE sizes (ISO/IEC 21471 Annex E): the second wrap can
+        // carry the row past the bottom.
+        if row >= nrow {
+            row -= nrow;
         }
         let r = row as usize;
         let c = col as usize;
@@ -222,37 +227,39 @@ pub fn place<F: FnMut(usize, usize, usize, usize)>(
 
 /// Full-symbol `(x, y)` of mapping-matrix module `(row, col)`: each data region adds a
 /// one-module border on all four sides.
-pub fn mapping_to_symbol(spec: &SquareSpec, row: usize, col: usize) -> (usize, usize) {
-    let rr = spec.region_size;
-    (col + 1 + 2 * (col / rr), row + 1 + 2 * (row / rr))
+pub fn mapping_to_symbol(spec: &SymbolSpec, row: usize, col: usize) -> (usize, usize) {
+    (
+        col + 1 + 2 * (col / spec.region_cols),
+        row + 1 + 2 * (row / spec.region_rows),
+    )
 }
 
-/// Paint every data region's finder/timing border into `m` (a `symbol_size²` grid).
+/// Paint every data region's finder/timing border into `m` (a `width × height` grid).
 ///
 /// Mirrors ISO/IEC 16022: for each region, the top edge and right edge carry the
 /// alternating timing pattern, while the left edge and bottom edge are solid. The top
 /// and bottom edge rows span the full symbol width.
 #[cfg(feature = "encode")]
-pub fn draw_borders(spec: &SquareSpec, m: &mut MatrixBuf<'_>) {
-    let size = spec.symbol_size;
-    let step = spec.region_size + 2;
-    for oy in 0..size {
-        let t = oy % step;
+pub fn draw_borders(spec: &SymbolSpec, m: &mut MatrixBuf<'_>) {
+    let (width, height) = (spec.width, spec.height);
+    let (step_x, step_y) = (spec.region_cols + 2, spec.region_rows + 2);
+    for oy in 0..height {
+        let t = oy % step_y;
         if t == 0 {
             // Top edge: alternating, dark on even columns.
-            for ox in 0..size {
+            for ox in 0..width {
                 m.set(ox, oy, ox % 2 == 0);
             }
-        } else if t == step - 1 {
+        } else if t == step_y - 1 {
             // Bottom edge: solid.
-            for ox in 0..size {
+            for ox in 0..width {
                 m.set(ox, oy, true);
             }
         } else {
-            for ox in (0..size).step_by(step) {
+            for ox in (0..width).step_by(step_x) {
                 // Left edge solid; right edge alternating, dark on odd rows.
                 m.set(ox, oy, true);
-                m.set(ox + step - 1, oy, oy % 2 == 1);
+                m.set(ox + step_x - 1, oy, oy % 2 == 1);
             }
         }
     }
@@ -261,63 +268,67 @@ pub fn draw_borders(spec: &SquareSpec, m: &mut MatrixBuf<'_>) {
 #[cfg(all(test, feature = "encode", feature = "decode"))]
 mod tests {
     use super::*;
-    use crate::codes::datamatrix::tables::all_squares;
+    use crate::codes::datamatrix::tables::all_specs;
     use alloc::vec;
 
     #[test]
     fn placement_covers_every_codeword() {
-        for spec in all_squares() {
-            let ms = spec.mapping_size();
-            let mut occ = vec![0u8; occupancy_bytes(ms, ms)];
-            let mut seen = vec![0u32; ms * ms];
+        for spec in all_specs() {
+            let (mr, mc) = (spec.mapping_rows(), spec.mapping_cols());
+            let mut occ = vec![0u8; occupancy_bytes(mr, mc)];
+            let mut seen = vec![0u32; mr * mc];
             let mut bits = 0usize;
-            let (count, fixed) = place(ms, ms, &mut occ, |cw, bit, r, c| {
-                assert!(r < ms && c < ms);
+            let (count, fixed) = place(mr, mc, &mut occ, |cw, bit, r, c| {
+                assert!(r < mr && c < mc);
                 assert_eq!(cw * 8 + bit, bits, "visit order");
                 bits += 1;
-                seen[r * ms + c] += 1;
+                seen[r * mc + c] += 1;
             });
             assert_eq!(
                 count,
                 spec.total_cw(),
-                "symbol {} codeword count",
-                spec.symbol_size
+                "symbol {}x{} codeword count",
+                spec.width,
+                spec.height
             );
+            // The fixed pattern is the bottom-right 2×2: two dark, two light.
             if fixed {
-                seen[(ms - 1) * ms + ms - 1] += 1;
-                seen[(ms - 2) * ms + ms - 2] += 1;
+                for (r, c) in [(1, 1), (2, 2), (1, 2), (2, 1)] {
+                    seen[(mr - r) * mc + mc - c] += 1;
+                }
             }
-            // Placed bits and fixed corner modules must be unique and in range.
+            // Every mapping module is a placed bit or a fixed corner module, once.
             assert!(
-                seen.iter().all(|&n| n <= 1),
-                "overlap in symbol {}",
-                spec.symbol_size
+                seen.iter().all(|&n| n == 1),
+                "gap or overlap in symbol {}x{}",
+                spec.width,
+                spec.height
             );
         }
     }
 
     #[test]
     fn borders_leave_mapping_modules_free() {
-        for spec in all_squares() {
-            let ms = spec.mapping_size();
-            let size = spec.symbol_size;
-            let mut storage = vec![0u8; MatrixBuf::bytes_for(size, size)];
-            let mut m = MatrixBuf::new(&mut storage, size, size, QUIET_ZONE).unwrap();
+        for spec in all_specs() {
+            let (mr, mc) = (spec.mapping_rows(), spec.mapping_cols());
+            let (w, h) = (spec.width, spec.height);
+            let mut storage = vec![0u8; MatrixBuf::bytes_for(w, h)];
+            let mut m = MatrixBuf::new(&mut storage, w, h, QUIET_ZONE).unwrap();
             draw_borders(spec, &mut m);
             // Every non-mapping module is a border; the mapping ones stay untouched.
-            let mut is_mapping = vec![false; size * size];
-            for r in 0..ms {
-                for c in 0..ms {
+            let mut is_mapping = vec![false; w * h];
+            for r in 0..mr {
+                for c in 0..mc {
                     let (x, y) = mapping_to_symbol(spec, r, c);
-                    assert!(!is_mapping[y * size + x]);
-                    is_mapping[y * size + x] = true;
+                    assert!(!is_mapping[y * w + x]);
+                    is_mapping[y * w + x] = true;
                     assert!(!m.get(x, y));
                 }
             }
             let borders = is_mapping.iter().filter(|&&b| !b).count();
-            assert_eq!(borders, size * size - ms * ms);
+            assert_eq!(borders, w * h - mr * mc);
             // The finder L: left column and bottom row fully dark.
-            assert!((0..size).all(|i| m.get(0, i) && m.get(i, size - 1)));
+            assert!((0..h).all(|y| m.get(0, y)) && (0..w).all(|x| m.get(x, h - 1)));
         }
     }
 }

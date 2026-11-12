@@ -215,6 +215,7 @@ fn matrix_encoders() {
             &segments,
             &[Encodation::Base256],
             18,
+            18,
             &mut scratch,
             &mut storage,
         )

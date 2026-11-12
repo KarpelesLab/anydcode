@@ -1,19 +1,27 @@
-//! Static Data Matrix ECC 200 specification tables (ISO/IEC 16022 Table 7).
+//! Static Data Matrix ECC 200 specification tables.
 //!
-//! Only the **square** symbol sizes are modelled (10×10 … 144×144); rectangular
-//! sizes are intentionally left as future work. Each row records the full symbol
-//! dimension, the data-region geometry (used to lay out finder/timing borders and to
-//! split the mapping matrix into regions), and the Reed–Solomon block layout.
+//! Three families of symbol size share one row type: the 24 **square** sizes
+//! (10×10 … 144×144) and the 6 **rectangular** sizes (8×18 … 16×48) of ISO/IEC 16022
+//! Table 7, and the 18 further rectangular sizes of the **DMRE** extension
+//! (ISO/IEC 21471, 8×48 … 26×64). Each row records the full symbol dimensions, the
+//! data-region geometry (used to lay out finder/timing borders and to split the
+//! mapping matrix into regions), and the Reed–Solomon block layout.
 
-/// Fixed attributes of one square ECC 200 symbol size.
+/// Fixed attributes of one ECC 200 symbol size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SquareSpec {
-    /// Full symbol side length in modules, including finder/timing borders.
-    pub symbol_size: usize,
-    /// Side length of a single square data region (mapping modules, no border).
-    pub region_size: usize,
-    /// Number of data regions along each axis (`regions_per_axis²` regions total).
-    pub regions_per_axis: usize,
+pub struct SymbolSpec {
+    /// Full symbol width in modules, including finder/timing borders.
+    pub width: usize,
+    /// Full symbol height in modules, including finder/timing borders.
+    pub height: usize,
+    /// Rows of a single data region (mapping modules, no border).
+    pub region_rows: usize,
+    /// Columns of a single data region (mapping modules, no border).
+    pub region_cols: usize,
+    /// Number of data regions side by side.
+    pub regions_h: usize,
+    /// Number of data regions stacked vertically.
+    pub regions_v: usize,
     /// Total data codewords.
     pub data_cw: usize,
     /// Total error-correction codewords.
@@ -22,7 +30,7 @@ pub struct SquareSpec {
     pub blocks: usize,
 }
 
-impl SquareSpec {
+impl SymbolSpec {
     /// Total codewords (data + EC).
     pub const fn total_cw(&self) -> usize {
         self.data_cw + self.ec_cw
@@ -43,61 +51,108 @@ impl SquareSpec {
         (block + self.blocks - self.data_cw % self.blocks) % self.blocks
     }
 
-    /// Side length of the full (multi-region) mapping matrix, i.e. the data area
-    /// excluding every region's finder/timing border.
-    pub const fn mapping_size(&self) -> usize {
-        self.region_size * self.regions_per_axis
+    /// Rows of the full (multi-region) mapping matrix, i.e. the data area excluding
+    /// every region's finder/timing border.
+    pub const fn mapping_rows(&self) -> usize {
+        self.region_rows * self.regions_v
+    }
+
+    /// Columns of the full (multi-region) mapping matrix.
+    pub const fn mapping_cols(&self) -> usize {
+        self.region_cols * self.regions_h
+    }
+
+    /// Whether the symbol is square.
+    #[cfg_attr(not(feature = "scan"), allow(dead_code))]
+    pub const fn is_square(&self) -> bool {
+        self.width == self.height
     }
 }
 
-// symbol, region, regions/axis, data_cw, ec_cw, blocks
+/// How many of [`SPECS`] are the square sizes; they come first.
+const SQUARES: usize = 24;
+
+// The squares in ascending order, then the ISO/IEC 16022 rectangles, then DMRE.
 #[rustfmt::skip]
-const SQUARE: &[SquareSpec] = &[
-    SquareSpec { symbol_size: 10,  region_size: 8,  regions_per_axis: 1, data_cw: 3,    ec_cw: 5,   blocks: 1  },
-    SquareSpec { symbol_size: 12,  region_size: 10, regions_per_axis: 1, data_cw: 5,    ec_cw: 7,   blocks: 1  },
-    SquareSpec { symbol_size: 14,  region_size: 12, regions_per_axis: 1, data_cw: 8,    ec_cw: 10,  blocks: 1  },
-    SquareSpec { symbol_size: 16,  region_size: 14, regions_per_axis: 1, data_cw: 12,   ec_cw: 12,  blocks: 1  },
-    SquareSpec { symbol_size: 18,  region_size: 16, regions_per_axis: 1, data_cw: 18,   ec_cw: 14,  blocks: 1  },
-    SquareSpec { symbol_size: 20,  region_size: 18, regions_per_axis: 1, data_cw: 22,   ec_cw: 18,  blocks: 1  },
-    SquareSpec { symbol_size: 22,  region_size: 20, regions_per_axis: 1, data_cw: 30,   ec_cw: 20,  blocks: 1  },
-    SquareSpec { symbol_size: 24,  region_size: 22, regions_per_axis: 1, data_cw: 36,   ec_cw: 24,  blocks: 1  },
-    SquareSpec { symbol_size: 26,  region_size: 24, regions_per_axis: 1, data_cw: 44,   ec_cw: 28,  blocks: 1  },
-    SquareSpec { symbol_size: 32,  region_size: 14, regions_per_axis: 2, data_cw: 62,   ec_cw: 36,  blocks: 1  },
-    SquareSpec { symbol_size: 36,  region_size: 16, regions_per_axis: 2, data_cw: 86,   ec_cw: 42,  blocks: 1  },
-    SquareSpec { symbol_size: 40,  region_size: 18, regions_per_axis: 2, data_cw: 114,  ec_cw: 48,  blocks: 1  },
-    SquareSpec { symbol_size: 44,  region_size: 20, regions_per_axis: 2, data_cw: 144,  ec_cw: 56,  blocks: 1  },
-    SquareSpec { symbol_size: 48,  region_size: 22, regions_per_axis: 2, data_cw: 174,  ec_cw: 68,  blocks: 1  },
-    SquareSpec { symbol_size: 52,  region_size: 24, regions_per_axis: 2, data_cw: 204,  ec_cw: 84,  blocks: 2  },
-    SquareSpec { symbol_size: 64,  region_size: 14, regions_per_axis: 4, data_cw: 280,  ec_cw: 112, blocks: 2  },
-    SquareSpec { symbol_size: 72,  region_size: 16, regions_per_axis: 4, data_cw: 368,  ec_cw: 144, blocks: 4  },
-    SquareSpec { symbol_size: 80,  region_size: 18, regions_per_axis: 4, data_cw: 456,  ec_cw: 192, blocks: 4  },
-    SquareSpec { symbol_size: 88,  region_size: 20, regions_per_axis: 4, data_cw: 576,  ec_cw: 224, blocks: 4  },
-    SquareSpec { symbol_size: 96,  region_size: 22, regions_per_axis: 4, data_cw: 696,  ec_cw: 272, blocks: 4  },
-    SquareSpec { symbol_size: 104, region_size: 24, regions_per_axis: 4, data_cw: 816,  ec_cw: 336, blocks: 6  },
-    SquareSpec { symbol_size: 120, region_size: 18, regions_per_axis: 6, data_cw: 1050, ec_cw: 408, blocks: 6  },
-    SquareSpec { symbol_size: 132, region_size: 20, regions_per_axis: 6, data_cw: 1304, ec_cw: 496, blocks: 8  },
-    SquareSpec { symbol_size: 144, region_size: 22, regions_per_axis: 6, data_cw: 1558, ec_cw: 620, blocks: 10 },
+const SPECS: &[SymbolSpec] = &[
+    SymbolSpec { width: 10, height: 10, region_rows: 8, region_cols: 8, regions_h: 1, regions_v: 1, data_cw: 3, ec_cw: 5, blocks: 1 },
+    SymbolSpec { width: 12, height: 12, region_rows: 10, region_cols: 10, regions_h: 1, regions_v: 1, data_cw: 5, ec_cw: 7, blocks: 1 },
+    SymbolSpec { width: 14, height: 14, region_rows: 12, region_cols: 12, regions_h: 1, regions_v: 1, data_cw: 8, ec_cw: 10, blocks: 1 },
+    SymbolSpec { width: 16, height: 16, region_rows: 14, region_cols: 14, regions_h: 1, regions_v: 1, data_cw: 12, ec_cw: 12, blocks: 1 },
+    SymbolSpec { width: 18, height: 18, region_rows: 16, region_cols: 16, regions_h: 1, regions_v: 1, data_cw: 18, ec_cw: 14, blocks: 1 },
+    SymbolSpec { width: 20, height: 20, region_rows: 18, region_cols: 18, regions_h: 1, regions_v: 1, data_cw: 22, ec_cw: 18, blocks: 1 },
+    SymbolSpec { width: 22, height: 22, region_rows: 20, region_cols: 20, regions_h: 1, regions_v: 1, data_cw: 30, ec_cw: 20, blocks: 1 },
+    SymbolSpec { width: 24, height: 24, region_rows: 22, region_cols: 22, regions_h: 1, regions_v: 1, data_cw: 36, ec_cw: 24, blocks: 1 },
+    SymbolSpec { width: 26, height: 26, region_rows: 24, region_cols: 24, regions_h: 1, regions_v: 1, data_cw: 44, ec_cw: 28, blocks: 1 },
+    SymbolSpec { width: 32, height: 32, region_rows: 14, region_cols: 14, regions_h: 2, regions_v: 2, data_cw: 62, ec_cw: 36, blocks: 1 },
+    SymbolSpec { width: 36, height: 36, region_rows: 16, region_cols: 16, regions_h: 2, regions_v: 2, data_cw: 86, ec_cw: 42, blocks: 1 },
+    SymbolSpec { width: 40, height: 40, region_rows: 18, region_cols: 18, regions_h: 2, regions_v: 2, data_cw: 114, ec_cw: 48, blocks: 1 },
+    SymbolSpec { width: 44, height: 44, region_rows: 20, region_cols: 20, regions_h: 2, regions_v: 2, data_cw: 144, ec_cw: 56, blocks: 1 },
+    SymbolSpec { width: 48, height: 48, region_rows: 22, region_cols: 22, regions_h: 2, regions_v: 2, data_cw: 174, ec_cw: 68, blocks: 1 },
+    SymbolSpec { width: 52, height: 52, region_rows: 24, region_cols: 24, regions_h: 2, regions_v: 2, data_cw: 204, ec_cw: 84, blocks: 2 },
+    SymbolSpec { width: 64, height: 64, region_rows: 14, region_cols: 14, regions_h: 4, regions_v: 4, data_cw: 280, ec_cw: 112, blocks: 2 },
+    SymbolSpec { width: 72, height: 72, region_rows: 16, region_cols: 16, regions_h: 4, regions_v: 4, data_cw: 368, ec_cw: 144, blocks: 4 },
+    SymbolSpec { width: 80, height: 80, region_rows: 18, region_cols: 18, regions_h: 4, regions_v: 4, data_cw: 456, ec_cw: 192, blocks: 4 },
+    SymbolSpec { width: 88, height: 88, region_rows: 20, region_cols: 20, regions_h: 4, regions_v: 4, data_cw: 576, ec_cw: 224, blocks: 4 },
+    SymbolSpec { width: 96, height: 96, region_rows: 22, region_cols: 22, regions_h: 4, regions_v: 4, data_cw: 696, ec_cw: 272, blocks: 4 },
+    SymbolSpec { width: 104, height: 104, region_rows: 24, region_cols: 24, regions_h: 4, regions_v: 4, data_cw: 816, ec_cw: 336, blocks: 6 },
+    SymbolSpec { width: 120, height: 120, region_rows: 18, region_cols: 18, regions_h: 6, regions_v: 6, data_cw: 1050, ec_cw: 408, blocks: 6 },
+    SymbolSpec { width: 132, height: 132, region_rows: 20, region_cols: 20, regions_h: 6, regions_v: 6, data_cw: 1304, ec_cw: 496, blocks: 8 },
+    SymbolSpec { width: 144, height: 144, region_rows: 22, region_cols: 22, regions_h: 6, regions_v: 6, data_cw: 1558, ec_cw: 620, blocks: 10 },
+    // ISO/IEC 16022 rectangular sizes.
+    SymbolSpec { width: 18, height: 8, region_rows: 6, region_cols: 16, regions_h: 1, regions_v: 1, data_cw: 5, ec_cw: 7, blocks: 1 },
+    SymbolSpec { width: 32, height: 8, region_rows: 6, region_cols: 14, regions_h: 2, regions_v: 1, data_cw: 10, ec_cw: 11, blocks: 1 },
+    SymbolSpec { width: 26, height: 12, region_rows: 10, region_cols: 24, regions_h: 1, regions_v: 1, data_cw: 16, ec_cw: 14, blocks: 1 },
+    SymbolSpec { width: 36, height: 12, region_rows: 10, region_cols: 16, regions_h: 2, regions_v: 1, data_cw: 22, ec_cw: 18, blocks: 1 },
+    SymbolSpec { width: 36, height: 16, region_rows: 14, region_cols: 16, regions_h: 2, regions_v: 1, data_cw: 32, ec_cw: 24, blocks: 1 },
+    SymbolSpec { width: 48, height: 16, region_rows: 14, region_cols: 22, regions_h: 2, regions_v: 1, data_cw: 49, ec_cw: 28, blocks: 1 },
+    // DMRE (ISO/IEC 21471) rectangular sizes.
+    SymbolSpec { width: 48, height: 8, region_rows: 6, region_cols: 22, regions_h: 2, regions_v: 1, data_cw: 18, ec_cw: 15, blocks: 1 },
+    SymbolSpec { width: 64, height: 8, region_rows: 6, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 24, ec_cw: 18, blocks: 1 },
+    SymbolSpec { width: 80, height: 8, region_rows: 6, region_cols: 18, regions_h: 4, regions_v: 1, data_cw: 32, ec_cw: 22, blocks: 1 },
+    SymbolSpec { width: 96, height: 8, region_rows: 6, region_cols: 22, regions_h: 4, regions_v: 1, data_cw: 38, ec_cw: 28, blocks: 1 },
+    SymbolSpec { width: 120, height: 8, region_rows: 6, region_cols: 18, regions_h: 6, regions_v: 1, data_cw: 49, ec_cw: 32, blocks: 1 },
+    SymbolSpec { width: 144, height: 8, region_rows: 6, region_cols: 22, regions_h: 6, regions_v: 1, data_cw: 63, ec_cw: 36, blocks: 1 },
+    SymbolSpec { width: 64, height: 12, region_rows: 10, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 43, ec_cw: 27, blocks: 1 },
+    SymbolSpec { width: 88, height: 12, region_rows: 10, region_cols: 20, regions_h: 4, regions_v: 1, data_cw: 64, ec_cw: 36, blocks: 1 },
+    SymbolSpec { width: 64, height: 16, region_rows: 14, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 62, ec_cw: 36, blocks: 1 },
+    SymbolSpec { width: 36, height: 20, region_rows: 18, region_cols: 16, regions_h: 2, regions_v: 1, data_cw: 44, ec_cw: 28, blocks: 1 },
+    SymbolSpec { width: 44, height: 20, region_rows: 18, region_cols: 20, regions_h: 2, regions_v: 1, data_cw: 56, ec_cw: 34, blocks: 1 },
+    SymbolSpec { width: 64, height: 20, region_rows: 18, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 84, ec_cw: 42, blocks: 1 },
+    SymbolSpec { width: 48, height: 22, region_rows: 20, region_cols: 22, regions_h: 2, regions_v: 1, data_cw: 72, ec_cw: 38, blocks: 1 },
+    SymbolSpec { width: 48, height: 24, region_rows: 22, region_cols: 22, regions_h: 2, regions_v: 1, data_cw: 80, ec_cw: 41, blocks: 1 },
+    SymbolSpec { width: 64, height: 24, region_rows: 22, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 108, ec_cw: 46, blocks: 1 },
+    SymbolSpec { width: 40, height: 26, region_rows: 24, region_cols: 18, regions_h: 2, regions_v: 1, data_cw: 70, ec_cw: 38, blocks: 1 },
+    SymbolSpec { width: 48, height: 26, region_rows: 24, region_cols: 22, regions_h: 2, regions_v: 1, data_cw: 90, ec_cw: 42, blocks: 1 },
+    SymbolSpec { width: 64, height: 26, region_rows: 24, region_cols: 14, regions_h: 4, regions_v: 1, data_cw: 118, ec_cw: 50, blocks: 1 },
 ];
 
-/// All modelled square symbol sizes, in ascending order of capacity.
-pub fn all_squares() -> &'static [SquareSpec] {
-    SQUARE
+/// The square symbol sizes, in ascending order of capacity.
+pub fn all_squares() -> &'static [SymbolSpec] {
+    &SPECS[..SQUARES]
 }
 
-/// The largest modelled square symbol (144×144).
-pub const LARGEST_SQUARE: SquareSpec = SQUARE[SQUARE.len() - 1];
+/// Every modelled symbol size: squares, then rectangles.
+#[cfg_attr(not(feature = "scan"), allow(dead_code))]
+pub fn all_specs() -> &'static [SymbolSpec] {
+    SPECS
+}
+
+/// The largest symbol (144×144): the most codewords and the most modules of any
+/// size, square or not.
+pub const LARGEST: SymbolSpec = SPECS[SQUARES - 1];
 
 /// The smallest square symbol whose data capacity holds `data_cw` codewords.
-pub fn smallest_square_for(data_cw: usize) -> Option<SquareSpec> {
+pub fn smallest_square_for(data_cw: usize) -> Option<SymbolSpec> {
     all_squares().iter().copied().find(|s| s.data_cw >= data_cw)
 }
 
-/// The square symbol of a given full side length, if it exists.
-pub const fn square_by_size(symbol_size: usize) -> Option<SquareSpec> {
+/// The symbol of the given full dimensions, if such a size exists.
+pub const fn spec_by_size(width: usize, height: usize) -> Option<SymbolSpec> {
     let mut i = 0;
-    while i < SQUARE.len() {
-        if SQUARE[i].symbol_size == symbol_size {
-            return Some(SQUARE[i]);
+    while i < SPECS.len() {
+        if SPECS[i].width == width && SPECS[i].height == height {
+            return Some(SPECS[i]);
         }
         i += 1;
     }
@@ -110,25 +165,24 @@ mod tests {
 
     #[test]
     fn geometry_is_consistent() {
-        for s in all_squares() {
+        assert_eq!(all_squares().len(), 24);
+        assert!(all_squares().iter().all(SymbolSpec::is_square));
+        assert_eq!(all_specs().len(), 48);
+        for s in all_specs() {
             // Full symbol side = mapping side + two border modules per region.
-            assert_eq!(
-                s.symbol_size,
-                s.mapping_size() + 2 * s.regions_per_axis,
-                "symbol {} border geometry",
-                s.symbol_size
-            );
-            // The mapping matrix holds exactly total_cw codewords, up to the
-            // (region_size % 4 == 2) sizes which reserve 4 fixed corner modules.
-            let modules = s.mapping_size() * s.mapping_size();
+            assert_eq!(s.width, s.mapping_cols() + 2 * s.regions_h, "{s:?}");
+            assert_eq!(s.height, s.mapping_rows() + 2 * s.regions_v, "{s:?}");
+            // The mapping matrix holds exactly total_cw codewords, up to the sizes
+            // which reserve 4 fixed corner modules.
+            let modules = s.mapping_rows() * s.mapping_cols();
             let slack = modules - s.total_cw() * 8;
-            assert!(
-                slack == 0 || slack == 4,
-                "symbol {} slack {slack}",
-                s.symbol_size
-            );
+            assert!(slack == 0 || slack == 4, "{s:?} slack {slack}");
             // EC codewords divide evenly across interleaved blocks.
-            assert_eq!(s.ec_cw % s.blocks, 0, "symbol {} ec split", s.symbol_size);
+            assert_eq!(s.ec_cw % s.blocks, 0, "{s:?}");
+            assert!(s.total_cw() <= LARGEST.total_cw() && s.width * s.height <= 144 * 144);
+            assert_eq!(spec_by_size(s.width, s.height), Some(*s));
         }
+        assert_eq!(spec_by_size(18, 8).map(|s| s.data_cw), Some(5));
+        assert_eq!(spec_by_size(8, 18), None);
     }
 }

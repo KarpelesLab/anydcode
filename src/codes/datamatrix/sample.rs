@@ -18,7 +18,8 @@
 //!    accuracy by fitting straight lines to the symbol's dark boundary along each edge
 //!    and intersecting adjacent lines;
 //! 5. estimates the module count per axis by counting transitions along the timing
-//!    edges, snapping to the nearest valid square size;
+//!    edges, snapping to the nearest valid sizes — square where the two counts
+//!    agree, rectangular where they do not;
 //! 6. builds a [`Homography`] from the four corners and samples every module centre
 //!    into a [`BitMatrix`], which the structural decoder then error-corrects.
 //!
@@ -32,9 +33,14 @@
 //! foreshortening.
 //!
 //! Size and chirality are confirmed by decoding: the sampler snaps to a handful of
-//! candidate sizes and tries both grid handednesses, returning the first that wears a
-//! finder (solid L, timing borders not badly out of step) and passes Reed–Solomon.
-//! Square symbol sizes only (10×10 … 144×144), matching the decoder.
+//! candidate sizes and tries both grid handednesses (a rectangle has one: its long
+//! timing border is its top row), returning the first that wears a finder (solid L,
+//! timing borders not badly out of step) and passes Reed–Solomon.
+//!
+//! The rectangular sizes are held to the same envelope as the squares, with one
+//! exception: the 8-row DMRE sizes of 64 columns and more are read square-on at any
+//! rotation but not under perspective, where four corners no longer pin down the
+//! foreshortening along such a long row.
 //!
 //! ## Robustness envelope
 //!
@@ -59,7 +65,7 @@
 
 use super::DataMatrixDecoder;
 use super::placement::QUIET_ZONE;
-use super::tables::all_squares;
+use super::tables::{all_specs, all_squares};
 use crate::error::{Error, Result};
 use crate::geometry::{Location, Point, Quad};
 use crate::image::GrayFrame;
@@ -67,7 +73,7 @@ use crate::imgproc::binary::BinaryImage;
 use crate::imgproc::components::{Connectivity, connected_components, flood_region};
 use crate::imgproc::homography::Homography;
 use crate::imgproc::line::{Line, fit_line_least_squares};
-use crate::imgproc::sample::sample_bilinear;
+use crate::imgproc::sample::{sample_bilinear, sample_grid_rect};
 use crate::imgproc::threshold::{adaptive_binarize_bradley, otsu_binarize, otsu_threshold};
 use crate::output::BitMatrix;
 use crate::pipeline::{Candidate, Hints};
@@ -136,18 +142,18 @@ pub fn sample_grid(frame: &GrayFrame<'_>) -> Result<BitMatrix> {
 struct Located {
     matrix: BitMatrix,
     corners: [Point; 4],
-    dim: usize,
 }
 
 impl Located {
     fn as_location(&self) -> Location {
         let [tl, tr, _, bl] = self.corners;
         let rotation = (tr.y - tl.y).atan2(tr.x - tl.x);
-        let side = (tl.distance(tr) + tl.distance(bl)) / 2.0;
+        let across = tl.distance(tr) / self.matrix.width() as f32;
+        let down = tl.distance(bl) / self.matrix.height() as f32;
         Location {
             outline: Quad::new(self.corners),
             rotation: Some(rotation),
-            module_size: Some(side / self.dim as f32),
+            module_size: Some((across + down) / 2.0),
         }
     }
 }
@@ -176,11 +182,13 @@ struct Geometry {
 }
 
 impl Geometry {
-    /// Modules per side, counted along the two timing borders under `threshold`.
-    fn module_count(&self, frame: &GrayFrame<'_>, threshold: u8) -> usize {
-        let m1 = count_modules(frame, self.tl, self.tr, self.centroid, threshold);
-        let m2 = count_modules(frame, self.br, self.tr, self.centroid, threshold);
-        (m1 + m2).div_ceil(2) // rounded average
+    /// Modules along the two timing borders under `threshold`: the one from `tl`,
+    /// then the one from `br`.
+    fn module_counts(&self, frame: &GrayFrame<'_>, threshold: u8) -> (usize, usize) {
+        (
+            count_modules(frame, self.tl, self.tr, self.centroid, threshold),
+            count_modules(frame, self.br, self.tr, self.centroid, threshold),
+        )
     }
 }
 
@@ -222,35 +230,33 @@ fn solve_with(
             if i == 1 && threshold.abs_diff(geom.thresholds[0]) < 4 {
                 continue;
             }
-            // Try the nearest valid square sizes, and both grid handednesses,
+            // Try the nearest valid sizes, and for a square both grid handednesses,
             // returning the first that wears a finder and survives Reed–Solomon.
-            for &dim in &candidate_sizes(geom.module_count(frame, threshold)) {
-                for swap in [false, true] {
-                    let dst = corner_targets(&geom, swap);
-                    let src = grid_corners(dim);
-                    let Ok(h) = Homography::from_correspondences(src, dst) else {
-                        continue;
+            let (m1, m2) = geom.module_counts(frame, threshold);
+            for (width, height, swap) in candidate_grids(m1, m2) {
+                let dst = corner_targets(&geom, swap);
+                let src = grid_corners(width, height);
+                let Ok(h) = Homography::from_correspondences(src, dst) else {
+                    continue;
+                };
+                let matrix = sample_grid_rect(frame, &h, width, height, threshold, QUIET_ZONE);
+                // Reed–Solomon alone will, once in a great while, find a codeword
+                // in the texture of something else; a symbol also wears its finder.
+                // The bounds are loose — a grainy L misreads up to a third of its
+                // modules, and a grid a hair short samples its timing borders in
+                // the quiet zone (every dark module of theirs "wrong", half the
+                // border) while the data inside still corrects.
+                let (l_bad, t_bad) = finder_errors(&matrix);
+                let around = width + height;
+                if 5 * l_bad > 2 * (around - 1) || 5 * t_bad > 3 * (around - 3) {
+                    continue;
+                }
+                if let Ok(symbol) = decoder.decode_matrix(&matrix) {
+                    let located = Located {
+                        matrix,
+                        corners: dst,
                     };
-                    let matrix =
-                        crate::imgproc::sample::sample_grid(frame, &h, dim, threshold, QUIET_ZONE);
-                    // Reed–Solomon alone will, once in a great while, find a codeword
-                    // in the texture of something else; a symbol also wears its finder.
-                    // The bounds are loose — a grainy L misreads up to a third of its
-                    // modules, and a grid a hair short samples its timing borders in
-                    // the quiet zone (every dark module of theirs "wrong", half the
-                    // border) while the data inside still corrects.
-                    let (l_bad, t_bad) = finder_errors(&matrix);
-                    if 5 * l_bad > 2 * (2 * dim - 1) || 5 * t_bad > 3 * (2 * dim - 3) {
-                        continue;
-                    }
-                    if let Ok(symbol) = decoder.decode_matrix(&matrix) {
-                        let located = Located {
-                            matrix,
-                            corners: dst,
-                            dim,
-                        };
-                        return Ok((located, symbol));
-                    }
+                    return Ok((located, symbol));
                 }
             }
         }
@@ -262,17 +268,19 @@ fn solve_with(
 /// along its solid L (left column, bottom row) and the modules out of step along its
 /// timing borders (top row, right column).
 fn finder_errors(matrix: &BitMatrix) -> (usize, usize) {
-    let n = matrix.width();
+    let (w, h) = (matrix.width(), matrix.height());
     let mut l_bad = 0;
     let mut t_bad = 0;
-    for i in 0..n {
-        l_bad += !matrix.get(0, i) as usize;
-        t_bad += (matrix.get(i, 0) != (i % 2 == 0)) as usize;
-        if i > 0 {
-            l_bad += !matrix.get(i, n - 1) as usize;
+    for y in 0..h {
+        l_bad += !matrix.get(0, y) as usize;
+        if y + 1 < h && y > 0 {
+            t_bad += (matrix.get(w - 1, y) != (y % 2 == 1)) as usize;
         }
-        if i + 1 < n && i > 0 {
-            t_bad += (matrix.get(n - 1, i) != (i % 2 == 1)) as usize;
+    }
+    for x in 0..w {
+        t_bad += (matrix.get(x, 0) != (x % 2 == 0)) as usize;
+        if x > 0 {
+            l_bad += !matrix.get(x, h - 1) as usize;
         }
     }
     (l_bad, t_bad)
@@ -304,29 +312,29 @@ fn locate_geometry_with(
         .next()
         .ok_or_else(|| Error::undecodable("no Data Matrix geometry recovered"))?;
     let threshold = geom.thresholds[0];
-    let dim = candidate_sizes(geom.module_count(frame, threshold))[0];
-    let dst = corner_targets(&geom, false);
-    let src = grid_corners(dim);
+    let (m1, m2) = geom.module_counts(frame, threshold);
+    let (width, height, swap) = candidate_grids(m1, m2)[0];
+    let dst = corner_targets(&geom, swap);
+    let src = grid_corners(width, height);
     let h = Homography::from_correspondences(src, dst)
         .map_err(|_| Error::undecodable("degenerate Data Matrix corners"))?;
-    let matrix = crate::imgproc::sample::sample_grid(frame, &h, dim, threshold, QUIET_ZONE);
+    let matrix = sample_grid_rect(frame, &h, width, height, threshold, QUIET_ZONE);
     Ok(Located {
         matrix,
         corners: dst,
-        dim,
     })
 }
 
-/// The four grid-space source corners for a `dim × dim` symbol, in TL, TR, BR, BL
-/// order (matching [`corner_targets`] and the module-centre convention of
+/// The four grid-space source corners for a `width × height` symbol, in TL, TR, BR,
+/// BL order (matching [`corner_targets`] and the module-centre convention of
 /// [`crate::imgproc::sample::sample_grid`]).
-fn grid_corners(dim: usize) -> [Point; 4] {
-    let d = dim as f32;
+fn grid_corners(width: usize, height: usize) -> [Point; 4] {
+    let (w, h) = (width as f32, height as f32);
     [
         Point::new(0.0, 0.0),
-        Point::new(d, 0.0),
-        Point::new(d, d),
-        Point::new(0.0, d),
+        Point::new(w, 0.0),
+        Point::new(w, h),
+        Point::new(0.0, h),
     ]
 }
 
@@ -342,6 +350,10 @@ fn corner_targets(geom: &Geometry, swap: bool) -> [Point; 4] {
 
 /// Dark components tried as the symbol, largest first.
 const MAX_COMPONENTS: usize = 6;
+
+/// How elongated a component's box may be: the widest rectangular symbol is 8×144
+/// modules, which a rotation only makes squarer.
+const MAX_ASPECT: usize = 20;
 
 /// Symbol geometries for the largest plausible dark components, in that order.
 fn extract_geometries(
@@ -366,7 +378,11 @@ fn extract_geometries(
         .iter()
         .filter(|c| {
             let (w, h) = (c.bounds.width(), c.bounds.height());
-            c.area >= 16 && w >= MIN_FRAME && h >= MIN_FRAME && w <= 4 * h && h <= 4 * w
+            c.area >= 16
+                && w >= MIN_FRAME
+                && h >= MIN_FRAME
+                && w <= MAX_ASPECT * h
+                && h <= MAX_ASPECT * w
         })
         .take(MAX_COMPONENTS)
         .flat_map(|c| extract_geometry(frame, bin, threshold, &c.bounds, c.area))
@@ -620,11 +636,15 @@ fn fit_geometry(
     // corners as intersections of edge lines fit to the symbol's dark boundary. That
     // makes every corner sub-pixel, the fourth included.
     let side = (bl0.distance(tl0) + bl0.distance(br0)) / 2.0;
-    let n_rough = (count_modules(frame, tl0, tr0, centroid, thresholds[0])
-        + count_modules(frame, br0, tr0, centroid, thresholds[0]))
-    .div_ceil(2)
-    .max(4);
-    let module_px = (side / n_rough as f32).max(1.0);
+    let m1 = count_modules(frame, tl0, tr0, centroid, thresholds[0]);
+    let m2 = count_modules(frame, br0, tr0, centroid, thresholds[0]);
+    let module_px = if 10 * m1.max(m2) >= 13 * m1.min(m2) {
+        // A rectangle: each timing border against the solid edge it runs along.
+        (bl0.distance(br0) / m1.max(4) as f32 + bl0.distance(tl0) / m2.max(4) as f32) / 2.0
+    } else {
+        side / (m1 + m2).div_ceil(2).max(4) as f32
+    }
+    .max(1.0);
 
     // The raw farthest-point detection recesses the fourth corner inward by up to a
     // module, which would skew the two timing edges' boundary search: the seed
@@ -907,11 +927,120 @@ fn find_corners(
 
     let mut pts = [p0, p1, p2, p3];
     order_clockwise(&mut pts, centroid);
+    // The construction takes the cloud's longest chord for a diagonal. In a long
+    // rectangle seen in perspective it can be a side instead — the quad then covers
+    // a fraction of the ink — and the corners are read off the convex hull.
+    if let Some((hull, hull_area)) = convex_hull(bin, x0, y0, x1, y1)
+        && quad_area(&pts) < HULL_COVER * hull_area
+        && let Some(mut quad) = largest_quad(&hull)
+    {
+        order_clockwise(&mut quad, centroid);
+        pts = quad;
+    }
     // Reject a degenerate (collinear / coincident) result.
     if quad_area(&pts) < 4.0 {
         return Err(Error::undecodable("degenerate symbol quad"));
     }
     Ok(pts)
+}
+
+/// The least of the dark cloud's convex hull a corner quad covers when the
+/// farthest-point construction has found the corners: it loses no more than the
+/// light module at the timing borders' corner and the hull's rounding.
+const HULL_COVER: f32 = 0.85;
+
+/// Convex hull of the dark pixels in the window, counter-clockwise in image
+/// coordinates, and its area. `None` for fewer than three hull points.
+fn convex_hull(
+    bin: &BinaryImage,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+) -> Option<(Vec<Point>, f32)> {
+    // Only the first and last dark pixel of each row can be on the hull; rows come
+    // sorted, which is the order the monotone chain wants (by y, then x).
+    let mut pts: Vec<Point> = Vec::new();
+    for y in y0..=y1 {
+        let Some(first) = (x0..=x1).find(|&x| bin.get(x, y)) else {
+            continue;
+        };
+        let last = (x0..=x1).rev().find(|&x| bin.get(x, y)).unwrap_or(first);
+        pts.push(Point::new(first as f32, y as f32));
+        if last != first {
+            pts.push(Point::new(last as f32, y as f32));
+        }
+    }
+    if pts.len() < 3 {
+        return None;
+    }
+    let cross =
+        |o: Point, a: Point, b: Point| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let mut hull: Vec<Point> = Vec::with_capacity(pts.len() + 1);
+    for pass in 0..2 {
+        let start = hull.len();
+        let feed = |p: Point, hull: &mut Vec<Point>| {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        };
+        if pass == 0 {
+            pts.iter().for_each(|&p| feed(p, &mut hull));
+        } else {
+            pts.iter().rev().for_each(|&p| feed(p, &mut hull));
+        }
+        hull.pop();
+    }
+    if hull.len() < 3 {
+        return None;
+    }
+    let twice: f32 = (0..hull.len())
+        .map(|i| {
+            let (a, b) = (hull[i], hull[(i + 1) % hull.len()]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum();
+    Some((hull, twice.abs() / 2.0))
+}
+
+/// The four vertices of the convex polygon `hull` that span the largest quad, in
+/// hull order. `None` for fewer than four vertices.
+fn largest_quad(hull: &[Point]) -> Option<[Point; 4]> {
+    let n = hull.len();
+    if n < 4 {
+        return None;
+    }
+    // Twice the area of the triangle over hull vertices (indices taken modulo n).
+    let tri = |a: usize, b: usize, c: usize| {
+        let (a, b, c) = (hull[a % n], hull[b % n], hull[c % n]);
+        ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)).abs()
+    };
+    let mut best = (0.0f32, [0usize; 4]);
+    for i in 0..n - 2 {
+        // For the diagonal i–k the best vertex on each side is the farthest from it,
+        // and both move one way round the hull as k does.
+        let (mut j, mut l) = (i + 1, i + 3);
+        for k in i + 2..n {
+            while j + 1 < k && tri(i, j + 1, k) >= tri(i, j, k) {
+                j += 1;
+            }
+            l = l.max(k + 1);
+            while l + 1 < n + i && tri(k, l + 1, i) >= tri(k, l, i) {
+                l += 1;
+            }
+            if l >= n + i {
+                continue;
+            }
+            let area = tri(i, j, k) + tri(k, l, i);
+            if area > best.0 {
+                best = (area, [i, j, k, l % n]);
+            }
+        }
+    }
+    (best.0 > 0.0).then(|| best.1.map(|v| hull[v]))
 }
 
 /// Refine the four quad corners as intersections of straight lines fit to the
@@ -1067,7 +1196,7 @@ fn edge_darkness(bin: &BinaryImage, a: Point, b: Point, centroid: Point) -> f32 
         let s = 0.15 + 0.7 * (k as f32 + 0.5) / n as f32;
         let px = a.x + (b.x - a.x) * s;
         let py = a.y + (b.y - a.y) * s;
-        let (ix, iy) = inset_toward(px, py, centroid, INSET);
+        let (ix, iy) = inset_toward(px, py, (a, b), centroid, INSET);
         if bin.get(ix, iy) {
             dark += 1;
         }
@@ -1093,7 +1222,7 @@ fn count_modules(
         let s = (i as f32 + 0.5) / k as f32;
         let px = a.x + (b.x - a.x) * s;
         let py = a.y + (b.y - a.y) * s;
-        let (fx, fy) = inset_toward_f(px, py, centroid, INSET);
+        let (fx, fy) = inset_toward_f(px, py, (a, b), centroid, INSET);
         let dark = sample_bilinear(frame, fx, fy) <= t;
         if let Some(p) = prev
             && p != dark
@@ -1105,25 +1234,85 @@ fn count_modules(
     transitions + 1
 }
 
-/// Move point `(px, py)` `dist` pixels toward `centroid`, returning rounded pixel
-/// indices (clamped at 0).
-fn inset_toward(px: f32, py: f32, centroid: Point, dist: f32) -> (usize, usize) {
-    let (fx, fy) = inset_toward_f(px, py, centroid, dist);
+/// Move point `(px, py)` of `edge` `dist` pixels into the symbol, returning rounded
+/// pixel indices (clamped at 0).
+fn inset_toward(
+    px: f32,
+    py: f32,
+    edge: (Point, Point),
+    centroid: Point,
+    dist: f32,
+) -> (usize, usize) {
+    let (fx, fy) = inset_toward_f(px, py, edge, centroid, dist);
     (fx.max(0.0) as usize, fy.max(0.0) as usize)
 }
 
-/// Move `(px, py)` `dist` pixels toward `centroid`, returning fractional coordinates.
-fn inset_toward_f(px: f32, py: f32, centroid: Point, dist: f32) -> (f64, f64) {
+/// Move `(px, py)`, a point of `edge`, `dist` pixels into the symbol, returning
+/// fractional coordinates: toward `centroid`, or — where that runs more along the
+/// edge than away from it, towards the ends of a rectangle's long sides — straight
+/// in from the edge.
+fn inset_toward_f(
+    px: f32,
+    py: f32,
+    (a, b): (Point, Point),
+    centroid: Point,
+    dist: f32,
+) -> (f64, f64) {
     let dx = centroid.x - px;
     let dy = centroid.y - py;
     let len = (dx * dx + dy * dy).sqrt().max(1e-3);
-    ((px + dx / len * dist) as f64, (py + dy / len * dist) as f64)
+    let (mut ux, mut uy) = (dx / len, dy / len);
+    let (ex, ey) = (b.x - a.x, b.y - a.y);
+    let edge_len = ex.hypot(ey).max(1e-3);
+    // The edge's unit normal on the centroid's side.
+    let (mut nx, mut ny) = (-ey / edge_len, ex / edge_len);
+    if nx * ux + ny * uy < 0.0 {
+        (nx, ny) = (-nx, -ny);
+    }
+    // At the end of a square's side the centroid is 45° off the normal.
+    if nx * ux + ny * uy < 0.7 {
+        (ux, uy) = (nx, ny);
+    }
+    ((px + ux * dist) as f64, (py + uy * dist) as f64)
 }
 
-/// Valid square sizes nearest to `n_est`, closest first (up to three).
-fn candidate_sizes(n_est: usize) -> Vec<usize> {
-    let mut sizes: Vec<usize> = all_squares().iter().map(|s| s.symbol_size).collect();
-    sizes.sort_by_key(|&s| (s as isize - n_est as isize).abs());
-    sizes.truncate(3);
-    sizes
+/// How many sizes are tried around a module count.
+const NEAREST_SIZES: usize = 3;
+
+/// The grids to try for a symbol whose timing borders count `m1` modules (the one
+/// from `tl`) and `m2` (the one from `br`), likeliest first: `(width, height, swap)`,
+/// `swap` being the handedness for [`corner_targets`].
+///
+/// Counts within 30 % of each other are a square's: the nearest square sizes, each
+/// in both handednesses, since nothing tells its two solid edges apart. Counts
+/// further apart are a rectangle's, whose longer timing border is its top row: the
+/// nearest rectangular sizes in that one handedness — and then the squares all the
+/// same, for a small square whose borders were miscounted.
+fn candidate_grids(m1: usize, m2: usize) -> Vec<(usize, usize, bool)> {
+    let mut grids = Vec::new();
+    let (long, short) = (m1.max(m2), m1.min(m2));
+    if 10 * long >= 13 * short {
+        let swap = m2 > m1;
+        let mut rects: Vec<(usize, usize)> = all_specs()
+            .iter()
+            .filter(|s| !s.is_square())
+            .map(|s| (s.width, s.height))
+            .collect();
+        // A miscount is a module or two whatever the side's length, so the short
+        // side, with the fewest sizes to choose from, weighs the same as the long.
+        rects.sort_by_key(|&(w, h)| w.abs_diff(long) + h.abs_diff(short));
+        grids.extend(
+            rects
+                .iter()
+                .take(NEAREST_SIZES + 1)
+                .map(|&(w, h)| (w, h, swap)),
+        );
+    }
+    let n_est = (m1 + m2).div_ceil(2); // rounded average
+    let mut sizes: Vec<usize> = all_squares().iter().map(|s| s.width).collect();
+    sizes.sort_by_key(|&s| s.abs_diff(n_est));
+    for &dim in sizes.iter().take(NEAREST_SIZES) {
+        grids.extend([false, true].map(|swap| (dim, dim, swap)));
+    }
+    grids
 }

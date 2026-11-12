@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/KarpelesLab/anydcode/compare/v0.2.0...v0.3.0) - 2026-11-12
+
+### Other
+
+- give the RM4SCC pattern table a header for all six columns
+- demo, readme: rectangular Data Matrix sizes and GS1 mode
+- every encodation and every symbol shape
+- move to the oxideav-png 0.1.12 image API and drop the exact pin
+- qr, datamatrix, pdf417: every whole-frame read says where it is
+- fit the bullseye and the grid on grey levels, not on binarized corners
+- read low-quality captures from grey-level scan lines
+- tests, liveeval: grain read rate over several seeds; per-crop timings
+- find the far corner from the timing borders, not the parallelogram
+- --slow=<ms> lists slow scenes, --jobs=<n> caps the workers
+- Merge branch 'worktree-agent-a9b085e2e59058d30': stacked and DataBar codec audit
+- Merge branch 'worktree-agent-a73244f2edfcb94e7': QR-family codec audit
+- Merge branch 'worktree-agent-aeaeeb6f752ae8518': matrix codec audit
+- Merge branch 'worktree-agent-ab8610f8d505bb24f': linear and postal codec audit
+- Merge branch 'worktree-agent-afc4fb1763dfa2b30': core, CLI and wasm audit
+- scan1d, pipeline: read 1D codes through blur, tilt, grain and faint print
+- stacked DataBar parameter, shape and row-order error paths
+- pdf417, micropdf417: Extended Channel Interpretation escapes
+- capacity boundaries, zint vectors and error paths for Micro QR, rMQR and Grid Matrix
+- decoder rejects grids of more than 928 codewords
+- bound the Expanded Stacked grid at 11 codeblocks
+- recover an unreadable format strongest level first
+- code16k, code49: refuse metadata that renders an unreadable symbol; boundary tests
+- API error paths, every mask/byte value, App Clip codec error correction
+- whatever the QR-family parsers accept must re-encode to the same segments
+- build_text never needs more room than plain binary
+- pdf417, micropdf417: refuse metadata that contradicts the variant; boundary tests
+- write a symbol-ending Base256 run with the zero length field
+- reject Byte compaction codewords that are not bytes
+- report Structured Append symbols as unsupported
+- a Structured Append indicator is not payload
+- only read data characters the encoder can produce
+- a Structured Append trailer is not payload
+- the feature-slice example names the current 0.2 release
+- reject a numeral run that carries no digits
+- weigh Code Set A against B by data characters, not codewords
+- document the round-trip limits as they are
+- qr, microqr: stop correcting past the ISO/IEC 18004 Table 9 capacity
+- output, render: size math that overflows panics instead of wrapping
+- core types - catalog completeness, soft sqrt over the whole f64 range, Symbol text
+- distinct seeds give distinct noise; a degenerate blur sigma is a copy
+- reject a trailing or doubled FNC1 in Expanded data
+- fuzzed rows must survive a re-encode, not merely permit one
+- pharmacode, dxfilm: numeric text is decimal digits only
+- check character of a very long symbol
+- linear conformance vectors, API misuse paths, damaged rows
+- code128 code-set semantics, planner references and sweep, rejections
+- code39, code93: a shift followed by a non-letter is an error, not a panic
+- refuse an empty numeric segment instead of truncating the symbol
+- keep unpaired digits and empty Base256 runs lossless
+- decoder refuses a Structured Carrier primary it cannot re-encode
+- decode an FNC1 field separator as GS
+- resolve shifts over the character stream; decode FNC1
+- with_addon refuses a standalone add-on; spec-table and rejection tests
+- huge coordinates stay JSON numbers; null inputs are empty slices
+- a non-UTF-8 argument is an error exit, not a panic
+- post-code padding positions must be spaces
+- a wide bar cannot sit inside an open block
+- pin oxideav-png to 0.1.8, the last release the front-end compiles against
+- capture-quality axis (soft, dim, motion, tilt, grain)
+
 ## [0.2.0](https://github.com/KarpelesLab/anydcode/compare/v0.1.4...v0.2.0) - 2026-09-18
 
 ### Other

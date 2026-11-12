@@ -4,8 +4,8 @@
 //! located in a 6×6 grid whose row (top / ascender half) and column (bottom /
 //! descender half) each select one of six "2-of-4" bar patterns:
 //!
-//! | value | pattern (bars 1-4) |
-//! |-------|--------------------|
+//! | value | pattern (bars 1-4) | value | pattern | value | pattern |
+//! |-------|--------------------|-------|---------|-------|---------|
 //! | 1 | `0011` | 2 | `0101` | 3 | `0110` |
 //! | 4 | `1001` | 5 | `1010` | 6 | `1100` |
 //!

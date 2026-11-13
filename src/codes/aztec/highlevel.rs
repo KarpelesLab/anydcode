@@ -267,12 +267,16 @@ pub fn decode(bits: &[bool]) -> Vec<Segment> {
     let mut out = Decoded::default();
     let mut r = Reader::new(bits);
     let mut mode = UPPER;
+    // The mode to return to after the one Upper code a U/S introduced. That code is
+    // read like any other in Upper mode: a character, or a P/S or B/S of its own.
+    let mut shifted_from: Option<usize> = None;
     loop {
         let mb = mode_bits(mode);
         if r.remaining() < mb {
             break;
         }
         let code = r.read(mb).unwrap() as u16;
+        let back = shifted_from.take();
         match code {
             // Punct has no shifts: code 0 is FLG(n) and 31 latches back to Upper.
             _ if mode == PUNCT => {
@@ -321,11 +325,9 @@ pub fn decode(bits: &[bool]) -> Vec<Segment> {
                 },
                 LOWER => match code {
                     28 => {
-                        // U/S: one Upper char.
-                        match r.read(5) {
-                            Some(uc) => push_char(UPPER, uc as u16, &mut out.bytes),
-                            None => break,
-                        }
+                        // U/S: one Upper code.
+                        shifted_from = Some(mode);
+                        mode = UPPER;
                     }
                     29 => mode = MIXED,
                     30 => mode = DIGIT,
@@ -340,16 +342,24 @@ pub fn decode(bits: &[bool]) -> Vec<Segment> {
                 DIGIT => match code {
                     14 => mode = UPPER,
                     15 => {
-                        // U/S: one Upper char.
-                        match r.read(5) {
-                            Some(uc) => push_char(UPPER, uc as u16, &mut out.bytes),
-                            None => break,
-                        }
+                        // U/S: one Upper code.
+                        shifted_from = Some(mode);
+                        mode = UPPER;
                     }
                     _ => push_char(DIGIT, code, &mut out.bytes),
                 },
                 _ => {}
             },
+        }
+        // Back from a U/S once its one character is read. A shift ends in the mode it
+        // was invoked from (ISO/IEC 24778), and that holds for a shift inside a shift:
+        // a P/S or B/S read as the shifted code was invoked from Upper, and leaves the
+        // stream there. A latch read as the shifted code simply takes effect.
+        if let Some(previous) = back
+            && mode == UPPER
+            && !matches!(code, 0 | 31)
+        {
+            mode = previous;
         }
     }
     // A symbol without ECI escapes is always exactly one (possibly empty) byte segment.
@@ -540,5 +550,35 @@ mod tests {
             // yields the same payload.
             assert_eq!(bytes(&unstuffed), bytes(&raw));
         }
+    }
+
+    /// A U/S introduces one Upper *code*, which may itself be a B/S or P/S; the
+    /// stream then stays in Upper, the mode that shift was invoked from. (ZXing's
+    /// `dlusbs` test symbol: D/L, U/S, B/S.)
+    #[test]
+    fn shift_inside_an_upper_shift() {
+        // D/L 3 3, U/S, B/S of two bytes, then I T read as Upper.
+        let bits = stream(&[
+            (30, 5),
+            (5, 4),
+            (5, 4),
+            (15, 4),
+            (31, 5),
+            (2, 5),
+            (u32::from(b'h'), 8),
+            (u32::from(b'j'), 8),
+            (10, 5),
+            (21, 5),
+        ]);
+        assert_eq!(bytes(&bits), b"33hjIT");
+        // The same through a P/S: D/L 3, U/S, P/S '!', then I.
+        let bits = stream(&[(30, 5), (5, 4), (15, 4), (0, 5), (6, 5), (10, 5)]);
+        assert_eq!(bytes(&bits), b"3!I");
+        // A plain shifted character returns to the invoking mode: Lower a, U/S B, a.
+        let bits = stream(&[(28, 5), (2, 5), (28, 5), (3, 5), (2, 5)]);
+        assert_eq!(bytes(&bits), b"aBa");
+        // And from Digit: D/L 3, U/S A, 3.
+        let bits = stream(&[(30, 5), (5, 4), (15, 4), (2, 5), (5, 4)]);
+        assert_eq!(bytes(&bits), b"3A3");
     }
 }

@@ -41,7 +41,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Aztec (compact + full range, all modes) · Aztec Runes | ✅ | ✅ | ✅⁶ |
 | Micro QR Code (M1–M4) | ✅ | ✅ | ✅⁶ |
 | Rectangular Micro QR (rMQR, all 32 sizes) | ✅ | ✅ | ✅⁶ |
-| MaxiCode (modes 2–6) | ✅ | ✅ | ⬜ |
+| MaxiCode (modes 2–6) | ✅ | ✅ | ✅⁸ |
 | Han Xin (versions 1–3, Numeric/Text/Byte) | ✅ | ✅ | ⬜ |
 | DotCode (GF(113) RS) | ✅ | ✅ | ⬜ |
 | Grid Matrix (all 13 versions) | ✅ | ✅ | ⬜ |
@@ -156,6 +156,18 @@ only 34 rigid size variants exist: the sampler corners the dark-pixel cloud (as 
 Data Matrix sampler does), then tries the variants whose module aspect matches the
 measured quad, nearest first, across the four rotations — Reed–Solomon arbitrates.
 Any-angle rotation, scale, blur, noise; envelope in `tests/micropdf417_image.rs`.
+
+⁸ MaxiCode ships an image sampler built on its bullseye: a row scan for the
+eleven-run cross-section (no binarization — the grey rows are classified as they are
+read, against Otsu and then a sliding mean) → rays over the grey image fit an ellipse
+to the rings → the hexagonal lattice's rotation and pitch are searched for the pose
+under which the image is constant within a module and changes between modules → the
+six orientation triplets pick the upright sixth of a turn → patches of modules are
+slid into register and a homography solved through them, outwards from the bullseye →
+Reed–Solomon validates. Any-angle rotation, 4 px modules and up, blur, noise, shadow,
+ink spread, and tilt to a 20 % foreshortening; envelope in `tests/maxicode_image.rs`.
+`codes::maxicode::render_hex` draws the printed symbol (hexagons and bullseye), which
+the square-module `render` cannot.
 
 > **Naming note.** GS1 DataBar was formerly "RSS": DataBar Omnidirectional = RSS-14,
 > DataBar Limited = RSS Limited, DataBar Expanded = RSS Expanded. Codabar is sometimes
@@ -315,7 +327,7 @@ $ anyd encode qr "https://example.com" --format png --out qr.png --scale 8
 $ anyd encode ean13 5901234123457 --format svg --out barcode.svg
 $ anyd encode qr "HELLO" --format unicode          # half-block art in the terminal
 
-# Decode a PNG (tries QR, Micro QR, rMQR, Data Matrix, Aztec, PDF417,
+# Decode a PNG (tries QR, Micro QR, rMQR, Data Matrix, Aztec, MaxiCode, PDF417,
 # MicroPDF417, App Clip Code, and the rotation-complete 1D front-end)
 $ anyd decode qr.png
 QR Code: https://example.com

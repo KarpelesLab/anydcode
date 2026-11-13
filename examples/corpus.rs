@@ -1,13 +1,14 @@
 // Run the still-image pipeline over a corpus of photographs with known payloads.
 //
-// Usage: corpus [--live] [-v] <dir>...
+// Usage: corpus [--live] [-v] [--scale=<n>] <dir>...
 // Each <dir> holds `N.png` beside `N.txt` (the expected text), `N.bin` (the expected
 // bytes) or `N.sjis` (the text in Shift-JIS); a PNG with neither must not read (a false-positive set). `ci/fetch-corpus.sh`
 // fetches the ZXing blackbox sets in this layout.
 //
 // Default: `pipeline::scan_all` on the whole image, as the CLI does. `--live`: the
 // demo's path — `detect::locate`, a decode of each padded crop, then `scan_2d` on the
-// frame. `-v` lists every image that did not read.
+// frame. `-v` lists every image that did not read; `--scale=<n>` enlarges each image
+// by pixel replication first (to tell a resolution limit from anything else).
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -87,11 +88,12 @@ fn matches(symbol: &Symbol, want: &[u8]) -> bool {
 
 fn main() {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let (mut use_live, mut verbose) = (false, false);
+    let (mut use_live, mut verbose, mut scale) = (false, false, 1usize);
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--live" => use_live = true,
             "-v" => verbose = true,
+            _ if a.starts_with("--scale=") => scale = a[8..].parse().expect("--scale=<n>"),
             _ => dirs.push(a.into()),
         }
     }
@@ -118,6 +120,18 @@ fn main() {
             let Some((luma, w, h)) = load(path) else {
                 eprintln!("unreadable: {}", path.display());
                 continue;
+            };
+            // Diagnostic: enlarge by pixel replication before scanning.
+            let (luma, w, h) = if scale > 1 {
+                let mut big = vec![0u8; w * h * scale * scale];
+                for y in 0..h * scale {
+                    for x in 0..w * scale {
+                        big[y * w * scale + x] = luma[(y / scale) * w + x / scale];
+                    }
+                }
+                (big, w * scale, h * scale)
+            } else {
+                (luma, w, h)
             };
             n += 1;
             let t = Instant::now();

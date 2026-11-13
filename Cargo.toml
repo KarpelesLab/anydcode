@@ -166,3 +166,7 @@ required-features = ["cli"]
 [[example]]
 name = "dmdebug"
 required-features = ["cli"]
+
+[[example]]
+name = "pdfdebug"
+required-features = ["cli"]

@@ -141,7 +141,44 @@ impl Analyze for Pdf417Scanner {
 /// under global Otsu first (exact on clean renders), then under an adaptive local
 /// binarization; if neither decodes, the grey-level scan-line reader — which copes with
 /// blur, noise, low contrast, small modules and perspective — has the last word.
+///
+/// A small frame that yields nothing is read once more at twice the size: a symbol
+/// written to a file at a pixel or two per module leaves the guard search and the
+/// edge reader nothing between two edges.
 pub fn scan(frame: &GrayFrame<'_>) -> Option<Symbol> {
+    if let Some(sym) = scan_at_scale(frame) {
+        return Some(sym);
+    }
+    let (w, h) = (frame.width(), frame.height());
+    if w * h > UPSCALE_MAX_PIXELS || w == 0 || h == 0 {
+        return None;
+    }
+    let mut big = vec![0u8; 4 * w * h];
+    for y in 0..2 * h {
+        for x in 0..2 * w {
+            big[y * 2 * w + x] = frame.get_unchecked(x / 2, y / 2);
+        }
+    }
+    let doubled = GrayFrame::new(&big, 2 * w, 2 * h).ok()?;
+    let mut sym = scan_at_scale(&doubled)?;
+    if let Some(location) = sym.location.as_mut() {
+        // Pixel centres sit on whole coordinates, in both frames.
+        location.outline = Quad::new(
+            location
+                .outline
+                .corners
+                .map(|p| Point::new((p.x - 0.5) / 2.0, (p.y - 0.5) / 2.0)),
+        );
+        location.module_size = location.module_size.map(|m| m / 2.0);
+    }
+    Some(sym)
+}
+
+/// The largest frame, in pixels, that [`scan`] reads a second time at twice the size.
+const UPSCALE_MAX_PIXELS: usize = 320 * 200;
+
+/// [`scan`] on the frame as given.
+fn scan_at_scale(frame: &GrayFrame<'_>) -> Option<Symbol> {
     scan_with(frame, &Binary::from_frame(frame))
         .or_else(|| scan_with(frame, &Binary::adaptive(frame)))
         .or_else(|| scan_lines(frame))

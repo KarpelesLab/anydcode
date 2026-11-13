@@ -377,3 +377,29 @@ fn rotated_grainy_capture_reads_after_derotation() {
         assert_decodes_at(&img, 45.3, &expected, "3px grain, 45° read at 45.3°");
     }
 }
+
+/// A symbol as software writes it to a file: a pixel or two to the module.
+#[test]
+fn tiny_modules() {
+    let enc = Pdf417Encoder::new();
+    let symbol = enc
+        .build_text(
+            "-ActiveBarcode-ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            EcLevel::new(2).unwrap(),
+        )
+        .unwrap();
+    let Encoding::Matrix(matrix) = enc.encode(&symbol).unwrap() else {
+        panic!("PDF417 encodes to a matrix");
+    };
+    for scale in [1usize, 2] {
+        let img = render_matrix(&matrix, scale);
+        let read = scan(&img.as_frame()).unwrap_or_else(|| panic!("{scale} px: not read"));
+        assert_eq!(read.payload_bytes(), symbol.payload_bytes(), "{scale} px");
+        // The outline is reported in the frame's own pixels.
+        let location = read.location.expect("a location");
+        for p in location.outline.corners {
+            assert!(p.x >= -1.0 && p.x <= img.width() as f32 + 1.0, "{p:?}");
+            assert!(p.y >= -1.0 && p.y <= img.height() as f32 + 1.0, "{p:?}");
+        }
+    }
+}

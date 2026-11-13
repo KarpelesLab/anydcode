@@ -3,7 +3,9 @@
 // Usage: corpus [--live] [-v] [--scale=<n>] <dir>...
 // Each <dir> holds `N.png` beside `N.txt` (the expected text), `N.bin` (the expected
 // bytes) or `N.sjis` (the text in Shift-JIS); a PNG with neither must not read (a false-positive set). `ci/fetch-corpus.sh`
-// fetches the ZXing blackbox sets in this layout.
+// fetches the ZXing blackbox sets in this layout. (Its `unsupported` set is no
+// false-positive set, though it has no texts: the four photographs are UPS MaxiCode
+// labels ZXing could not read, so reading them is reported as `wrong`.)
 //
 // Default: `pipeline::scan_image` on the whole image, as the CLI does. `--live`: the
 // demo's path — `detect::locate`, a decode of each padded crop, then `scan_2d` on the
@@ -90,6 +92,7 @@ fn matches(symbol: &Symbol, want: &[u8]) -> bool {
         || trim(&got) == trim(want)
         || latin1.as_bytes() == want
         || full_ascii.flatten().is_some_and(|f| f == trim(want))
+        || carrier_message(symbol).is_some_and(|m| trim(&m) == trim(want))
 }
 
 /// Resolve Code 39 Full ASCII shift pairs (`+A` → `a`, `/A` → `!`, …); `None` if
@@ -126,6 +129,30 @@ fn code39_full_ascii(data: &[u8]) -> Option<Vec<u8>> {
         i += 2;
     }
     Some(out)
+}
+
+/// A MaxiCode Structured Carrier symbol (modes 2 and 3) as the corpus transcribes
+/// it: the primary message's postcode, country and service class spliced into the
+/// secondary message as `GS`-separated fields — after the `[)>RS01GSyy` header when
+/// there is one, else in front. The library keeps those fields in
+/// `MaxiCodeMeta::carrier`, apart from the payload.
+fn carrier_message(symbol: &Symbol) -> Option<Vec<u8>> {
+    let anyd::symbol::SymbolMeta::MaxiCode(meta) = &symbol.meta else {
+        return None;
+    };
+    let carrier = meta.carrier.as_ref()?;
+    let fields = format!(
+        "{}\x1d{:03}\x1d{:03}\x1d",
+        carrier.postcode, carrier.country, carrier.service
+    );
+    let mut message = symbol.payload_bytes();
+    let at = if message.starts_with(b"[)>\x1e01\x1d") && message.len() >= 9 {
+        9
+    } else {
+        0
+    };
+    message.splice(at..at, fields.bytes());
+    Some(message)
 }
 
 fn main() {

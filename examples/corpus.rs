@@ -88,9 +88,18 @@ fn matches(symbol: &Symbol, want: &[u8]) -> bool {
     // A Code 39 symbol does not say whether it is Full ASCII; the reader reports the
     // characters as printed and the corpus expects the pairs resolved.
     let full_ascii = (symbol.symbology == anyd::Symbology::Code39).then(|| code39_full_ascii(&got));
+    // GS1 element strings are transcribed with each Application Identifier in
+    // brackets; a symbol carries them bare, with FNC1 (GS) ending a variable field.
+    let bare = |b: &[u8]| -> Vec<u8> {
+        let mut b = trim(b);
+        b.retain(|c| !matches!(c, b'(' | b')' | 0x1d));
+        b
+    };
+    let gs1 = want.first() == Some(&b'(') && bare(&got) == bare(want);
     got == want
         || trim(&got) == trim(want)
         || latin1.as_bytes() == want
+        || gs1
         || full_ascii.flatten().is_some_and(|f| f == trim(want))
         || carrier_message(symbol).is_some_and(|m| trim(&m) == trim(want))
 }
@@ -177,7 +186,8 @@ fn main() {
             let stem = p.file_stem().unwrap().to_string_lossy().into_owned();
             (stem.parse::<u64>().unwrap_or(u64::MAX), stem)
         });
-        let (mut ok, mut wrong, mut n, mut ms, mut worst) = (0, 0, 0, 0.0f64, 0.0f64);
+        let (mut ok, mut wrong, mut extras, mut n, mut ms, mut worst) =
+            (0, 0, 0, 0, 0.0f64, 0.0f64);
         let mut missed = Vec::new();
         for path in &images {
             // Any of the transcriptions of the expected payload.
@@ -214,7 +224,25 @@ fn main() {
             worst = worst.max(dt);
             let name = path.file_name().unwrap().to_string_lossy().into_owned();
             match &want {
-                Some(wants) if found.iter().any(|s| wants.iter().any(|w| matches(s, w))) => ok += 1,
+                Some(wants) if found.iter().any(|s| wants.iter().any(|w| matches(s, w))) => {
+                    ok += 1;
+                    // A second, different reading beside the right one is still a
+                    // false read; it does not change the score, but list it.
+                    for extra in found
+                        .iter()
+                        .filter(|s| !wants.iter().any(|w| matches(s, w)))
+                    {
+                        extras += 1;
+                        missed.push(format!(
+                            "{name} ({w}x{h}) EXTRA {:?} {:?}",
+                            extra.symbology,
+                            String::from_utf8_lossy(&extra.payload_bytes())
+                                .chars()
+                                .take(40)
+                                .collect::<String>()
+                        ));
+                    }
+                }
                 Some(_) if found.is_empty() => missed.push(format!("{name} ({w}x{h})")),
                 // Something read, but not the expected payload — or, in a
                 // false-positive set, anything read at all.
@@ -234,7 +262,7 @@ fn main() {
             }
         }
         println!(
-            "{:<24} {ok:>3}/{n:<3} {:>5.1}%  wrong={wrong:<2} {:>6.1} ms avg {:>7.1} ms worst",
+            "{:<24} {ok:>3}/{n:<3} {:>5.1}%  wrong={wrong:<2} extra={extras:<2} {:>6.1} ms avg {:>7.1} ms worst",
             dir.file_name().unwrap().to_string_lossy(),
             100.0 * ok as f64 / n.max(1) as f64,
             ms / n.max(1) as f64,

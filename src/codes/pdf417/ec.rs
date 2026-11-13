@@ -112,10 +112,38 @@ pub fn encode(data: &[u32], k: usize) -> Vec<u32> {
 /// error-correction codewords), returning the corrected block, or `None` if the
 /// errors exceed the correction capacity.
 ///
-/// Implements syndrome computation, Berlekamp–Massey, a Chien search and Forney's
-/// formula over GF(929).
+/// This is [`decode_with_erasures`] with no erasures.
 pub fn decode(received: &[u32], k: usize) -> Option<Vec<u32>> {
+    decode_with_erasures(received, k, &[]).map(|(block, _)| block)
+}
+
+/// Attempt to correct `received` (data followed by the `k` error-correction
+/// codewords) given the indices of the codewords known to be missing or unreliable.
+///
+/// An *erasure* — a codeword whose position is known, whatever value stands in for it
+/// in `received` — costs one check codeword to fill in; an *error*, whose position must
+/// be found as well, costs two. Any `e` errors and `f` erasures with `2e + f <= k` are
+/// corrected. Returns the corrected block and the number of errors found outside the
+/// erased positions, or `None` if the damage exceeds that capacity (or `erasures`
+/// names a position twice or one outside the block).
+///
+/// The result is always a genuine codeword, but the more of the `k` check codewords
+/// the correction consumes, the less remains to tell a block that was damaged from
+/// one that was never a codeword: with `f = k` erasures *every* input is "corrected".
+/// A caller that must not accept garbage should leave some of them unused.
+///
+/// Implements syndrome computation, the erasure locator, Berlekamp–Massey on the
+/// modified syndromes, a Chien search and Forney's formula over GF(929).
+pub fn decode_with_erasures(
+    received: &[u32],
+    k: usize,
+    erasures: &[usize],
+) -> Option<(Vec<u32>, usize)> {
     let n = received.len();
+    let f = erasures.len();
+    if f > k || erasures.iter().any(|&pos| pos >= n) {
+        return None;
+    }
     // Syndromes S_j = R(α^j) for j in 1..=k.
     let mut syndromes = vec![0u32; k];
     let mut all_zero = true;
@@ -132,22 +160,39 @@ pub fn decode(received: &[u32], k: usize) -> Option<Vec<u32>> {
         }
     }
     if all_zero {
-        return Some(received.to_vec());
+        return Some((received.iter().map(|&c| c % MOD).collect(), 0));
     }
 
-    // Berlekamp–Massey: find the error-locator polynomial Λ(x), least-significant
-    // first with Λ_0 == 1.
+    // Erasure locator Γ(x) = ∏ (1 − X_i·x), X_i = α^p for an erasure at power p
+    // (received index n-1-p); least-significant first, like every polynomial below.
+    let mut gamma = vec![1u32];
+    for &pos in erasures {
+        let x = exp(((n - 1 - pos) % (MOD as usize - 1)) as u32);
+        gamma.push(0);
+        for j in (1..gamma.len()).rev() {
+            gamma[j] = sub(gamma[j], mul(x, gamma[j - 1]));
+        }
+    }
+    // A repeated position gives Γ a double root, and Forney's formula nothing to
+    // divide by; it is refused there.
+
+    // Modified syndromes T(x) = [S(x)·Γ(x)] mod x^k, with S(x) = Σ S_{i+1} x^i. Its
+    // coefficients from x^f up obey the recurrence of the *error* locator alone.
+    let modified = mul_mod_xk(&syndromes, &gamma, k);
+    let tail = &modified[f..];
+
+    // Berlekamp–Massey: find the error-locator polynomial Λ(x) with Λ_0 == 1.
     let mut sigma = vec![1u32];
     let mut prev = vec![1u32];
     let mut l = 0usize;
     let mut m = 1usize;
     let mut b = 1u32;
 
-    for i in 0..k {
-        let mut delta = syndromes[i];
+    for i in 0..tail.len() {
+        let mut delta = tail[i];
         for j in 1..=l {
             if j < sigma.len() {
-                delta = add(delta, mul(sigma[j], syndromes[i - j]));
+                delta = add(delta, mul(sigma[j], tail[i - j]));
             }
         }
         if delta == 0 {
@@ -169,58 +214,43 @@ pub fn decode(received: &[u32], k: usize) -> Option<Vec<u32>> {
         sigma.pop();
     }
     let num_errors = sigma.len() - 1;
-    if num_errors == 0 || num_errors > k / 2 {
+    if (num_errors == 0 && f == 0) || 2 * num_errors + f > k {
         return None;
     }
 
     // Chien search: Λ(α^-p) == 0 marks an error at power p (received index n-1-p).
     let mut positions = Vec::new();
-    for p in 0..n {
-        let x_inv = exp(((MOD - 1) - (p as u32 % (MOD - 1))) % (MOD - 1));
-        let mut val = 0u32;
-        let mut pw = 1u32;
-        for &coef in &sigma {
-            val = add(val, mul(coef, pw));
-            pw = mul(pw, x_inv);
-        }
-        if val == 0 {
-            positions.push(n - 1 - p);
+    if num_errors > 0 {
+        for p in 0..n {
+            let x_inv = exp(((MOD - 1) - (p as u32 % (MOD - 1))) % (MOD - 1));
+            if eval(&sigma, x_inv) == 0 {
+                positions.push(n - 1 - p);
+            }
         }
     }
     if positions.len() != num_errors {
         return None;
     }
+    positions.extend_from_slice(erasures);
 
-    // Ω(x) = [S(x)·Λ(x)] mod x^k, with S(x) = Σ S_{i+1} x^i (least-significant first).
-    let mut omega = vec![0u32; k];
-    for (i, &s) in syndromes.iter().enumerate() {
-        for (j, &sg) in sigma.iter().enumerate() {
-            if i + j < k {
-                omega[i + j] = add(omega[i + j], mul(s, sg));
-            }
-        }
-    }
+    // The combined locator Ψ(x) = Λ(x)·Γ(x) and Ω(x) = [S(x)·Ψ(x)] mod x^k.
+    let psi = mul_mod_xk(&sigma, &gamma, k + 1);
+    let omega = mul_mod_xk(&syndromes, &psi, k);
 
     // Forney's formula. The error magnitude at position `pos` (power p, X = α^p) is
-    // e = ± Ω(X^-1) / Λ'(X^-1), where the unlabelled sign depends on the sign
+    // e = ± Ω(X^-1) / Ψ'(X^-1), where the unlabelled sign depends on the sign
     // conventions of Ω and the C = R − E relation. Both fixed roots (first root α^1)
     // remove any X^{1-b} factor. Rather than track the convention, compute the
     // magnitude and pick the sign that makes every syndrome vanish.
     let mut magnitudes = Vec::with_capacity(positions.len());
     for &pos in &positions {
-        let p = (n - 1 - pos) as u32;
+        let p = ((n - 1 - pos) % (MOD as usize - 1)) as u32;
         let x_inv = inv(exp(p));
-        // Ω(X^-1).
-        let mut omega_val = 0u32;
-        let mut pw = 1u32;
-        for &c in &omega {
-            omega_val = add(omega_val, mul(c, pw));
-            pw = mul(pw, x_inv);
-        }
-        // Λ'(X^-1) = Σ_{j≥1} j·Λ_j (X^-1)^{j-1} (formal derivative in GF(929)).
+        let omega_val = eval(&omega, x_inv);
+        // Ψ'(X^-1) = Σ_{j≥1} j·Ψ_j (X^-1)^{j-1} (formal derivative in GF(929)).
         let mut deriv = 0u32;
         let mut pw = 1u32;
-        for (j, &coef) in sigma.iter().enumerate().skip(1) {
+        for (j, &coef) in psi.iter().enumerate().skip(1) {
             deriv = add(deriv, mul(mul((j as u32) % MOD, coef), pw));
             pw = mul(pw, x_inv);
         }
@@ -231,7 +261,7 @@ pub fn decode(received: &[u32], k: usize) -> Option<Vec<u32>> {
     }
 
     for &sign_add in &[false, true] {
-        let mut corrected = received.to_vec();
+        let mut corrected: Vec<u32> = received.iter().map(|&c| c % MOD).collect();
         for (&pos, &mag) in positions.iter().zip(&magnitudes) {
             corrected[pos] = if sign_add {
                 add(corrected[pos], mag)
@@ -240,10 +270,29 @@ pub fn decode(received: &[u32], k: usize) -> Option<Vec<u32>> {
             };
         }
         if syndromes_vanish(&corrected, k) {
-            return Some(corrected);
+            return Some((corrected, num_errors));
         }
     }
     None
+}
+
+/// `p(x)` at `x`, coefficients least-significant first.
+fn eval(p: &[u32], x: u32) -> u32 {
+    p.iter().rev().fold(0, |acc, &c| add(mul(acc, x), c))
+}
+
+/// `[a(x)·b(x)] mod x^k`, least-significant first; the result has `k` coefficients.
+fn mul_mod_xk(a: &[u32], b: &[u32], k: usize) -> Vec<u32> {
+    let mut out = vec![0u32; k];
+    for (i, &x) in a.iter().enumerate().take(k) {
+        if x == 0 {
+            continue;
+        }
+        for (j, &y) in b.iter().enumerate().take(k - i) {
+            out[i + j] = add(out[i + j], mul(x, y));
+        }
+    }
+    out
 }
 
 /// Whether every syndrome `R(α^j)`, `j` in `1..=k`, is zero for `block`.
@@ -370,6 +419,147 @@ mod tests {
                         assert!(syndromes_vanish(&out, k), "k={k}");
                     }
                 }
+            }
+        }
+    }
+
+    /// A small deterministic generator for the randomised tests.
+    fn xorshift(seed: u64) -> impl FnMut(usize) -> usize {
+        let mut state = seed;
+        move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        }
+    }
+
+    /// `count` distinct positions below `len`, none of them in `taken`.
+    fn pick(next: &mut impl FnMut(usize) -> usize, len: usize, count: usize) -> Vec<usize> {
+        let mut all: Vec<usize> = (0..len).collect();
+        for i in 0..count {
+            let j = i + next(len - i);
+            all.swap(i, j);
+        }
+        all.truncate(count);
+        all
+    }
+
+    #[test]
+    fn rs_fills_in_erasures() {
+        let data = [5u32, 100, 200, 300, 400];
+        let mut clean = data.to_vec();
+        clean.extend_from_slice(&encode(&data, 4));
+        // As many erasures as check codewords, whatever stands in for them.
+        for stand_in in [0u32, 17, 928] {
+            let mut block = clean.clone();
+            for pos in [1, 4, 6, 8] {
+                block[pos] = stand_in;
+            }
+            let (out, errors) = decode_with_erasures(&block, 4, &[1, 4, 6, 8]).expect("decodes");
+            assert_eq!((out, errors), (clean.clone(), 0));
+            // The same damage as errors of unknown position is twice too much.
+            assert_ne!(decode(&block, 4).as_deref(), Some(clean.as_slice()));
+        }
+        // Two erasures and one error: 2·1 + 2 = 4.
+        let mut block = clean.clone();
+        block[0] = 0;
+        block[3] = 0;
+        block[7] = (block[7] + 1) % MOD;
+        assert_eq!(
+            decode_with_erasures(&block, 4, &[0, 3]),
+            Some((clean.clone(), 1))
+        );
+        // An erased position that happens to hold the right value costs nothing more.
+        assert_eq!(
+            decode_with_erasures(&clean, 4, &[2, 5]),
+            Some((clean.clone(), 0))
+        );
+        // Malformed erasure lists are refused, not indexed.
+        let mut block = clean.clone();
+        block[2] = (block[2] + 1) % MOD;
+        assert_eq!(decode_with_erasures(&block, 4, &[2, 2]), None);
+        assert_eq!(decode_with_erasures(&block, 4, &[clean.len()]), None);
+        assert_eq!(decode_with_erasures(&block, 4, &[0, 1, 2, 3, 4]), None);
+    }
+
+    /// For every error-correction size in use, any mix of `e` errors and `f` erasures
+    /// with `2e + f == k` (or `k - 1`) is corrected and the errors counted; one error
+    /// more is refused or lands on some other genuine codeword, never on a non-codeword.
+    #[test]
+    fn rs_corrects_errors_and_erasures_up_to_capacity() {
+        let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+        for k in [2usize, 4, 7, 8, 9, 13, 16, 21, 32, 50, 64, 128, 512] {
+            for round in 0..6 {
+                let data_len = (1 + next(60)).min(928 - k);
+                let data: Vec<u32> = (0..data_len).map(|_| next(929) as u32).collect();
+                let mut clean = data.clone();
+                clean.extend_from_slice(&encode(&data, k));
+                let n = clean.len();
+
+                // Rounds 0 and 1 are the extremes: no erasures, nothing but erasures.
+                let f = match round {
+                    0 => 0,
+                    1 => k,
+                    _ => next(k + 1),
+                }
+                .min(n);
+                let e = ((k - f) / 2).min(n - f);
+                let damage = |errors: usize, next: &mut dyn FnMut(usize) -> usize| {
+                    let mut next = |m: usize| next(m);
+                    let hit = pick(&mut next, n, f + errors);
+                    let mut block = clean.clone();
+                    for &pos in &hit[..f] {
+                        block[pos] = next(929) as u32;
+                    }
+                    for &pos in &hit[f..] {
+                        block[pos] = (block[pos] + 1 + next(928) as u32) % MOD;
+                    }
+                    (block, hit[..f].to_vec())
+                };
+
+                let (block, erased) = damage(e, &mut next);
+                assert_eq!(
+                    decode_with_erasures(&block, k, &erased),
+                    Some((clean.clone(), e)),
+                    "k={k} f={f} e={e}"
+                );
+                if f + e < n {
+                    let (block, erased) = damage(e + 1, &mut next);
+                    if let Some((out, _)) = decode_with_erasures(&block, k, &erased) {
+                        assert!(syndromes_vanish(&out, k), "k={k} f={f}");
+                        if 2 * (e + 1) + f > k + 1 {
+                            // Too far from `clean` to be mistaken for it.
+                            assert_ne!(out, clean, "k={k} f={f}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Arbitrary input — any values, any erasure list — never panics, and whatever is
+    /// returned is a codeword that differs from the input only where allowed.
+    #[test]
+    fn rs_survives_garbage() {
+        let mut next = xorshift(0x1234_5678_9abc_def1);
+        for round in 0..400 {
+            let k = [0usize, 1, 2, 3, 4, 8, 16, 32, 64][next(9)];
+            let n = next(80);
+            // Values beyond the field too: the decoder reduces what it is given.
+            let block: Vec<u32> = (0..n).map(|_| next(1200) as u32).collect();
+            let erased: Vec<usize> = (0..next(k + 3)).map(|_| next(n + 2)).collect();
+            if round % 2 == 0 {
+                let _ = decode(&block, k);
+            }
+            if let Some((out, errors)) = decode_with_erasures(&block, k, &erased) {
+                assert_eq!(out.len(), n);
+                assert!(syndromes_vanish(&out, k));
+                let changed = (0..n)
+                    .filter(|&i| out[i] != block[i] % MOD && !erased.contains(&i))
+                    .count();
+                assert_eq!(changed, errors);
+                assert!(2 * errors + erased.len() <= k);
             }
         }
     }

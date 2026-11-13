@@ -523,9 +523,9 @@ fn decode_png_bytes(bytes: &[u8]) -> Result<Vec<Symbol>, String> {
     let luma = rgba_to_luma(&rgba.data);
     let frame = GrayFrame::new(&luma, w, h).map_err(|e| e.to_string())?;
 
-    // One shared decode entry point (see `anyd::pipeline::scan_all`) drives every
+    // One shared decode entry point (see `anyd::pipeline::scan_image`) drives every
     // front-end, so the CLI and the WebAssembly demo can never disagree on what decodes.
-    Ok(anyd::pipeline::scan_all(&frame))
+    Ok(anyd::pipeline::scan_image(&frame))
 }
 
 /// ITU-R BT.601 luma from RGBA, composited over a white page: transparent pixels

@@ -5,7 +5,7 @@
 // bytes) or `N.sjis` (the text in Shift-JIS); a PNG with neither must not read (a false-positive set). `ci/fetch-corpus.sh`
 // fetches the ZXing blackbox sets in this layout.
 //
-// Default: `pipeline::scan_all` on the whole image, as the CLI does. `--live`: the
+// Default: `pipeline::scan_image` on the whole image, as the CLI does. `--live`: the
 // demo's path — `detect::locate`, a decode of each padded crop, then `scan_2d` on the
 // frame. `-v` lists every image that did not read; `--scale=<n>` enlarges each image
 // by pixel replication first (to tell a resolution limit from anything else).
@@ -83,7 +83,49 @@ fn matches(symbol: &Symbol, want: &[u8]) -> bool {
         b
     };
     let latin1: String = got.iter().map(|&b| b as char).collect();
-    got == want || trim(&got) == trim(want) || latin1.as_bytes() == want
+    // A Code 39 symbol does not say whether it is Full ASCII; the reader reports the
+    // characters as printed and the corpus expects the pairs resolved.
+    let full_ascii = (symbol.symbology == anyd::Symbology::Code39).then(|| code39_full_ascii(&got));
+    got == want
+        || trim(&got) == trim(want)
+        || latin1.as_bytes() == want
+        || full_ascii.flatten().is_some_and(|f| f == trim(want))
+}
+
+/// Resolve Code 39 Full ASCII shift pairs (`+A` → `a`, `/A` → `!`, …); `None` if
+/// a shift character is not followed by a letter it combines with.
+fn code39_full_ascii(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        let c = data[i];
+        if !matches!(c, b'+' | b'/' | b'%' | b'$') || i + 1 >= data.len() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let n = data[i + 1];
+        if !n.is_ascii_uppercase() {
+            return None;
+        }
+        let k = n - b'A';
+        out.push(match (c, n) {
+            (b'+', _) => b'a' + k,
+            (b'$', _) => 1 + k,
+            (b'/', b'A'..=b'O') => b'!' + k,
+            (b'/', b'Z') => b':',
+            (b'%', b'A'..=b'E') => 27 + k,
+            (b'%', b'F'..=b'J') => b';' + (n - b'F'),
+            (b'%', b'K'..=b'O') => b'[' + (n - b'K'),
+            (b'%', b'P'..=b'T') => b'{' + (n - b'P'),
+            (b'%', b'U') => 0,
+            (b'%', b'V') => b'@',
+            (b'%', b'W') => b'`',
+            _ => return None,
+        });
+        i += 2;
+    }
+    Some(out)
 }
 
 fn main() {
@@ -138,7 +180,7 @@ fn main() {
             let found = if use_live {
                 live(&luma, w, h)
             } else {
-                anyd::pipeline::scan_all(&GrayFrame::new(&luma, w, h).unwrap())
+                anyd::pipeline::scan_image(&GrayFrame::new(&luma, w, h).unwrap())
             };
             let dt = t.elapsed().as_secs_f64() * 1000.0;
             ms += dt;

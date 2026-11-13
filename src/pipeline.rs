@@ -96,6 +96,64 @@ pub fn scan_all(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
     found
 }
 
+/// Decode a whole **still image**: [`scan_all`], and when that finds nothing, the
+/// linear symbologies once more with a margin of paper added around the frame.
+///
+/// A picture that *is* a barcode — exported by software, or cropped to the bars — has
+/// little or no quiet zone of its own, and a bar touching the frame's edge is one
+/// whose far side nobody saw. In a still, the edge of the picture is the edge of what
+/// there was to see, and stands for the quiet zone. Not so for a crop of a live frame,
+/// whose edge may cut through a longer symbol and leave a fragment that reads as a
+/// shorter one: live front-ends keep to [`scan_all`] and [`scan_linear_at`].
+pub fn scan_image(frame: &crate::image::GrayFrame<'_>) -> Vec<Symbol> {
+    let found = scan_all(frame);
+    if !found.is_empty() {
+        return found;
+    }
+    let (w, h) = (frame.width(), frame.height());
+    if w < 8 || h < 2 {
+        return found;
+    }
+    // Paper: the level a tenth of the pixels are lighter than.
+    let mut hist = [0usize; 256];
+    for y in 0..h {
+        for x in 0..w {
+            hist[frame.get_unchecked(x, y) as usize] += 1;
+        }
+    }
+    let mut above = 0;
+    let paper = (0..=255u8)
+        .rev()
+        .find(|&l| {
+            above += hist[l as usize];
+            above * 10 >= w * h
+        })
+        .unwrap_or(255);
+    let (px, py) = ((w / 6).max(24), (h / 6).max(8));
+    let (pw, ph) = (w + 2 * px, h + 2 * py);
+    let mut padded = alloc::vec![paper; pw * ph];
+    for y in 0..h {
+        for x in 0..w {
+            padded[(y + py) * pw + x + px] = frame.get_unchecked(x, y);
+        }
+    }
+    let Ok(padded) = crate::image::GrayFrame::new(&padded, pw, ph) else {
+        return found;
+    };
+    let mut found = scan_1d(&padded);
+    for sym in &mut found {
+        if let Some(location) = sym.location.as_mut() {
+            location.outline = crate::geometry::Quad::new(location.outline.corners.map(|p| {
+                crate::geometry::Point::new(
+                    (p.x - px as f32).clamp(0.0, (w - 1) as f32),
+                    (p.y - py as f32).clamp(0.0, (h - 1) as f32),
+                )
+            }));
+        }
+    }
+    found
+}
+
 /// Decode only the **2D / self-localizing** symbologies (QR, Data Matrix, Aztec,
 /// Micro QR, rMQR, PDF417, MicroPDF417, App Clip Code) from `frame`.
 ///

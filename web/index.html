@@ -178,7 +178,7 @@ function callJson(fn, w, h, luma) {
   wasm.dealloc(ptr, luma.length);
   return JSON.parse(new TextDecoder().decode(takeBytes(packed)) || '[]');
 }
-const decode = (img) => { const { w, h, luma } = lumaFrom(img); return callJson(wasm.decode, w, h, luma); };
+const decode = (img) => { const { w, h, luma } = lumaFrom(img); return callJson(wasm.decode_image || wasm.decode, w, h, luma); };
 const locateLuma = (w, h, luma) => callJson(wasm.locate, w, h, luma);
 // App Clip Code generation returns an SVG document rather than a module grid.
 function appclipSVG(url, opts) {

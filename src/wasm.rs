@@ -168,9 +168,25 @@ pub unsafe extern "C" fn decode(w: usize, h: usize, luma_ptr: *const u8) -> u64 
         return export(b"[]".to_vec());
     };
 
-    // Same shared decode entry point as the CLI (`crate::pipeline::scan_all`), so the
-    // demo and the command line always agree on what a frame decodes to.
+    // The entry point for a crop of a live frame (`crate::pipeline::scan_all`); a
+    // whole picture goes to `decode_image`.
     export(symbols_json(&crate::pipeline::scan_all(&frame)))
+}
+
+/// Decode all codes in a whole still image (an uploaded file, not a crop of a live
+/// frame); same input and output as [`decode`].
+///
+/// # Safety
+/// `luma_ptr` must point to `w*h` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn decode_image(w: usize, h: usize, luma_ptr: *const u8) -> u64 {
+    let Some(frame) = (unsafe { frame_input(w, h, luma_ptr) }) else {
+        return export(b"[]".to_vec());
+    };
+
+    // Same shared entry point as the CLI (`crate::pipeline::scan_image`), so the demo
+    // and the command line always agree on what a picture decodes to.
+    export(symbols_json(&crate::pipeline::scan_image(&frame)))
 }
 
 /// Decode only the **linear-textured** symbologies — 1D, and the stacked PDF417 family —

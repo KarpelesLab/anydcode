@@ -45,6 +45,12 @@
 //!   as located and then with its four corners nudged to where the fixed patterns and
 //!   the data modules read best (`refine_projection`, which also searches for the
 //!   corner opposite the finders). This is what small out-of-focus phone captures need.
+//! - **Elastic grid** — where a symbol on cloth or a crease is not a plane, a lattice
+//!   of control nodes lets the grid give by up to a module and a half, each node moved
+//!   to where the modules around it read best (`ElasticGrid`).
+//! - **Image-filling symbols** — a symbol written by software straight to a file, down
+//!   to a pixel a module with no quiet zone, is placed from its bounding box and the
+//!   finder edges at three of its corners, with no finder search (`pure_symbol`).
 //! - **Size rescue** — a blurred or tilted capture miscounts its modules, and a grid
 //!   one version out shows no timing track; triples whose corners are finders in grey
 //!   levels are re-posed at the neighbouring versions and the best-agreeing one read.
@@ -148,6 +154,28 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
         let Some(bin) = binarize(frame, pass) else {
             break;
         };
+        // A symbol written straight to an image file needs no finding at all.
+        if pass == 0
+            && let Some(located) = pure_symbol(&bin)
+        {
+            // Otsu's cut on a two-level image sits on the lower level itself, which
+            // no average of taps is at or under: cut halfway between the extremes.
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for y in 0..frame.height() {
+                for x in 0..frame.width() {
+                    let p = frame.get_unchecked(x, y);
+                    lo = lo.min(p);
+                    hi = hi.max(p);
+                }
+            }
+            let cut = ((u16::from(lo) + u16::from(hi)) / 2) as u8;
+            let matrix = located.sample(frame, &ModuleThreshold::Global(cut));
+            if recovered_grid(&matrix)
+                && let Ok(sym) = decoder.decode_matrix(&matrix)
+            {
+                return Ok(placed(sym, &located));
+            }
+        }
         let mut dewarps = 0;
         let mut sharpened = 0;
         let mut rescues = 0;
@@ -247,6 +275,18 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                                 return Ok(placed(sym, &located));
                             }
                         }
+                        // A surface that is not flat: let the grid give with it.
+                        if let Some(elastic) = ElasticGrid::fit(frame, &located, &refined) {
+                            let matrix = located.sample_sharpened(frame, SHARPEN, |x, y| {
+                                let (dx, dy) = elastic.at(x, y);
+                                refined.map(x + dx, y + dy)
+                            });
+                            if recovered_grid(&matrix)
+                                && let Ok(sym) = decoder.decode_matrix(&matrix)
+                            {
+                                return Ok(placed(sym, &located));
+                            }
+                        }
                     }
                     // The single-homography sample failed. If this symbol carries
                     // interior alignment patterns (version ≥ 2), fit a smooth non-planar
@@ -307,6 +347,103 @@ const MIN_FIXED_AGREEMENT: f32 = 0.45;
 /// How much of the difference between a module and its neighbours' mean is added
 /// back to undo blur between modules.
 const SHARPEN: f32 = 1.0;
+
+/// The placement of a symbol that fills the image squarely: one written by software
+/// straight to a file, upright or turned by quarter turns, with little or no quiet
+/// zone and as little as a pixel to the module. `None` for anything else, decided
+/// from the dark pixels' bounding box and the corners of it alone.
+///
+/// Such an image defeats the finder search — at a pixel a module the data is full of
+/// 1:1:3:1:1 runs, and a centre known to half a pixel is half a module out — while
+/// its geometry is given: the box is the symbol, and the solid edge of a finder at
+/// three of its corners, seven modules long, gives the module pitch.
+fn pure_symbol(bin: &Binary) -> Option<Located> {
+    let (w, h) = (bin.width(), bin.height());
+    let row_dark = |y: usize| (0..w).any(|x| bin.dark(x, y));
+    let col_dark = |x: usize| (0..h).any(|y| bin.dark(x, y));
+    let y0 = (0..h).find(|&y| row_dark(y))?;
+    let y1 = (y0..h).rev().find(|&y| row_dark(y))?;
+    let x0 = (0..w).find(|&x| col_dark(x))?;
+    let x1 = (x0..w).rev().find(|&x| col_dark(x))?;
+    let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
+    if bw < 21 || bw.abs_diff(bh) > 1 + bw / 50 {
+        return None;
+    }
+    // The dark run from each corner of the box along both its edges: the outer ring
+    // of a finder, seven modules each way, at three of the four.
+    let run = |cx: usize, cy: usize, dx: isize, dy: isize| -> usize {
+        let mut n = 0;
+        let (mut x, mut y) = (cx as isize, cy as isize);
+        while x >= x0 as isize
+            && x <= x1 as isize
+            && y >= y0 as isize
+            && y <= y1 as isize
+            && bin.dark(x as usize, y as usize)
+        {
+            n += 1;
+            x += dx;
+            y += dy;
+        }
+        n
+    };
+    let corners = [
+        (x0, y0, 1, 1),
+        (x1, y0, -1, 1),
+        (x1, y1, -1, -1),
+        (x0, y1, 1, -1),
+    ];
+    let runs = corners.map(|(cx, cy, dx, dy)| {
+        let (along, down) = (run(cx, cy, dx, 0), run(cx, cy, 0, dy));
+        // The same length both ways, or no finder.
+        (along >= 7 && along.abs_diff(down) <= 1 + along / 8)
+            .then_some((along + down) as f32 / 14.0)
+    });
+    // Exactly one corner without: the one opposite the top-left finder.
+    let mut missing = runs.iter().enumerate().filter(|(_, r)| r.is_none());
+    let (q, _) = missing.next()?;
+    if missing.next().is_some() {
+        return None;
+    }
+    let pitches: Vec<f32> = runs.iter().flatten().copied().collect();
+    let pitch = pitches.iter().sum::<f32>() / 3.0;
+    if pitches
+        .iter()
+        .any(|p| (p - pitch).abs() > 0.15 * pitch + 0.2)
+    {
+        return None;
+    }
+    let estimate = bw as f32 / pitch;
+    let dimension = snap_dimension(estimate)?;
+    if (estimate - dimension as f32).abs() > 1.5 || dimension > 177 {
+        return None;
+    }
+    // The pitch that fits the box exactly, and the finder centres 3.5 modules in.
+    let (mx, my) = (bw as f32 / dimension as f32, bh as f32 / dimension as f32);
+    let centre = |i: usize| {
+        let (cx, cy, dx, dy) = corners[i % 4];
+        // Pixel centres sit on whole coordinates: the box's edges are half a pixel out.
+        let edge = |c: usize, d: isize| c as f32 - d as f32 * 0.5;
+        Point::new(
+            edge(cx, dx) + dx as f32 * 3.5 * mx,
+            edge(cy, dy) + dy as f32 * 3.5 * my,
+        )
+    };
+    let (tl, tr, bl) = (centre(q + 2), centre(q + 3), centre(q + 1));
+    let (src, dst) = parallelogram(tl, tr, bl, dimension as f64);
+    Some(Located {
+        projection: Projection::quad_to_quad(src, dst),
+        dimension,
+        threshold: bin.threshold,
+        local: false,
+        corners: [
+            tl,
+            tr,
+            Point::new(tr.x + bl.x - tl.x, tr.y + bl.y - tl.y),
+            bl,
+        ],
+        module_size: (mx + my) / 2.0,
+    })
+}
 
 /// Located hypotheses (dim > 21) retained for the fourth-corner refinement fallback.
 const REFINE_HYPOTHESES: usize = 4;
@@ -466,6 +603,12 @@ pub fn sample_grids(frame: &GrayFrame<'_>) -> Vec<BitMatrix> {
             if plausible_grid(&located.sample_fixed(frame, &thr)) {
                 grids.push(located.sample(frame, &thr));
                 let (refined, _) = refine_projection(frame, &located);
+                if let Some(elastic) = ElasticGrid::fit(frame, &located, &refined) {
+                    grids.push(located.sample_sharpened(frame, SHARPEN, |x, y| {
+                        let (dx, dy) = elastic.at(x, y);
+                        refined.map(x + dx, y + dy)
+                    }));
+                }
                 for projection in [located.projection, refined] {
                     grids.push(
                         located.sample_sharpened(frame, SHARPEN, |x, y| projection.map(x, y)),
@@ -1145,8 +1288,10 @@ fn refine_projection(frame: &GrayFrame<'_>, located: &Located) -> (Projection, f
     // that range before anything is fine-tuned.
     let module = f64::from(located.module_size.max(1.0));
     let far = quad[2];
-    for gy in -FAR_CORNER_REACH..=FAR_CORNER_REACH {
-        for gx in -FAR_CORNER_REACH..=FAR_CORNER_REACH {
+    // A tilt displaces the corner in proportion to the symbol's size.
+    let reach = FAR_CORNER_REACH.max(dim as i32 / 6);
+    for gy in -reach..=reach {
+        for gx in -reach..=reach {
             let mut trial = quad;
             trial[2] = (
                 far.0 + f64::from(gx) * 0.75 * module,
@@ -1192,6 +1337,166 @@ fn refine_projection(frame: &GrayFrame<'_>, located: &Located) -> (Projection, f
         parts(&quad).0 / fixed_count as f32,
     )
 }
+
+/// Modules between the control nodes of [`ElasticGrid`].
+const ELASTIC_PITCH: usize = 4;
+
+/// The largest symbol [`ElasticGrid`] is fitted to: its cost grows with the module
+/// count, and a surface that bends within a symbol this fine resolves nothing anyway.
+const ELASTIC_MAX_DIM: usize = 77;
+
+/// A grid that gives where the surface does: a lattice of control nodes every
+/// [`ELASTIC_PITCH`] modules, each carrying a small displacement (in modules), with
+/// the displacement of any point interpolated between the four nodes around it.
+///
+/// A label on cloth, a bottle or a creased page is not a plane, and no homography
+/// samples all of it at module centres; it is, though, close to one everywhere, and
+/// the departure changes slowly. The fit starts from the planar placement and moves
+/// one node at a time by a fraction of a module, keeping a move when the modules
+/// around the node read more decisively dark or light and the fixed patterns among
+/// them more as laid out — the measure [`refine_projection`] uses, taken locally — and
+/// when it does not tear the node away from its neighbours.
+struct ElasticGrid {
+    /// Nodes per side.
+    nodes: usize,
+    /// Displacement of each node, in modules.
+    shift: Vec<(f32, f32)>,
+}
+
+impl ElasticGrid {
+    /// The displacement at grid position `(x, y)`, in modules.
+    fn at(&self, x: f64, y: f64) -> (f64, f64) {
+        let last = (self.nodes - 1) as f64;
+        let (u, v) = (
+            (x / ELASTIC_PITCH as f64).clamp(0.0, last),
+            (y / ELASTIC_PITCH as f64).clamp(0.0, last),
+        );
+        let (i, j) = (
+            (u as usize).min(self.nodes - 2),
+            (v as usize).min(self.nodes - 2),
+        );
+        let (fu, fv) = (u - i as f64, v - j as f64);
+        let node = |i: usize, j: usize| self.shift[j * self.nodes + i];
+        let mix = |a: f32, b: f32, c: f32, d: f32| {
+            (f64::from(a) * (1.0 - fu) + f64::from(b) * fu) * (1.0 - fv)
+                + (f64::from(c) * (1.0 - fu) + f64::from(d) * fu) * fv
+        };
+        let (a, b, c, d) = (
+            node(i, j),
+            node(i + 1, j),
+            node(i, j + 1),
+            node(i + 1, j + 1),
+        );
+        (mix(a.0, b.0, c.0, d.0), mix(a.1, b.1, c.1, d.1))
+    }
+
+    /// Fit the grid of `located` as placed by `projection`. `None` for a symbol too
+    /// large, or too flat in tone to measure.
+    fn fit(frame: &GrayFrame<'_>, located: &Located, projection: &Projection) -> Option<Self> {
+        let dim = located.dimension;
+        if dim > ELASTIC_MAX_DIM {
+            return None;
+        }
+        let nodes = dim.div_ceil(ELASTIC_PITCH) + 1;
+        let mut grid = ElasticGrid {
+            nodes,
+            shift: vec![(0.0, 0.0); nodes * nodes],
+        };
+        let lum = |grid: &ElasticGrid, x: usize, y: usize| -> f32 {
+            let (gx, gy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let (dx, dy) = grid.at(gx, gy);
+            let (px, py) = projection.map(gx + dx, gy + dy);
+            sample_bilinear(frame, px, py) as f32
+        };
+        let mut lums: Vec<f32> = (0..dim * dim)
+            .map(|k| lum(&grid, k % dim, k / dim))
+            .collect();
+        lums.sort_by(f32::total_cmp);
+        let (lo, hi) = (lums[lums.len() / 10], lums[lums.len() * 9 / 10]);
+        if hi - lo < 8.0 {
+            return None;
+        }
+        let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0);
+        let fixed: Vec<Option<bool>> = (0..dim * dim)
+            .map(|k| fixed_module(dim, k % dim, k / dim))
+            .collect();
+
+        // How well the modules a node moves read, with the node where it is.
+        let around = |grid: &ElasticGrid, i: usize, j: usize| -> f32 {
+            let span = |n: usize| {
+                let lo = (n * ELASTIC_PITCH).saturating_sub(ELASTIC_PITCH);
+                lo..((n + 1) * ELASTIC_PITCH).min(dim)
+            };
+            let mut sum = 0f32;
+            for y in span(j) {
+                for x in span(i) {
+                    let n = ((lum(grid, x, y) - mid) / half).clamp(-1.0, 1.0);
+                    sum += match fixed[y * dim + x] {
+                        Some(true) => -n,
+                        Some(false) => n,
+                        None => REFINE_DATA_WEIGHT * n.abs(),
+                    };
+                }
+            }
+            sum
+        };
+        // What a node's departure from the mean of its neighbours costs.
+        let strain = |grid: &ElasticGrid, i: usize, j: usize| -> f32 {
+            let (mut sx, mut sy, mut n) = (0f32, 0f32, 0f32);
+            for (di, dj) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let (ni, nj) = (i as i32 + di, j as i32 + dj);
+                if ni < 0 || nj < 0 || ni >= nodes as i32 || nj >= nodes as i32 {
+                    continue;
+                }
+                let s = grid.shift[nj as usize * nodes + ni as usize];
+                sx += s.0;
+                sy += s.1;
+                n += 1.0;
+            }
+            let s = grid.shift[j * nodes + i];
+            let (ex, ey) = (s.0 - sx / n, s.1 - sy / n);
+            ELASTIC_STIFFNESS * (ex * ex + ey * ey)
+        };
+        for step in [0.3f32, 0.15] {
+            for _sweep in 0..3 {
+                let mut moved = false;
+                for j in 0..nodes {
+                    for i in 0..nodes {
+                        let k = j * nodes + i;
+                        let start = grid.shift[k];
+                        let mut best = (around(&grid, i, j) - strain(&grid, i, j), start);
+                        for (dx, dy) in [(-step, 0.0), (step, 0.0), (0.0, -step), (0.0, step)] {
+                            let trial = (start.0 + dx, start.1 + dy);
+                            if trial.0.abs() > ELASTIC_MAX_SHIFT
+                                || trial.1.abs() > ELASTIC_MAX_SHIFT
+                            {
+                                continue;
+                            }
+                            grid.shift[k] = trial;
+                            let s = around(&grid, i, j) - strain(&grid, i, j);
+                            if s > best.0 {
+                                best = (s, trial);
+                            }
+                        }
+                        grid.shift[k] = best.1;
+                        moved |= best.1 != start;
+                    }
+                }
+                if !moved {
+                    break;
+                }
+            }
+        }
+        Some(grid)
+    }
+}
+
+/// How strongly an [`ElasticGrid`] node is held to the mean of its neighbours, per
+/// squared module of departure — against a gain of at most one per module read.
+const ELASTIC_STIFFNESS: f32 = 30.0;
+
+/// The furthest an [`ElasticGrid`] node moves, in modules.
+const ELASTIC_MAX_SHIFT: f32 = 1.5;
 
 /// Local-contrast midpoint `(min + max)/2` of luminance over a `±win`-pixel window centred
 /// on `(cx, cy)`.

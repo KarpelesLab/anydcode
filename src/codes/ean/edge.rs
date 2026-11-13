@@ -313,8 +313,11 @@ const MIN_CONSENSUS_VOTES: u32 = 2;
 /// that *is* a UPC-E, quiet zone included; only the couple of lines exiting at exactly
 /// that module see it, whereas a real UPC-E is read by every line crossing it.
 const MIN_UPCE_VOTES: u32 = 5;
-/// The winning value must additionally out-poll the runner-up by this factor, so a
-/// scanline set split between two readings is treated as unresolved rather than guessed.
+/// The winning value must additionally out-poll the runner-up by more than this
+/// factor, so a scanline set split between two readings is treated as unresolved
+/// rather than guessed. (Two lines against one is such a split: on a blurred capture
+/// the pair is as likely two misreads of the same digits, which the single check
+/// digit passes one time in ten.)
 const DOMINANCE: u32 = 2;
 
 /// Robustly read an EAN/UPC symbol from a frame by decoding every fine scanline
@@ -354,7 +357,7 @@ pub(crate) fn scan_analysis(analysis: &Analysis) -> Option<Symbol> {
         Some((_, _, sym)) if sym.symbology == Symbology::UpcE => MIN_UPCE_VOTES,
         _ => MIN_CONSENSUS_VOTES,
     };
-    if top < floor || top < DOMINANCE * runner_up {
+    if top < floor || (runner_up > 0 && top <= DOMINANCE * runner_up) {
         return None;
     }
     tally.into_iter().next().map(|(_, _, s)| s)

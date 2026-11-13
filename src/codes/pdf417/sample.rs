@@ -702,6 +702,9 @@ struct Cw {
 fn crossing(p: &[f32], a: usize, b: usize, hyst: f32) -> f32 {
     /// Samples a shelf must hold its level for.
     const SHELF: usize = 4;
+    /// Least rise of a shelf above the bar, as a share of the whole swing: a wide bar
+    /// is not evenly black, and the lighter stretch of its ink is not the page.
+    const SHELF_RISE: f32 = 0.15;
     let rising = p[b] > p[a];
     let n = b - a;
     // The profile seen from the valley outwards.
@@ -715,7 +718,7 @@ fn crossing(p: &[f32], a: usize, b: usize, hyst: f32) -> f32 {
             hi = hi.max(v(j));
             sum += v(j);
         }
-        if lo - dark >= hyst && hi - lo <= 0.75 * hyst {
+        if lo - dark >= hyst.max(SHELF_RISE * (peak - dark)) && hi - lo <= 0.75 * hyst {
             let level = sum / SHELF as f32;
             if peak - level >= hyst {
                 (light, end) = (level, k + SHELF - 1);
@@ -2277,6 +2280,29 @@ mod tests {
         let mut unread = clean;
         unread[4] = None;
         assert!(grid.correct(&unread).is_none());
+    }
+
+    #[test]
+    fn a_wide_bar_of_uneven_ink_keeps_its_edge() {
+        // The start pattern's bar as a photograph shows it (ZXing's pdf417-2/01): the
+        // ink is a few levels lighter along most of the bar than at its darkest spot.
+        // That stretch is not a shelf of page beside a narrower bar.
+        let profile: [f32; 48] = [
+            141., 142., 142., 142., 142., 141., 140., 141., 142., 142., 141., 139., 135., 119.,
+            72., 28., 21., 19., 20., 19., 18., 18., 18., 22., 22., 20., 20., 20., 22., 23., 21.,
+            19., 18., 19., 20., 18., 15., 13., 14., 19., 40., 82., 121., 129., 112., 69., 37., 49.,
+        ];
+        let mut edges = Vec::new();
+        find_edges(&profile, 6.75, &mut edges);
+        assert!(edges.len() >= 2, "{edges:?}");
+        assert!(
+            edges[0].dark && (edges[0].pos - 14.0).abs() < 0.7,
+            "{edges:?}"
+        );
+        assert!(
+            !edges[1].dark && (edges[1].pos - 40.7).abs() < 0.7,
+            "{edges:?}"
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //!
 //! Aztec uses several fields depending on the codeword size: GF(16) for the mode
 //! message (4-bit words), GF(64) for 6-bit data words (1–2 layers), GF(256) for
-//! 8-bit words (3–8 layers) and GF(1024) for 10-bit words (9–22 layers). Unlike QR,
+//! 8-bit words (3–8 layers), GF(1024) for 10-bit words (9–22 layers) and GF(4096)
+//! for 12-bit words (23–32 layers). Unlike QR,
 //! the Reed–Solomon generator's first root is `α¹` (generator base 1), per
 //! ISO/IEC 24778.
 //!
@@ -18,7 +19,7 @@ pub struct Gf {
     exp: Vec<u16>,
     /// `log[x]` is the discrete log of `x`; `log[0]` is unused.
     log: Vec<u16>,
-    /// Field order (number of elements), e.g. 16, 64, 256, 1024.
+    /// Field order (number of elements), e.g. 16, 64, 256, 1024, 4096.
     size: usize,
     /// Exponent of the first root of the RS generator polynomial.
     base: usize,
@@ -60,6 +61,7 @@ impl Gf {
             6 => Gf::new(64, 0b100_0011, 1),         // x^6 + x + 1
             8 => Gf::new(256, 0b1_0010_1101, 1),     // x^8 + x^5 + x^3 + x^2 + 1
             10 => Gf::new(1024, 0b100_0000_1001, 1), // x^10 + x^3 + 1
+            12 => Gf::new(4096, 0b1_0000_0110_1001, 1), // x^12 + x^6 + x^5 + x^3 + 1
             _ => return None,
         })
     }

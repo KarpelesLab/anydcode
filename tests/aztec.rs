@@ -403,7 +403,7 @@ fn structured_append_header_is_not_read_as_payload() {
 
 #[test]
 fn unsupported_layer_counts_are_errors_not_panics() {
-    // Hand-built metadata outside the supported sizes (compact 1-4, full 1-22 layers)
+    // Hand-built metadata outside the supported sizes (compact 1-4, full 1-32 layers)
     // must be rejected cleanly, whatever the payload length.
     let enc = AztecEncoder::new();
     for (compact, layers) in [
@@ -411,8 +411,7 @@ fn unsupported_layer_counts_are_errors_not_panics() {
         (true, 5),
         (true, 23),
         (false, 0),
-        (false, 23),
-        (false, 32),
+        (false, 33),
         (false, 255),
     ] {
         for len in [1usize, 40, 1500] {
@@ -520,7 +519,7 @@ fn every_length_up_to_capacity_round_trips() {
     for fill in fills {
         let mut refused = false;
         let mut len = 1usize;
-        while len < 2600 {
+        while len < 5200 {
             let payload: Vec<u8> = (0..len).map(fill).collect();
             match enc.build(vec![Segment::byte(payload.clone())]) {
                 Ok(symbol) => {
@@ -592,4 +591,54 @@ fn api_misuse_is_an_error() {
         AztecDecoder::new().decode(&linear),
         Err(anyd::Error::Unsupported { .. })
     ));
+}
+
+/// The largest full-range symbols, 23 to 32 layers, carry 12-bit codewords over
+/// GF(4096): each round-trips, corrects damage, and is what a long payload gets.
+#[test]
+fn twelve_bit_layers_round_trip() {
+    let enc = AztecEncoder::new();
+    let dec = AztecDecoder::new();
+    for layers in 23u8..=32 {
+        let payload: Vec<u8> = (0..1200usize).map(|i| b' ' + (i * 7 % 90) as u8).collect();
+        let symbol = anyd::symbol::Symbol::new(
+            anyd::symbology::Symbology::Aztec,
+            vec![Segment::byte(payload.clone())],
+            SymbolMeta::Aztec(anyd::codes::aztec::AztecMeta {
+                compact: false,
+                layers,
+                rune: false,
+            }),
+        );
+        let encoding = enc.encode(&symbol).unwrap();
+        let Encoding::Matrix(matrix) = &encoding else {
+            panic!("Aztec encodes to a matrix");
+        };
+        assert_eq!(
+            matrix.width(),
+            [0, 113, 117, 121, 125, 131, 135, 139, 143, 147, 151][layers as usize - 22]
+        );
+        let decoded = dec.decode(&encoding).unwrap();
+        assert_eq!(decoded, symbol, "{layers} layers");
+        assert_eq!(enc.encode(&decoded).unwrap(), encoding);
+        // A block of damaged modules away from the bullseye is corrected.
+        let mut damaged = matrix.clone();
+        for y in 2..14 {
+            for x in 2..14 {
+                let dark = damaged.get(x, y);
+                damaged.set(x, y, !dark);
+            }
+        }
+        let repaired = dec.decode(&Encoding::Matrix(damaged)).unwrap();
+        assert_eq!(repaired.payload_bytes(), payload, "{layers} layers");
+    }
+    // The automatic size goes past 22 layers when the data needs it.
+    let long: Vec<u8> = (0..2500usize).map(|i| b'a' + (i % 26) as u8).collect();
+    let symbol = enc.build(vec![Segment::byte(long.clone())]).unwrap();
+    let SymbolMeta::Aztec(meta) = &symbol.meta else {
+        panic!("no Aztec meta");
+    };
+    assert!(meta.layers > 22, "{}", meta.layers);
+    let decoded = dec.decode(&enc.encode(&symbol).unwrap()).unwrap();
+    assert_eq!(decoded.payload_bytes(), long);
 }

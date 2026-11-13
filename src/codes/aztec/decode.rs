@@ -76,7 +76,7 @@ impl AztecDecoder {
         }
 
         let gf = Gf::for_word_size(w).ok_or(Error::Unsupported {
-            what: "Aztec symbols above 22 layers",
+            what: "Aztec symbols above 32 layers",
         })?;
         let ec = total_words - data_words;
         if !rs_decode(&gf, &mut words, ec) {
@@ -151,7 +151,7 @@ fn detect_size(size: usize, m: &BitMatrix) -> Result<(bool, usize)> {
     let compact_layers = (size >= 15 && (size - 11).is_multiple_of(4) && (size - 11) / 4 <= 4)
         .then(|| (size - 11) / 4)
         .filter(|&l| l >= 1);
-    let full_layers = (1..=22).find(|&l| full_size(l) == size);
+    let full_layers = (1..=32).find(|&l| full_size(l) == size);
 
     let center = size / 2;
     match (compact_layers, full_layers) {

@@ -1,14 +1,14 @@
 //! Aztec Code (ISO/IEC 24778) encoder and structural decoder.
 //!
 //! Layout:
-//! - [`gf`]        — Galois-field arithmetic and Reed–Solomon over GF(16/64/256/1024).
+//! - [`gf`]        — Galois-field arithmetic and Reed–Solomon over GF(16/64/256/1024/4096).
 //! - `tables`      — the five high-level character sets, codeword sizes and capacities.
 //! - `layout`      — bullseye, orientation marks, reference grid and the spiral path.
 //! - `highlevel`   — payload bytes ⇄ mode-switched bit stream, plus bit-stuffing.
 //! - `encode`      — [`Symbol`] → [`BitMatrix`].
 //! - `decode`      — [`BitMatrix`] → [`Symbol`].
 //!
-//! Coverage: compact symbols (1–4 layers) and full-range symbols (1–22 layers) are
+//! Coverage: compact symbols (1–4 layers) and full-range symbols (1–32 layers) are
 //! encoded and structurally decoded. The payload round-trips losslessly (as a single
 //! byte segment) and re-encodes byte-for-byte identically. Aztec Runes (the fixed
 //! 11×11 single-byte symbol, ISO/IEC 24778 Annex A) are also supported via the same
@@ -71,7 +71,7 @@ pub struct AztecMeta {
     /// `true` for a compact symbol, `false` for a full-range symbol. Runes are
     /// compact.
     pub compact: bool,
-    /// Number of data layers (1–4 compact, 1–22 full; `0` for an Aztec Rune).
+    /// Number of data layers (1–4 compact, 1–32 full; `0` for an Aztec Rune).
     pub layers: u8,
     /// `true` for an Aztec Rune (the fixed 11×11 single-byte symbol, ISO/IEC 24778
     /// Annex A), which has no data layers.

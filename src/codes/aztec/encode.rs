@@ -113,7 +113,7 @@ pub fn choose_size(data: &[u8]) -> Result<(bool, usize, usize)> {
     let ecc_bits = hl.len() * 23 / 100 + 11;
 
     let mut candidates: Vec<(bool, usize)> = (1..=4).map(|l| (true, l)).collect();
-    candidates.extend((1..=22).map(|l| (false, l)));
+    candidates.extend((1..=32).map(|l| (false, l)));
 
     for (compact, layers) in candidates {
         let w = word_size(layers);
@@ -200,10 +200,10 @@ fn words_to_bits(words: &[u16], w: usize) -> Vec<bool> {
 
 /// Render the module matrix for `data` at a fixed `(compact, layers)` size.
 pub fn render(data: &[u8], compact: bool, layers: usize) -> Result<BitMatrix> {
-    let max_layers = if compact { 4 } else { 22 };
+    let max_layers = if compact { 4 } else { 32 };
     if !(1..=max_layers).contains(&layers) {
         return Err(Error::invalid_parameter(
-            "Aztec layer count out of range (compact 1-4, full 1-22)",
+            "Aztec layer count out of range (compact 1-4, full 1-32)",
         ));
     }
     let w = word_size(layers);

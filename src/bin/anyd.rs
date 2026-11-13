@@ -149,7 +149,11 @@ fn cmd_encode(args: &[String]) -> Result<(), String> {
 
     match format {
         "png" => {
-            let bytes = render_png(&encoding, scale)?;
+            // A MaxiCode is hexagons round a bullseye; as squares it would not scan.
+            let bytes = match &encoding {
+                Encoding::Matrix(m) if symbology == "maxicode" => maxicode_png(m, scale)?,
+                _ => render_png(&encoding, scale)?,
+            };
             match out {
                 Some(path) => {
                     std::fs::write(path, &bytes).map_err(|e| format!("writing {path}: {e}"))?
@@ -339,15 +343,16 @@ fn scaled_size(encoding: &Encoding, scale: usize) -> Result<(usize, usize), Stri
     }
 }
 
-fn render_png(encoding: &Encoding, scale: usize) -> Result<Vec<u8>, String> {
-    let scale = scale.max(1);
-    let (w, h) = scaled_size(encoding, scale)?;
-    if w.checked_mul(h).is_none_or(|n| n > MAX_PNG_PIXELS) || w.max(h) > u32::MAX as usize {
-        return Err(format!(
-            "--scale {scale} gives a {w}x{h} image (limit: {MAX_PNG_PIXELS} pixels)"
-        ));
+/// A MaxiCode as it is printed, `scale` pixels to the module (at least 2).
+fn maxicode_png(matrix: &anyd::output::BitMatrix, scale: usize) -> Result<Vec<u8>, String> {
+    if !(2..=64).contains(&scale) {
+        return Err("--scale for a MaxiCode PNG must be 2 to 64".into());
     }
-    let img = render(encoding, scale);
+    gray_png(&anyd::codes::maxicode::render_hex(matrix, scale as f32))
+}
+
+/// `img` as an 8-bit greyscale PNG.
+fn gray_png(img: &anyd::GrayImage) -> Result<Vec<u8>, String> {
     let png = oxideav_png::PngImage::packed(
         img.width() as u32,
         img.height() as u32,
@@ -357,6 +362,17 @@ fn render_png(encoding: &Encoding, scale: usize) -> Result<Vec<u8>, String> {
     )
     .map_err(|e| e.to_string())?;
     oxideav_png::encode(&png, &oxideav_png::EncodeOptions::default()).map_err(|e| e.to_string())
+}
+
+fn render_png(encoding: &Encoding, scale: usize) -> Result<Vec<u8>, String> {
+    let scale = scale.max(1);
+    let (w, h) = scaled_size(encoding, scale)?;
+    if w.checked_mul(h).is_none_or(|n| n > MAX_PNG_PIXELS) || w.max(h) > u32::MAX as usize {
+        return Err(format!(
+            "--scale {scale} gives a {w}x{h} image (limit: {MAX_PNG_PIXELS} pixels)"
+        ));
+    }
+    gray_png(&render(encoding, scale))
 }
 
 /// Render to the terminal using half-block characters (2 module rows per line).
@@ -845,5 +861,37 @@ mod tests {
         assert!(parse(&["qr", "x", "--invert=1"]).is_err());
         let opts = parse(&["qr", "x", "--scale=4"]).unwrap();
         assert_eq!(opts.options.get("scale").map(String::as_str), Some("4"));
+    }
+
+    /// `encode maxicode --format png` draws the printed symbol, which reads back.
+    #[test]
+    fn maxicode_png_is_scannable() {
+        let dir = std::env::temp_dir();
+        let png = dir.join(format!("anyd-cli-maxicode-{}.png", std::process::id()));
+        let png = png.to_str().unwrap();
+        run(&args(&[
+            "encode",
+            "maxicode",
+            "MAXI CODE",
+            "--format",
+            "png",
+            "--scale",
+            "8",
+            "--out",
+            png,
+        ]))
+        .unwrap();
+        let found = decode_png_bytes(&std::fs::read(png).unwrap()).unwrap();
+        std::fs::remove_file(png).ok();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].symbology, Symbology::MaxiCode);
+        assert_eq!(found[0].text().as_deref(), Some("MAXI CODE"));
+        // Below two pixels a module there is no hexagon to draw.
+        assert!(
+            run(&args(&[
+                "encode", "maxicode", "X", "--format", "png", "--scale", "1", "--out", png
+            ]))
+            .is_err()
+        );
     }
 }

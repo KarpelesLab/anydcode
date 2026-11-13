@@ -35,7 +35,7 @@ pub use decode::QrDecoder;
 #[cfg(feature = "encode")]
 pub use encode::QrEncoder;
 #[cfg(feature = "scan")]
-pub use sample::{QrScanner, sample_grid, scan};
+pub use sample::{QrScanner, sample_grid, sample_grids, scan};
 
 /// QR error-correction level, in ascending order of recovery capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

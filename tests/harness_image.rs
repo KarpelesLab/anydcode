@@ -265,3 +265,96 @@ fn cases() -> Vec<(Vec<Segment>, EcLevel)> {
         (vec![Segment::byte(vec![b'B'; 120])], EcLevel::M), // v7 (45)
     ]
 }
+
+// ===================================================================================
+// Phone-camera captures
+// ===================================================================================
+
+/// A symbol of the given version, at level L, filled with URL-like text.
+fn of_version(version: usize) -> (BitMatrix, Vec<u8>) {
+    let enc = QrEncoder::new();
+    let text = "http://example.com/a/rather/long/path?with=a&query=string&and=more&of=it&";
+    let fitting = |n: usize| {
+        let s: String = text.chars().cycle().take(n).collect();
+        enc.build_text(&s, EcLevel::L)
+            .ok()
+            .and_then(|sym| match enc.encode(&sym) {
+                Ok(Encoding::Matrix(m)) => Some(m.width() <= 17 + 4 * version),
+                _ => None,
+            })
+            .unwrap_or(false)
+    };
+    // The longest text that still fits this version, by bisection.
+    let (mut fits, mut over) = (1usize, 3000usize);
+    while over - fits > 1 {
+        let mid = (fits + over) / 2;
+        if fitting(mid) {
+            fits = mid;
+        } else {
+            over = mid;
+        }
+    }
+    let s: String = text.chars().cycle().take(fits).collect();
+    let symbol = enc.build_text(&s, EcLevel::L).unwrap();
+    match enc.encode(&symbol).unwrap() {
+        Encoding::Matrix(m) => {
+            assert_eq!(m.width(), 17 + 4 * version);
+            (m, symbol.payload_bytes())
+        }
+        Encoding::Linear(_) => unreachable!("QR encodes to a matrix"),
+    }
+}
+
+/// What a phone hands over: a symbol four pixels to the module, out of focus and
+/// seen at an angle. Blur greys every dark module that stands alone, and the tilt
+/// puts the corner opposite the finders modules away from where they point; at level
+/// L a handful of misread modules is all the symbol forgives.
+#[test]
+fn small_blurred_and_tilted() {
+    for version in [3, 5, 7] {
+        let (matrix, expected) = of_version(version);
+        let base = render_matrix(&matrix, 4);
+        // A quarter foreshortening is read at version 3; the larger ones to 15 %.
+        let tilts: &[(u8, f32)] = if version == 3 {
+            &[(0, 0.15), (1, 0.15), (0, 0.25), (1, 0.25)]
+        } else {
+            &[(0, 0.15), (1, 0.15)]
+        };
+        for &(tilt, amount) in tilts {
+            let img = if tilt == 0 {
+                transform::tilt_right(&base, amount)
+            } else {
+                transform::tilt_bottom(&base, amount)
+            };
+            for deg in [0.0f32, 12.0] {
+                let img = transform::rotate(&img, deg.to_radians());
+                let img = transform::gaussian_blur(&img, 1.5);
+                assert_decodes(
+                    &img,
+                    &expected,
+                    &format!("v{version} tilt{tilt} {amount} rot{deg}"),
+                );
+            }
+        }
+    }
+}
+
+/// A symbol as software writes it to a file: a pixel or two to the module and no
+/// quiet zone at all, up to the largest version.
+#[test]
+fn tiny_modules_without_a_quiet_zone() {
+    for (version, scales) in [(2, &[1usize, 2][..]), (10, &[2]), (25, &[2]), (40, &[1, 2])] {
+        let (matrix, expected) = of_version(version);
+        let dim = matrix.width();
+        for &scale in scales {
+            let mut img = GrayImage::new(dim * scale, dim * scale);
+            for y in 0..dim * scale {
+                for x in 0..dim * scale {
+                    let dark = matrix.get(x / scale, y / scale);
+                    img.set(x, y, if dark { 0 } else { 255 });
+                }
+            }
+            assert_decodes(&img, &expected, &format!("v{version} at {scale} px"));
+        }
+    }
+}

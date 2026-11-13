@@ -39,6 +39,16 @@
 //! - **Local module sampling** — each module centre is classified against a local-mean
 //!   window (from an integral image), not one global cutoff, so a gradient across the
 //!   symbol does not flip modules.
+//! - **Blurred-capture reading** — a grid that fails Reed–Solomon is read again with
+//!   each module classified against the black and white of its own neighbourhood and
+//!   the bleed between neighbouring modules taken back out (`sample_sharpened`), first
+//!   as located and then with its four corners nudged to where the fixed patterns and
+//!   the data modules read best (`refine_projection`, which also searches for the
+//!   corner opposite the finders). This is what small out-of-focus phone captures need.
+//! - **Size rescue** — a blurred or tilted capture miscounts its modules, and a grid
+//!   one version out shows no timing track; triples whose corners are finders in grey
+//!   levels are re-posed at the neighbouring versions and the best-agreeing one read.
+//!   A grid read by either recovery must wear its fixed patterns (`recovered_grid`).
 //! - **Interior fourth-corner sweep** — a decode-validated fallback that anchors the
 //!   homography on the interior bottom-right alignment position and sweeps it, bowing the
 //!   grid to follow the curvature of a label on a bottle or can. Reached only when every
@@ -131,11 +141,16 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
     // Located hypotheses that decoded neither directly, kept for the fourth-corner
     // refinement fallback below.
     let mut pending: Vec<Located> = Vec::new();
+    // Finder triples already given a rescue, so that a later binarization pass does
+    // not pay for the same one again.
+    let mut rescued: Vec<[(i32, i32); 4]> = Vec::new();
     for pass in 0.. {
         let Some(bin) = binarize(frame, pass) else {
             break;
         };
         let mut dewarps = 0;
+        let mut sharpened = 0;
+        let mut rescues = 0;
         let cands = candidates(frame, &bin);
         if std::env::var("ANYD_QR_DEBUG").is_ok() {
             eprintln!("pass {pass}: {} candidates", cands.len());
@@ -158,6 +173,57 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
             // machinery below costs far more, so the fixed patterns are read first and
             // nothing more is spent on a grid that lacks them.
             if !plausible_grid(&located.sample_fixed(frame, &thr)) {
+                // A blurred or tilted capture miscounts its modules, and a grid a
+                // version out shows no timing track. The best few triples are given
+                // the neighbouring sizes too, each nudged onto the image; the one
+                // whose fixed patterns then agree best is read.
+                let key = located
+                    .corners
+                    .map(|p| ((p.x / 4.0) as i32, (p.y / 4.0) as i32));
+                let sizes = || {
+                    let dim = located.dimension;
+                    [dim.wrapping_sub(4), dim, dim + 4]
+                        .into_iter()
+                        .filter(|d| (21..=177).contains(d))
+                        .map(|d| located.with_dimension(d))
+                };
+                // Real finders show at one of the sizes at least; a triple that only
+                // passed the run-length test on print or texture at none.
+                let finders = sizes()
+                    .map(|sized| finder_contrast(frame, &sized))
+                    .fold(0f32, f32::max);
+                if rescues < MAX_RESCUE_PER_PASS
+                    && !rescued.contains(&key)
+                    && finders >= MIN_FINDER_CONTRAST
+                {
+                    rescues += 1;
+                    rescued.push(key);
+                    let best = sizes()
+                        .map(|sized| {
+                            let (projection, agreement) = refine_projection(frame, &sized);
+                            (agreement, sized, projection)
+                        })
+                        .max_by(|a, b| a.0.total_cmp(&b.0));
+                    if std::env::var("ANYD_QR_DEBUG").is_ok()
+                        && let Some((a, l, _)) = &best
+                    {
+                        eprintln!(
+                            "  rescue dim={} -> {} agreement={a:.2} finders={finders:.2}",
+                            located.dimension, l.dimension,
+                        );
+                    }
+                    if let Some((agreement, sized, projection)) = best
+                        && agreement >= MIN_FIXED_AGREEMENT
+                    {
+                        let matrix =
+                            sized.sample_sharpened(frame, SHARPEN, |x, y| projection.map(x, y));
+                        if recovered_grid(&matrix)
+                            && let Ok(sym) = decoder.decode_matrix(&matrix)
+                        {
+                            return Ok(placed(sym, &sized));
+                        }
+                    }
+                }
                 continue;
             }
             let matrix = located.sample(frame, &thr);
@@ -165,6 +231,23 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
                 Ok(sym) => return Ok(placed(sym, &located)),
                 Err(e) => {
                     last = e;
+                    // A blurred capture: the modules read against their own
+                    // neighbourhood's black and white, with the bleed between them
+                    // taken back out — first as located, then with the grid nudged
+                    // onto the fixed patterns (see `refine_projection`).
+                    if sharpened < MAX_SHARPEN_PER_PASS {
+                        sharpened += 1;
+                        let (refined, _) = refine_projection(frame, &located);
+                        for projection in [located.projection, refined] {
+                            let matrix = located
+                                .sample_sharpened(frame, SHARPEN, |x, y| projection.map(x, y));
+                            if recovered_grid(&matrix)
+                                && let Ok(sym) = decoder.decode_matrix(&matrix)
+                            {
+                                return Ok(placed(sym, &located));
+                            }
+                        }
+                    }
                     // The single-homography sample failed. If this symbol carries
                     // interior alignment patterns (version ≥ 2), fit a smooth non-planar
                     // (thin-plate-spline) warp through every finder and alignment anchor
@@ -208,6 +291,22 @@ pub fn scan(frame: &GrayFrame<'_>) -> Result<Symbol> {
     }
     Err(last)
 }
+
+/// Per binarization pass, how many failed hypotheses get the blurred-capture reading
+/// (see [`Located::sample_sharpened`] and [`refine_projection`]).
+const MAX_SHARPEN_PER_PASS: usize = 6;
+
+/// Per binarization pass, how many implausible hypotheses are re-posed at the
+/// neighbouring sizes and refined.
+const MAX_RESCUE_PER_PASS: usize = 3;
+
+/// The least agreement of the fixed patterns (see [`refine_projection`]) for a
+/// rescued grid to be read at all.
+const MIN_FIXED_AGREEMENT: f32 = 0.45;
+
+/// How much of the difference between a module and its neighbours' mean is added
+/// back to undo blur between modules.
+const SHARPEN: f32 = 1.0;
 
 /// Located hypotheses (dim > 21) retained for the fourth-corner refinement fallback.
 const REFINE_HYPOTHESES: usize = 4;
@@ -335,6 +434,47 @@ pub fn sample_grid(frame: &GrayFrame<'_>) -> Result<BitMatrix> {
         }
     }
     first.ok_or_else(|| Error::undecodable("no QR finder patterns found"))
+}
+
+/// Every grid the ladder of [`scan`] samples before any recovery, in the order it
+/// tries them: a diagnostic for measuring how far a failed read was from the symbol.
+#[doc(hidden)]
+pub fn sample_grids(frame: &GrayFrame<'_>) -> Vec<BitMatrix> {
+    let integral = IntegralImage::from_frame(frame);
+    let mut grids = Vec::new();
+    for pass in 0.. {
+        let Some(bin) = binarize(frame, pass) else {
+            break;
+        };
+        for located in candidates(frame, &bin) {
+            let thr = located.threshold(&integral);
+            if !plausible_grid(&located.sample_fixed(frame, &thr)) {
+                let dim = located.dimension;
+                for d in [dim.wrapping_sub(4), dim, dim + 4] {
+                    if !(21..=177).contains(&d) {
+                        continue;
+                    }
+                    let sized = located.with_dimension(d);
+                    let (projection, agreement) = refine_projection(frame, &sized);
+                    if agreement >= MIN_FIXED_AGREEMENT {
+                        grids.push(
+                            sized.sample_sharpened(frame, SHARPEN, |x, y| projection.map(x, y)),
+                        );
+                    }
+                }
+            }
+            if plausible_grid(&located.sample_fixed(frame, &thr)) {
+                grids.push(located.sample(frame, &thr));
+                let (refined, _) = refine_projection(frame, &located);
+                for projection in [located.projection, refined] {
+                    grids.push(
+                        located.sample_sharpened(frame, SHARPEN, |x, y| projection.map(x, y)),
+                    );
+                }
+            }
+        }
+    }
+    grids
 }
 
 /// Geometry-only location for the cheap detection pass: the first hypothesis that
@@ -620,6 +760,21 @@ impl Located {
         }
     }
 
+    /// The same finder triple taken for a symbol of another `dimension`, its fourth
+    /// corner by the parallelogram rule.
+    fn with_dimension(&self, dimension: usize) -> Located {
+        let [tl, tr, _, bl] = self.corners;
+        let (src, dst) = parallelogram(tl, tr, bl, dimension as f64);
+        Located {
+            projection: Projection::quad_to_quad(src, dst),
+            dimension,
+            threshold: self.threshold,
+            local: self.local,
+            corners: self.corners,
+            module_size: self.module_size,
+        }
+    }
+
     /// Choose how to threshold module centres for this hypothesis. Global for the
     /// global-Otsu pass; a local-mean window (sized to the detected module) otherwise.
     fn threshold<'a>(&self, integral: &'a IntegralImage) -> ModuleThreshold<'a> {
@@ -661,6 +816,88 @@ impl Located {
         warp: &ThinPlateSpline,
     ) -> BitMatrix {
         self.sample_map(frame, thr, false, |x, y| warp.map(x, y))
+    }
+
+    /// Sample the grid for a blurred capture: read each module's luminance, undo the
+    /// bleed between neighbouring modules, and classify against the black and white
+    /// levels found around each module.
+    ///
+    /// Blur averages a module with its neighbours, so a dark module alone among
+    /// light ones reads grey — lighter than any threshold set by the solid finder
+    /// patterns — and the errors all fall one way. In the module grid the blur is a
+    /// small kernel of known shape, which `sharpen` times the difference between a
+    /// module and the mean of its eight neighbours takes back out. The levels are the
+    /// extremes of the (unsharpened) luminances within three modules, so a lighting
+    /// gradient across the symbol moves the cut with it.
+    fn sample_sharpened(
+        &self,
+        frame: &GrayFrame<'_>,
+        sharpen: f32,
+        map: impl Fn(f64, f64) -> (f64, f64),
+    ) -> BitMatrix {
+        let dim = self.dimension;
+        let tap = (self.module_size * 0.2).clamp(0.4, 6.0) as f64;
+        let mut lum = vec![0f32; dim * dim];
+        for my in 0..dim {
+            for mx in 0..dim {
+                let (px, py) = map(mx as f64 + 0.5, my as f64 + 0.5);
+                lum[my * dim + mx] = ((sample_bilinear(frame, px, py)
+                    + sample_bilinear(frame, px - tap, py)
+                    + sample_bilinear(frame, px + tap, py)
+                    + sample_bilinear(frame, px, py - tap)
+                    + sample_bilinear(frame, px, py + tap))
+                    / 5.0) as f32;
+            }
+        }
+        // Outside the symbol is the quiet zone: paper, at the level of the lightest
+        // module nearby — taken as the module's own row/column neighbour mirrored.
+        let at = |x: isize, y: isize| -> f32 {
+            let cx = x.clamp(0, dim as isize - 1) as usize;
+            let cy = y.clamp(0, dim as isize - 1) as usize;
+            lum[cy * dim + cx]
+        };
+        let mut matrix = BitMatrix::new(dim, dim, QUIET_ZONE);
+        const REACH: isize = 3;
+        for my in 0..dim as isize {
+            for mx in 0..dim as isize {
+                let (mut lo, mut hi, mut ring) = (f32::MAX, f32::MIN, 0f32);
+                for dy in -REACH..=REACH {
+                    for dx in -REACH..=REACH {
+                        let (x, y) = (mx + dx, my + dy);
+                        if x < 0 || y < 0 || x >= dim as isize || y >= dim as isize {
+                            continue;
+                        }
+                        let v = lum[y as usize * dim + x as usize];
+                        lo = lo.min(v);
+                        hi = hi.max(v);
+                    }
+                }
+                for (dx, dy) in [
+                    (-1, -1),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
+                    let (x, y) = (mx + dx, my + dy);
+                    // Past the edge lies the quiet zone, as light as it gets here.
+                    ring += if x < 0 || y < 0 || x >= dim as isize || y >= dim as isize {
+                        hi
+                    } else {
+                        at(x, y)
+                    };
+                }
+                let v = at(mx, my);
+                let sharp = v + sharpen * (v - ring / 8.0);
+                if hi - lo > 8.0 && sharp < (lo + hi) / 2.0 {
+                    matrix.set(mx as usize, my as usize, true);
+                }
+            }
+        }
+        matrix
     }
 
     /// Sample every module centre `(col+0.5, row+0.5)` into a clean [`BitMatrix`],
@@ -740,6 +977,220 @@ impl Located {
         }
         matrix
     }
+}
+
+/// What the QR layout fixes at module `(x, y)` of a `dim × dim` symbol: `Some(dark)`
+/// for the finder patterns, their separators, the timing tracks and the alignment
+/// patterns; `None` for everything the data and format decide.
+fn fixed_module(dim: usize, x: usize, y: usize) -> Option<bool> {
+    let near = |m: usize| m < 8;
+    let far = |m: usize| m + 8 >= dim;
+    let finder = |fx: usize, fy: usize| {
+        // The 7×7 pattern, or the light separator ring just outside it.
+        (fx < 7 && fy < 7)
+            .then(|| finder_module_dark(fx, fy))
+            .or(Some(false))
+    };
+    if near(x) && near(y) {
+        return finder(x, y);
+    }
+    if far(x) && near(y) {
+        return finder(dim - 1 - x, y);
+    }
+    if near(x) && far(y) {
+        return finder(x, dim - 1 - y);
+    }
+    let positions = Version::new(((dim - 17) / 4) as u8).map(alignment_positions)?;
+    let last = positions.len().saturating_sub(1);
+    for (i, &cx) in positions.iter().enumerate() {
+        for (j, &cy) in positions.iter().enumerate() {
+            // The three positions the finders occupy carry no alignment pattern.
+            if (i == 0 && j == 0) || (i == 0 && j == last) || (i == last && j == 0) {
+                continue;
+            }
+            let (dx, dy) = (x.abs_diff(cx as usize), y.abs_diff(cy as usize));
+            if dx <= 2 && dy <= 2 {
+                return Some(dx.max(dy) != 1);
+            }
+        }
+    }
+    if x == 6 || y == 6 {
+        return Some((x + y).is_multiple_of(2));
+    }
+    None
+}
+
+/// How finder-like the three corners of `located` are in grey levels: the mean of
+/// their light modules less the mean of their dark ones, over the spread of both — 1
+/// for sharp finders, about 0 for a triple that only passed the run-length test on
+/// print or texture. The finder centres are what the placement was built on, so this
+/// holds whatever else about it is wrong, and costs under two hundred samples.
+fn finder_contrast(frame: &GrayFrame<'_>, located: &Located) -> f32 {
+    let dim = located.dimension;
+    let mut lums: Vec<(f32, bool)> = Vec::with_capacity(3 * 49);
+    for (ox, oy) in [(0, 0), (dim - 7, 0), (0, dim - 7)] {
+        for j in 0..7 {
+            for i in 0..7 {
+                let (px, py) = located
+                    .projection
+                    .map((ox + i) as f64 + 0.5, (oy + j) as f64 + 0.5);
+                lums.push((
+                    sample_bilinear(frame, px, py) as f32,
+                    finder_module_dark(i, j),
+                ));
+            }
+        }
+    }
+    let mean = |dark: bool| {
+        let (sum, n) = lums
+            .iter()
+            .filter(|l| l.1 == dark)
+            .fold((0f32, 0u32), |(s, n), l| (s + l.0, n + 1));
+        sum / n as f32
+    };
+    let contrast = mean(false) - mean(true);
+    let mut sorted: Vec<f32> = lums.iter().map(|l| l.0).collect();
+    sorted.sort_by(f32::total_cmp);
+    let spread = sorted[sorted.len() * 9 / 10] - sorted[sorted.len() / 10];
+    if spread < 8.0 { 0.0 } else { contrast / spread }
+}
+
+/// The least [`finder_contrast`] for an implausible grid to be worth a rescue.
+const MIN_FINDER_CONTRAST: f32 = 0.33;
+
+/// The most data modules [`refine_projection`] reads per trial placement.
+const REFINE_DATA_SAMPLES: usize = 600;
+
+/// How far [`refine_projection`] looks for the corner opposite the finders, in steps
+/// of three-quarters of a module each way.
+const FAR_CORNER_REACH: i32 = 4;
+
+/// How much a decisively read data module counts beside a matching fixed one.
+const REFINE_DATA_WEIGHT: f32 = 0.3;
+
+/// Nudge a located symbol's grid onto the image: move its four corners, a fraction
+/// of a module at a time, to where the fixed patterns — finders, separators, timing
+/// tracks, alignment patterns — read as they are laid out, and the data modules read
+/// most decisively dark or light (a module centre is where blur leaves the most
+/// contrast; a grid off by half a module samples the grey between two).
+///
+/// The finder centres pin three corners to a pixel or so and the fourth is a guess;
+/// on a blurred, tilted or gently curved capture that is a module out across the
+/// far side of the symbol, which this takes back.
+///
+/// Also returns how well the fixed patterns agree with the layout at the placement
+/// reached: 1 for a sharp symbol, around 0 for anything that is not this symbol at
+/// this size.
+fn refine_projection(frame: &GrayFrame<'_>, located: &Located) -> (Projection, f32) {
+    let dim = located.dimension;
+    let d = dim as f64;
+    let src = [(0.0, 0.0), (d, 0.0), (d, d), (0.0, d)];
+    let mut quad = src.map(|(x, y)| located.projection.map(x, y));
+
+    // The modules read per placement: every fixed one, and a spread of the rest.
+    let stride = (dim * dim / REFINE_DATA_SAMPLES).max(1);
+    let mut modules: Vec<(f64, f64, Option<bool>)> = Vec::new();
+    let mut data = 0usize;
+    for y in 0..dim {
+        for x in 0..dim {
+            let fixed = fixed_module(dim, x, y);
+            if fixed.is_none() {
+                data += 1;
+                if !data.is_multiple_of(stride) {
+                    continue;
+                }
+            }
+            modules.push((x as f64 + 0.5, y as f64 + 0.5, fixed));
+        }
+    }
+
+    // Black and white levels from the placement as located.
+    let mut lums: Vec<f32> = modules
+        .iter()
+        .map(|&(x, y, _)| {
+            let (px, py) = located.projection.map(x, y);
+            sample_bilinear(frame, px, py) as f32
+        })
+        .collect();
+    lums.sort_by(f32::total_cmp);
+    let (lo, hi) = (lums[lums.len() / 10], lums[lums.len() * 9 / 10]);
+    if hi - lo < 8.0 {
+        return (located.projection, 0.0);
+    }
+    let (mid, half) = ((lo + hi) / 2.0, (hi - lo) / 2.0);
+
+    // (agreement of the fixed modules, decisiveness of the data modules)
+    let parts = |quad: &[(f64, f64); 4]| -> (f32, f32) {
+        let projection = Projection::quad_to_quad(src, *quad);
+        let (mut fixed_sum, mut data_sum) = (0f32, 0f32);
+        for &(x, y, fixed) in &modules {
+            let (px, py) = projection.map(x, y);
+            let n = ((sample_bilinear(frame, px, py) as f32 - mid) / half).clamp(-1.0, 1.0);
+            match fixed {
+                Some(true) => fixed_sum -= n,
+                Some(false) => fixed_sum += n,
+                None => data_sum += n.abs(),
+            }
+        }
+        (fixed_sum, data_sum)
+    };
+    let score = |quad: &[(f64, f64); 4]| -> f32 {
+        let (fixed, data) = parts(quad);
+        fixed + REFINE_DATA_WEIGHT * data
+    };
+
+    let mut best = score(&quad);
+    // The corner opposite the finders is the one nothing pins: perspective puts it
+    // modules away from where three finder centres suggest. It is looked for across
+    // that range before anything is fine-tuned.
+    let module = f64::from(located.module_size.max(1.0));
+    let far = quad[2];
+    for gy in -FAR_CORNER_REACH..=FAR_CORNER_REACH {
+        for gx in -FAR_CORNER_REACH..=FAR_CORNER_REACH {
+            let mut trial = quad;
+            trial[2] = (
+                far.0 + f64::from(gx) * 0.75 * module,
+                far.1 + f64::from(gy) * 0.75 * module,
+            );
+            let s = score(&trial);
+            if s > best {
+                best = s;
+                quad = trial;
+            }
+        }
+    }
+    for step in [0.6, 0.3, 0.15] {
+        let step = step * f64::from(located.module_size.max(1.0));
+        for _sweep in 0..3 {
+            let mut moved = false;
+            for corner in 0..4 {
+                for axis in 0..2 {
+                    for delta in [-step, step] {
+                        let mut trial = quad;
+                        if axis == 0 {
+                            trial[corner].0 += delta;
+                        } else {
+                            trial[corner].1 += delta;
+                        }
+                        let s = score(&trial);
+                        if s > best {
+                            best = s;
+                            quad = trial;
+                            moved = true;
+                        }
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+    }
+    let fixed_count = modules.iter().filter(|m| m.2.is_some()).count().max(1);
+    (
+        Projection::quad_to_quad(src, quad),
+        parts(&quad).0 / fixed_count as f32,
+    )
 }
 
 /// Local-contrast midpoint `(min + max)/2` of luminance over a `±win`-pixel window centred
@@ -1527,13 +1978,17 @@ fn snap_dimension(estimate: f32) -> Option<usize> {
 /// grid built on false finders in print scores ~0.5 on both — chance.
 const MIN_FINDER_MATCH: f32 = 0.6;
 const MIN_TIMING_MATCH: f32 = 0.6;
+/// The fraction of all fixed modules [`recovered_grid`] asks for.
+const MIN_RECOVERED_MATCH: f32 = 0.8;
 
 /// Whether a sampled grid has QR fixed patterns where a QR would: finders (with
 /// separators) at three corners and alternating timing tracks between them.
-fn plausible_grid(matrix: &BitMatrix) -> bool {
+/// The fractions of a sampled grid's finder modules (with their separators) and of
+/// its timing modules that read as a QR lays them out.
+fn fixed_match(matrix: &BitMatrix) -> (f32, f32) {
     let dim = matrix.width();
     if dim < 21 || matrix.height() != dim {
-        return false;
+        return (0.0, 0.0);
     }
     let (mut hit, mut total) = (0u32, 0u32);
     for (ox, oy) in [(0, 0), (dim - 7, 0), (0, dim - 7)] {
@@ -1575,7 +2030,36 @@ fn plausible_grid(matrix: &BitMatrix) -> bool {
     if std::env::var("ANYD_QR_DEBUG").is_ok() {
         eprintln!("  grid dim={dim} finder={finder:.2} timing={timing:.2}");
     }
+    (finder, timing)
+}
+
+fn plausible_grid(matrix: &BitMatrix) -> bool {
+    let (finder, timing) = fixed_match(matrix);
     finder >= MIN_FINDER_MATCH && timing >= MIN_TIMING_MATCH
+}
+
+/// Whether a grid read by one of the recovery paths wears its fixed patterns as
+/// clearly as a recovered symbol does. Those paths try many placements, and
+/// Reed–Solomon alone will sooner or later pass one of something else — a low
+/// version at level L corrects little and checks little.
+fn recovered_grid(matrix: &BitMatrix) -> bool {
+    let dim = matrix.width();
+    let (mut hit, mut total) = (0u32, 0u32);
+    for y in 0..dim {
+        for x in 0..dim {
+            if let Some(dark) = fixed_module(dim, x, y) {
+                total += 1;
+                hit += u32::from(matrix.get(x, y) == dark);
+            }
+        }
+    }
+    if std::env::var("ANYD_QR_DEBUG").is_ok() {
+        eprintln!(
+            "  recovered dim={dim} fixed={:.3}",
+            hit as f32 / total as f32
+        );
+    }
+    hit as f32 >= MIN_RECOVERED_MATCH * total as f32
 }
 
 /// Whether module `(i, j)` of a 7×7 finder pattern is dark: the outer ring plus the

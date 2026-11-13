@@ -9,6 +9,9 @@
 //! - `tables`    — the ISO Figure 5 module-placement grid and the code-set tables.
 //! - `encode`    — [`Symbol`] → [`BitMatrix`].
 //! - `decode`    — [`BitMatrix`] → [`Symbol`].
+//! - `hex`       — [`BitMatrix`] → pixels: [`render_hex`] draws the hexagons and the
+//!   bullseye (the generic [`crate::render`] paints square modules, which is not what a
+//!   MaxiCode looks like).
 //!
 //! # Structured Carrier Message modes
 //!
@@ -52,6 +55,8 @@ mod decode;
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 pub mod gf;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+mod hex;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod tables;
 
@@ -59,11 +64,32 @@ mod tables;
 pub use decode::MaxiCodeDecoder;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::MaxiCodeEncoder;
+#[cfg(all(feature = "alloc", feature = "encode"))]
+pub use hex::render_hex;
 
 use crate::output::BitMatrix;
 
 /// Total number of six-bit codewords in every MaxiCode symbol.
 const TOTAL_CW: usize = 144;
+
+/// Distance between two rows of modules, in units of the horizontal module pitch
+/// (`√3 / 2`: the rows of a hexagonal lattice).
+#[cfg(feature = "encode")]
+pub(crate) const ROW_PITCH: f64 = 0.866_025_403_784_438_6;
+
+/// Row and column of the module the bullseye is centred on. Module `(row, col)` has
+/// its centre at `(col - CENTER_COL + (row odd ? ½ : 0), (row - CENTER_ROW) · ROW_PITCH)`
+/// module pitches from the bullseye centre.
+#[cfg(feature = "encode")]
+pub(crate) const CENTER_ROW: usize = 16;
+/// See [`CENTER_ROW`].
+#[cfg(feature = "encode")]
+pub(crate) const CENTER_COL: usize = 14;
+
+/// Radii of the bullseye's six ring edges in module pitches, centre outwards: a light
+/// disc, then dark / light rings of equal width out to 4.5 modules.
+#[cfg(feature = "encode")]
+pub(crate) const RING_EDGES: [f64; 6] = [0.5774, 1.3619, 2.1464, 2.9310, 3.7155, 4.5];
 
 /// The Structured Carrier (primary) fields of a Mode 2 or Mode 3 symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]

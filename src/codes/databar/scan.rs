@@ -35,7 +35,9 @@
 //!
 //! The assembled element widths go through the structural decoders
 //! ([`super::decode`], [`super::expanded`]), so the [`Symbol`] is exactly the one they
-//! produce and re-encodes to the same symbol.
+//! produce and re-encodes to the same symbol. The one liberty taken is with Expanded
+//! symbols from generators that write a redundant numeric latch after an FNC1: those
+//! are read as meant (`expanded::decode_printed`), and so re-encode without it.
 
 use super::decode::{decode_omni, omn_char_value};
 use super::expanded::{self, char_value};
@@ -577,7 +579,7 @@ fn expanded_symbol(units: &[&Unit], chars: usize) -> Option<Symbol> {
         el.extend(unit.widths[..len].iter().map(|&w| w as i32));
     }
     el.extend([1, 1]);
-    let sym = expanded::decode(&el).ok()?;
+    let sym = expanded::decode_printed(&el).ok()?;
 
     let (a, b) = units[0].ends();
     let axis = Axis::along(a, b);

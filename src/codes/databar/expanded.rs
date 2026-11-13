@@ -743,6 +743,18 @@ pub(super) fn is_expanded_width(pattern_width: usize) -> bool {
 
 /// Decode a DataBar Expanded element-width sequence into a symbol.
 pub(super) fn decode(el: &[i32]) -> Result<Symbol> {
+    decode_elements(el, false)
+}
+
+/// [`decode`] for a symbol read off a print, which was not necessarily encoded to the
+/// letter: tolerates the redundant numeric latch some generators emit after an FNC1
+/// (see [`parse_general_field`]).
+#[cfg(feature = "scan")]
+pub(super) fn decode_printed(el: &[i32]) -> Result<Symbol> {
+    decode_elements(el, true)
+}
+
+fn decode_elements(el: &[i32], lenient: bool) -> Result<Symbol> {
     let symbol_chars = symbol_chars_for_width(el.len())
         .ok_or_else(|| Error::undecodable("DataBar Expanded: invalid pattern width"))?;
     let data_chars = symbol_chars - 1;
@@ -790,7 +802,7 @@ pub(super) fn decode(el: &[i32]) -> Result<Symbol> {
         }
     }
 
-    let reduced = decode_binary(&bits)?;
+    let reduced = decode_binary(&bits, lenient)?;
     Ok(Symbol::new(
         Symbology::DataBarExpanded,
         vec![Segment::byte(reduced)],
@@ -799,7 +811,7 @@ pub(super) fn decode(el: &[i32]) -> Result<Symbol> {
 }
 
 /// Parse the binary string back into a reduced element string.
-fn decode_binary(bits: &[bool]) -> Result<Vec<u8>> {
+fn decode_binary(bits: &[bool], lenient: bool) -> Result<Vec<u8>> {
     let size = bits.len();
     if size < 5 {
         return Err(Error::undecodable(
@@ -955,7 +967,7 @@ fn decode_binary(bits: &[bool]) -> Result<Vec<u8>> {
         Method::General | Method::Gtin => {}
     }
 
-    parse_general_field(bits, pos, &mut out)?;
+    parse_general_field(bits, pos, lenient, &mut out)?;
     Ok(out)
 }
 
@@ -975,7 +987,22 @@ fn push_decimal(out: &mut Vec<u8>, value: u32, digits: usize) {
 /// Mirrors the ISO/IEC 24724 general-field decoding and the size-aware termination
 /// of independent decoders: trailing pad bits fail the "still <mode>" tests and are
 /// consumed as no-op latches, so no spurious characters are emitted.
-fn parse_general_field(bits: &[bool], start: usize, out: &mut Vec<u8>) -> Result<()> {
+///
+/// An FNC1 in alphanumeric or ISO/IEC 646 mode latches to numeric by itself
+/// (§7.2.5.5.2), but some generators follow it with an explicit numeric latch `000`
+/// all the same. Read to the letter that is the start of a `0000` alphanumeric latch,
+/// and the digits behind it come out as garbage. With `lenient` set, an FNC1 followed
+/// by seven bits that are no numeric pair (value below 8) is taken to carry such a
+/// latch. GS1 data has an Application Identifier — two digits at least, hence a
+/// numeric pair — after every FNC1, so on a well-formed GS1 symbol this never fires;
+/// it does misread a symbol whose FNC1 is followed by a non-digit, which is why the
+/// structural decoder, bound to reproduce whatever the encoder accepts, leaves it off.
+fn parse_general_field(
+    bits: &[bool],
+    start: usize,
+    lenient: bool,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     let size = bits.len();
     let mut pos = start;
     let mut mode = GfMode::Numeric;
@@ -992,6 +1019,14 @@ fn parse_general_field(bits: &[bool], start: usize, out: &mut Vec<u8>) -> Result
             out.push($b);
         }};
     }
+    // Skip the redundant numeric latch after an FNC1 at `pos`, if there is one.
+    let after_fnc1 = |pos: usize| {
+        if lenient && pos + 7 <= size && read_bits(bits, pos, 7) < 8 {
+            pos + 3
+        } else {
+            pos
+        }
+    };
     macro_rules! emit_fnc1 {
         () => {{
             if pending_fnc1 {
@@ -1046,7 +1081,7 @@ fn parse_general_field(bits: &[bool], start: usize, out: &mut Vec<u8>) -> Result
                     let v5 = read_bits(bits, pos, 5);
                     if v5 == 15 {
                         emit_fnc1!();
-                        pos += 5;
+                        pos = after_fnc1(pos + 5);
                         mode = GfMode::Numeric;
                     } else if (5..15).contains(&v5) {
                         emit!(b'0' + (v5 - 5) as u8);
@@ -1076,7 +1111,7 @@ fn parse_general_field(bits: &[bool], start: usize, out: &mut Vec<u8>) -> Result
                     let v5 = read_bits(bits, pos, 5);
                     if v5 == 15 {
                         emit_fnc1!();
-                        pos += 5;
+                        pos = after_fnc1(pos + 5);
                         mode = GfMode::Numeric;
                     } else if (5..15).contains(&v5) {
                         emit!(b'0' + (v5 - 5) as u8);
@@ -1243,6 +1278,45 @@ mod tests {
     fn truncated_method1_header_is_rejected() {
         let el = elements_for(&[0x400, 0, 0]);
         assert!(decode(&el).is_err());
+    }
+
+    /// Some generators follow an FNC1 written in alphanumeric mode with a numeric
+    /// latch, though the FNC1 latches by itself. The structural decoder reads such a
+    /// stream to the letter; the reader of printed symbols skips the latch.
+    #[test]
+    fn redundant_numeric_latch_after_fnc1() {
+        // "10" "12" in numeric pairs, latch to alphanumeric, "A", FNC1, [latch],
+        // then "21" "12" "34" in numeric pairs.
+        let stream = |latch: &str| -> Vec<i32> {
+            let mut bits = alloc::string::String::from("0" /* linkage */);
+            bits += "0000"; // method 2, length bits (not read back)
+            bits += "0010011"; // 11 * 1 + 0 + 8
+            bits += "0010101"; // 11 * 1 + 2 + 8
+            bits += "0000"; // alphanumeric latch
+            bits += "100000"; // 'A' - 33
+            bits += "01111"; // FNC1
+            bits += latch;
+            bits += "0011111"; // 11 * 2 + 1 + 8
+            bits += "0010101";
+            bits += "0101101"; // 11 * 3 + 4 + 8
+            while bits.len() % 12 != 0 {
+                bits.push('0');
+            }
+            bits.as_bytes()
+                .chunks(12)
+                .map(|c| c.iter().fold(0, |v, &b| (v << 1) | (b - b'0') as i32))
+                .collect()
+        };
+        let want: &[u8] = b"1012A\x1d211234";
+        let reduced = |el: &[i32], lenient: bool| {
+            decode_elements(el, lenient).map(|sym| sym.segments[0].data.clone())
+        };
+        let conformant = elements_for(&stream(""));
+        assert_eq!(reduced(&conformant, false).unwrap(), want);
+        assert_eq!(reduced(&conformant, true).unwrap(), want);
+        let latched = elements_for(&stream("000"));
+        assert_eq!(reduced(&latched, true).unwrap(), want);
+        assert_ne!(reduced(&latched, false).ok().as_deref(), Some(want));
     }
 
     /// Structurally valid symbols (correct finders and check character) carrying

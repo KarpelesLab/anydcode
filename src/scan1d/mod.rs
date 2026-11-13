@@ -284,6 +284,8 @@ fn scan_all(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Vec<(usize, LinearCand
 pub(crate) struct Analysis {
     lines: Vec<LineRuns>,
     min_runs: usize,
+    /// Frame size, in pixels.
+    size: (usize, usize),
 }
 
 /// One scan line's profile and the edges each extractor found on it.
@@ -317,6 +319,7 @@ pub(crate) fn analyze(frame: &GrayFrame<'_>, opts: &ScanOptions) -> Analysis {
     Analysis {
         lines,
         min_runs: opts.min_runs,
+        size: (w, h),
     }
 }
 
@@ -368,6 +371,44 @@ impl Analysis {
         }
         found.sort_by(|a, b| b.1.confidence.total_cmp(&a.1.confidence));
         found
+    }
+
+    /// The raw edge positions of every line, one sequence per edge extractor that
+    /// found any, tagged with the line's index: sub-pixel sample positions along the
+    /// line (map them into the frame with [`Analysis::point`]). Consecutive pairs bound
+    /// alternating runs, of which the first and the last are *light*: the margins
+    /// outside the line's first and last bar, each reaching to the frame's edge or to
+    /// a dark run the frame clips.
+    ///
+    /// Unlike [`Analysis::spans`] nothing is cut at wide runs or quantized, and the
+    /// margins are kept as runs: this is for a reader that finds its own symbol inside
+    /// the line by its finder patterns (GS1 DataBar), which may have no quiet zone at
+    /// all — a symbol cropped to its outermost bar has its first space there.
+    #[cfg_attr(not(feature = "databar"), allow(dead_code))]
+    pub(crate) fn line_edges(&self) -> impl Iterator<Item = (usize, Vec<f32>)> {
+        self.lines.iter().enumerate().flat_map(|(idx, l)| {
+            [&l.hyst, &l.grad].into_iter().flatten().map(move |runs| {
+                let n = runs.edges.len();
+                let mut edges = Vec::with_capacity(n + 2);
+                edges.push(runs.edges[0] - runs.lead_px);
+                edges.extend_from_slice(&runs.edges);
+                edges.push(runs.edges[n - 1] + runs.trail_px);
+                (idx, edges)
+            })
+        })
+    }
+
+    /// Frame position of (fractional) sample `pos` along line `line`. A slanted line
+    /// starts and ends outside the frame, where it samples the border pixels: such
+    /// positions are reported on the border.
+    #[cfg_attr(not(feature = "databar"), allow(dead_code))]
+    pub(crate) fn point(&self, line: usize, pos: f32) -> Point {
+        let p = self.lines[line].line.point(pos);
+        let (w, h) = self.size;
+        Point::new(
+            p.x.clamp(0.0, w.saturating_sub(1) as f32),
+            p.y.clamp(0.0, h.saturating_sub(1) as f32),
+        )
     }
 }
 

@@ -422,6 +422,10 @@ fn scan_1d_sweep(
     if let Some(s) = crate::codes::ean::scan_analysis(&analysis) {
         found.push(s);
     }
+    // GS1 DataBar has no start/stop pattern to cut a span by: its reader searches the
+    // lines for finder patterns itself.
+    #[cfg(feature = "databar")]
+    dedup_extend(&mut found, crate::codes::databar::scan_analysis(&analysis));
     let linear: Vec<Box<dyn Decode>> = alloc::vec![
         #[cfg(feature = "code128")]
         Box::new(crate::codes::code128::Code128Decoder::new()),

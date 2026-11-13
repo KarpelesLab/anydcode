@@ -5,6 +5,9 @@
 //! - `widths`  — the combinatorial width <-> value algorithms (Annex B).
 //! - `encode`  — [`Symbol`] -> [`LinearPattern`].
 //! - `decode`  — [`LinearPattern`] -> [`Symbol`].
+//! - `scan`    — scan-line run widths -> [`Symbol`]: the reader behind
+//!   [`crate::pipeline::scan_1d`], which finds a symbol in a photograph by its finder
+//!   patterns ([`scan`]).
 //!
 //! ## Implemented
 //! - **GS1 DataBar Omnidirectional** ([`Symbology::DataBarOmni`], RSS-14): a
@@ -43,6 +46,17 @@
 //! zone is a 1-module margin on all sides, matching the linear encoders. The
 //! construction reuses the linear element-width encoders unchanged.
 //!
+//! ## Reading from images
+//! With the `scan` feature, [`scan`] (and through it [`crate::pipeline::scan_all`],
+//! [`crate::pipeline::scan_1d`] and [`crate::pipeline::scan_linear_at`]) reads
+//! Omnidirectional/Truncated, Stacked, Stacked Omnidirectional, Expanded and Expanded
+//! Stacked symbols from pixels. The variant reported is the one the layout shows: a
+//! Truncated symbol reads as Omnidirectional (same modules), a stacked symbol whose
+//! rows were all read is told from the one-row symbol by where its halves or blocks
+//! lie, and Stacked from Stacked Omnidirectional by the height its rows were read
+//! over. DataBar Limited, which has no finder pattern of that kind, is not read from
+//! images.
+//!
 //! ## Lossless model
 //! Omnidirectional and Limited encode a canonical 14-digit GTIN (13-digit body plus
 //! its GS1 mod-10 check digit) as a single [`Segment::numeric`]. Expanded stores its
@@ -76,6 +90,8 @@ mod decode;
 mod encode;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod expanded;
+#[cfg(feature = "scan")]
+mod scan;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
 mod stacked;
 #[cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code))]
@@ -87,6 +103,10 @@ mod widths;
 pub use decode::DataBarDecoder;
 #[cfg(all(feature = "alloc", feature = "encode"))]
 pub use encode::DataBarEncoder;
+#[cfg(feature = "scan")]
+pub use scan::scan;
+#[cfg(feature = "scan")]
+pub(crate) use scan::scan_analysis;
 
 /// Which member of the GS1 DataBar family a symbol is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -566,7 +566,7 @@ fn char_widths(val: i32) -> [i32; 8] {
 }
 
 /// Recover the 12-bit value encoded by a symbol character's 8 element widths.
-fn char_value(w: &[i32; 8]) -> Result<i32> {
+pub(super) fn char_value(w: &[i32; 8]) -> Result<i32> {
     let odd = [w[0], w[2], w[4], w[6]];
     let even = [w[1], w[3], w[5], w[7]];
     let n_odd: i32 = odd.iter().sum();

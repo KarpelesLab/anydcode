@@ -117,7 +117,7 @@ fn omn_group_from_n_odd(n_odd: i32, outside: bool) -> Option<usize> {
 }
 
 /// Recover one Omnidirectional data-character value from its 8 element widths.
-fn omn_char_value(dw: &[i32; 8], outside: bool) -> Result<i32> {
+pub(super) fn omn_char_value(dw: &[i32; 8], outside: bool) -> Result<i32> {
     let odd = [dw[0], dw[2], dw[4], dw[6]];
     let even = [dw[1], dw[3], dw[5], dw[7]];
     let n_odd: i32 = odd.iter().sum();

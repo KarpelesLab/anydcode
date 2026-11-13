@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/KarpelesLab/anydcode/compare/v0.3.0...v0.3.1) - 2026-11-13
+
+### Other
+
+- read symbols the frame cuts short
+- Reed-Solomon corrects erasures as well as errors
+- a wide bar of uneven ink keeps its edge
+- a MaxiCode PNG is drawn as hexagons round its bullseye
+- GS1 DataBar is read from images
+- read printed Expanded symbols that latch to numeric after an FNC1
+- read symbols from scan lines by their finder patterns
+- corpus runner matches GS1 element strings without the AI brackets, lists extra reads
+- the gap between characters may be wide
+- readme, cli: MaxiCode is read from images
+- the corpus runner reads a MaxiCode Structured Carrier as the set writes it
+- sample the hexagonal grid from an image
+- draw the printed symbol - hexagons and bullseye
+- full-range symbols of 23 to 32 layers
+- a shift inside an upper shift
+- a still image's edge stands for the quiet zone
+- two lines against one is not a consensus
+- read symbols of a pixel or two a module
+- read symbols of two pixels a module
+- an elastic grid for surfaces that are not flat; symbols that fill the image
+- corpus runner and QR grid diff; script to fetch the ZXing photographs
+- read small, blurred and tilted captures; nudge the grid onto the image
+
 ## [0.3.0](https://github.com/KarpelesLab/anydcode/compare/v0.2.0...v0.3.0) - 2026-11-12
 
 ### Other

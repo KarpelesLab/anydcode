@@ -54,7 +54,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | PDF417 (Text/Byte/Numeric, EC 0–8) | ✅ | ✅ | ✅⁴ |
 | MicroPDF417 (all 34 size variants) | ✅ | ✅ | ✅⁷ |
 | Code 16K · Code 49 · Codablock F | ✅ | ✅ | ⬜ |
-| GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ✅ | ✅ | ⬜ |
+| GS1 DataBar Stacked / Stacked Omni / Expanded Stacked | ✅ | ✅ | ✅² |
 
 ### 1D — linear
 
@@ -68,7 +68,7 @@ Legend: ✅ done · 🚧 in progress · ⬜ planned.
 | Codabar · MSI Plessey · Plessey | ✅ | ✅ | ✅² |
 | Telepen | ✅ | ✅ | ✅² |
 | Pharmacode (1- & 2-track) | ✅ | ✅ | ⬜ |
-| GS1 DataBar Omni (RSS-14) · Limited · Expanded | ✅ | ✅ | ⬜ |
+| GS1 DataBar Omni (RSS-14) · Limited · Expanded | ✅ | ✅ | ✅² (not Limited) |
 | DX Film Edge | ✅ | ✅ | ⬜ |
 
 ### Postal (height-modulated)
@@ -106,9 +106,16 @@ Code 128, Code 93 and EAN/UPC carry a check character), and a reading that is a 
 of a longer, equally supported one is dropped. EAN/UPC additionally has a width-ratio
 reader for curved and blurred captures. The shared entry points currently try the
 Code 128, EAN/UPC, Code 93, Code 39, ITF and Codabar decoders; the other linear decoders
-are driven by handing `scan1d::scan_spans` candidates to `scan1d::try_decode`. DataBar
-(finder-pattern based) and Pharmacode need dedicated samplers. End-to-end coverage:
-`tests/live_pipeline.rs`, `tests/scan1d_pipeline.rs`, `tests/rotated1d.rs`.
+are driven by handing `scan1d::scan_spans` candidates to `scan1d::try_decode`. GS1
+DataBar has no start/stop pattern to cut a span by, so it has its own reader on the
+same scan lines (`codes::databar::scan`): it finds the finder patterns by their
+width ratios, reads the data characters either side of each, and assembles a symbol
+from halves (Omnidirectional family) or blocks (Expanded family) that at least two scan
+lines read identically, that pass the checksum, and that lie where the parts of one
+symbol do — which is also how the rows of a stacked symbol, read on different lines,
+come together. DataBar Limited and Pharmacode still need dedicated samplers. End-to-end
+coverage: `tests/live_pipeline.rs`, `tests/scan1d_pipeline.rs`, `tests/rotated1d.rs`,
+`tests/databar_image.rs`.
 
 ³ Data Matrix ships an image sampler: Otsu binarization → the largest few dark
 components tried in turn, each analysed under a mask clipped to its own quad (so a dark

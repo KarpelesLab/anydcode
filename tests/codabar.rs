@@ -127,3 +127,35 @@ fn oversized_elements_are_not_wide() {
         );
     }
 }
+
+/// The gap between characters carries no data and is printed anywhere from narrow
+/// to wide; one wider than a wide element is a break between two symbols.
+#[test]
+fn inter_character_gaps_may_be_wide() {
+    use anyd::output::{Encoding, LinearPattern};
+    let enc = CodabarEncoder::new();
+    let symbol = enc.build(b'A', b"3419500", b'A').unwrap();
+    let Encoding::Linear(clean) = enc.encode(&symbol).unwrap() else {
+        panic!("Codabar encodes to a linear pattern");
+    };
+    let decode = |modules: Vec<bool>| {
+        let mut p = LinearPattern::new();
+        p.modules = modules;
+        CodabarDecoder::new().decode(&Encoding::Linear(p))
+    };
+    // Runs 7, 15, 23, … are the gaps: widen every one of them.
+    for width in [2, 3] {
+        let mut modules = clean.modules.clone();
+        for gap in (7..8 * 9 - 1).step_by(8) {
+            modules = with_run_width(&modules, gap, width);
+        }
+        let decoded = decode(modules).unwrap();
+        assert_eq!(
+            decoded.payload_bytes(),
+            symbol.payload_bytes(),
+            "gap {width}"
+        );
+        assert_eq!(decoded.meta, symbol.meta);
+    }
+    assert!(decode(with_run_width(&clean.modules, 7, 4)).is_err());
+}

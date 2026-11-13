@@ -293,9 +293,12 @@ impl Decode for CodabarDecoder {
         for c in 0..k {
             let base = c * 8;
             chars.push(char_from_widths(&runs[base..base + 7])?);
-            // The gap element after every non-final character must be a narrow space.
-            if c + 1 < k && runs[base + 7] > 1 {
-                return Err(Error::undecodable("Codabar inter-character gap not narrow"));
+            // The gap after every non-final character carries no data, and printers
+            // make it anything from a narrow space to a wide one. (The encoder writes
+            // it narrow, so a symbol printed with wider gaps re-encodes to the same
+            // characters but not the same pattern.)
+            if c + 1 < k && runs[base + 7] > MAX_WIDE {
+                return Err(Error::undecodable("Codabar inter-character gap too wide"));
             }
         }
 

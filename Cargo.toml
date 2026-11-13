@@ -162,3 +162,7 @@ required-features = ["cli"]
 [[example]]
 name = "qrdiff"
 required-features = ["cli"]
+
+[[example]]
+name = "dmdebug"
+required-features = ["cli"]

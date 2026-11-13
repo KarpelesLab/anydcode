@@ -207,7 +207,42 @@ fn binarizations(frame: &GrayFrame<'_>) -> [BinaryImage; 2] {
 }
 
 /// Full detect + geometry + size/chirality search + structural decode.
+///
+/// A small frame that yields nothing is read once more at twice the size: the
+/// geometry probes work a couple of pixels in from each edge, which at two pixels a
+/// module — a symbol as software writes it to a file — is already the next module.
 fn solve(frame: &GrayFrame<'_>) -> Result<(Located, Symbol)> {
+    if let Ok(result) = solve_at_scale(frame) {
+        return Ok(result);
+    }
+    let (w, h) = (frame.width(), frame.height());
+    if w * h <= UPSCALE_MAX_PIXELS && w >= MIN_FRAME && h >= MIN_FRAME {
+        let mut big = vec![0u8; 4 * w * h];
+        for y in 0..2 * h {
+            for x in 0..2 * w {
+                big[y * 2 * w + x] = frame.get_unchecked(x / 2, y / 2);
+            }
+        }
+        if let Ok(doubled) = GrayFrame::new(&big, 2 * w, 2 * h)
+            && let Ok((mut located, symbol)) = solve_at_scale(&doubled)
+        {
+            // Pixel centres sit on whole coordinates, in both frames.
+            located.corners = located
+                .corners
+                .map(|p| Point::new((p.x - 0.5) / 2.0, (p.y - 0.5) / 2.0));
+            return Ok((located, symbol));
+        }
+    }
+    Err(Error::undecodable("no candidate Data Matrix grid decoded"))
+}
+
+/// The largest frame, in pixels, that [`solve`] reads a second time at twice the
+/// size. Above it a symbol of two pixels a module is a small part of the picture,
+/// and the second pass a cost every frame without a symbol would pay.
+const UPSCALE_MAX_PIXELS: usize = 320 * 200;
+
+/// [`solve`] on the frame as given.
+fn solve_at_scale(frame: &GrayFrame<'_>) -> Result<(Located, Symbol)> {
     let threshold = otsu_threshold(frame);
     for bin in binarizations(frame) {
         if let Ok(result) = solve_with(frame, &bin, threshold) {

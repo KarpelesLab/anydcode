@@ -545,3 +545,35 @@ fn rectangles_under_perspective() {
         }
     }
 }
+
+/// A symbol as software writes it to a file: two pixels to the module, with the
+/// one-module quiet zone. Every rectangle and a spread of squares.
+#[test]
+fn two_pixel_modules() {
+    for &(w, h) in RECTANGLES {
+        let (matrix, expected) = rectangle(w, h);
+        let img = render_matrix(&matrix, 2);
+        assert_decodes(&img, &expected, &format!("{w}x{h} at 2 px"));
+        let sampled = sample_grid(&img.as_frame()).unwrap();
+        assert_eq!(sampled, matrix, "{w}x{h} at 2 px");
+    }
+    for payload in cases() {
+        let (matrix, expected) = encode(&payload);
+        let img = render_matrix(&matrix, 2);
+        if img.width() * img.height() <= 320 * 200 {
+            assert_decodes(&img, &expected, &format!("dim{} at 2 px", matrix.width()));
+        }
+    }
+    // The reported outline is in the frame's own pixels.
+    let (matrix, _) = rectangle(48, 16);
+    let img = render_matrix(&matrix, 2);
+    let location = scan(&img.as_frame()).unwrap().location.unwrap();
+    for p in location.outline.corners {
+        assert!(p.x >= 0.0 && p.x <= img.width() as f32, "{p:?}");
+        assert!(p.y >= 0.0 && p.y <= img.height() as f32, "{p:?}");
+    }
+    let xs = location.outline.corners.map(|p| p.x);
+    let span =
+        xs.iter().fold(f32::MIN, |a, &b| a.max(b)) - xs.iter().fold(f32::MAX, |a, &b| a.min(b));
+    assert!((span - 96.0).abs() < 3.0, "{span}");
+}

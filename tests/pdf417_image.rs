@@ -403,3 +403,113 @@ fn tiny_modules() {
         }
     }
 }
+
+// ===================================================================================
+// Symbols cut short by the frame
+// ===================================================================================
+//
+// A crop (or a camera held too close) may leave only one guard in the frame. The
+// reader then works from that guard and its row indicators alone, and Reed–Solomon
+// fills in the columns the frame does not hold.
+
+/// Columns `x0..x1` of `img`.
+fn crop_columns(img: &GrayImage, x0: usize, x1: usize) -> GrayImage {
+    let (w, h) = (x1 - x0, img.height());
+    let mut out = GrayImage::filled(w, h, 255);
+    for y in 0..h {
+        for x in 0..w {
+            out.set(x, y, img.get(x0 + x, y));
+        }
+    }
+    out
+}
+
+/// A 4-column symbol at level 4 (32 check codewords, 17 rows): a missing column is 17
+/// erasures, well inside what the level fills in.
+fn croppable() -> (anyd::Symbol, BitMatrix) {
+    let enc = Pdf417Encoder::new();
+    let symbol = enc
+        .build_sized(
+            vec![Segment::alphanumeric(
+                b"CUT SHORT BY THE FRAME 0123456789".to_vec(),
+            )],
+            level(4),
+            Some(4),
+        )
+        .expect("in-capacity payload");
+    let Encoding::Matrix(matrix) = enc.encode(&symbol).expect("encode") else {
+        panic!("PDF417 encodes to a matrix");
+    };
+    assert_eq!(matrix.width(), 17 * 4 + 69);
+    (symbol, matrix)
+}
+
+#[test]
+fn one_guard_cropped_away() {
+    let (symbol, matrix) = croppable();
+    let enc = Pdf417Encoder::new();
+    for (scale, sigma) in [(2usize, 0.0f32), (3, 0.8), (6, 1.2)] {
+        let full = render_matrix(&matrix, scale);
+        let full = if sigma > 0.0 {
+            let mut rng = Rng::new(0xC0FF);
+            transform::add_noise(&transform::gaussian_blur(&full, sigma), 4.0, &mut rng)
+        } else {
+            full
+        };
+        let w = full.width();
+        // Modules cut off one side: half a guard; the guard and its row indicator;
+        // those and a data column besides. (The render adds a 2-module quiet zone.)
+        for cut in [10usize, 2 + 17 + 17 + 3, 2 + 17 + 17 + 17 + 5] {
+            for from_left in [true, false] {
+                let label = format!("{scale} px, {cut} modules off, left={from_left}");
+                let img = if from_left {
+                    crop_columns(&full, cut * scale, w)
+                } else {
+                    crop_columns(&full, 0, w - cut * scale)
+                };
+                let read = scan(&img.as_frame()).unwrap_or_else(|| panic!("{label}: not read"));
+                // The whole symbol, exactly: what was cut off is restored.
+                assert_eq!(read.segments, symbol.segments, "{label}");
+                assert_eq!(read.meta, symbol.meta, "{label}");
+                assert_eq!(
+                    enc.encode(&read).unwrap(),
+                    Encoding::Matrix(matrix.clone()),
+                    "{label}"
+                );
+                let location = read.location.expect("a location");
+                for p in location.outline.corners {
+                    assert!(
+                        p.x >= -1.0 && p.x <= img.width() as f32 + 1.0,
+                        "{label}: {p:?}"
+                    );
+                    assert!(
+                        p.y >= -1.0 && p.y <= img.height() as f32 + 1.0,
+                        "{label}: {p:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// What the frame holds must still vouch for the rest: once the missing columns leave
+/// Reed–Solomon no check codewords to spare, there is no read — and never a wrong one.
+#[test]
+fn too_little_of_a_symbol_is_not_read() {
+    let (symbol, matrix) = croppable();
+    let full = render_matrix(&matrix, 3);
+    let w = full.width();
+    // One column missing is 17 of 32 check codewords; two are 34.
+    let one = crop_columns(&full, 0, w - (2 + 18 + 17 + 17 + 2) * 3);
+    let read = scan(&one.as_frame()).expect("one column short reads");
+    assert_eq!(read.segments, symbol.segments);
+    for cut in [18 + 17 + 2 * 17 + 4, 18 + 17 + 3 * 17 + 4] {
+        let two = crop_columns(&full, 0, w - (2 + cut) * 3);
+        assert!(scan(&two.as_frame()).is_none(), "{cut} modules off");
+        let two = crop_columns(&full, (2 + cut - 1) * 3, w);
+        assert!(
+            scan(&two.as_frame()).is_none(),
+            "{cut} modules off the left"
+        );
+    }
+}

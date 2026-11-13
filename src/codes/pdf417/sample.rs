@@ -62,10 +62,15 @@
 //!   hysteresis scaled to the measured noise.
 //! - **Skew:** a few degrees between the image rows and the symbol's, as left by a
 //!   derotation on an estimated axis.
+//! - **Cropping:** a guard may stand at the frame's very border, without a quiet zone;
+//!   and a symbol of which the frame holds only one guard and the columns next to it
+//!   is read from that end, the missing columns being left to Reed–Solomon as
+//!   erasures — as far as the symbol's error-correction level reaches with three
+//!   check codewords to spare.
 //!
 //! Out of scope, and deliberately not asserted: steep rotation (callers derotate; see
-//! [`crate::pipeline::scan_stacked_at`]), multiple symbols per frame, and symbols whose
-//! guards are clipped by the frame edge.
+//! [`crate::pipeline::scan_stacked_at`]), multiple symbols per frame, and symbols cut
+//! short at the top or bottom.
 
 use super::Pdf417Decoder;
 use super::tables::{CODEWORD_PATTERNS, ROW_HEIGHT, START_PATTERN, STOP_PATTERN};
@@ -934,6 +939,44 @@ fn hysteresis(sigma: f32, range: f32) -> f32 {
     (3.0 * sigma).max(0.05 * range).max(5.0)
 }
 
+/// One guard column, as found by the grey-level reader.
+#[derive(Debug, Clone, Copy)]
+struct Guard {
+    /// Ends of the pattern's outer edge.
+    top: Point,
+    bottom: Point,
+    /// Module pitch measured along image rows.
+    unit: f32,
+}
+
+/// Which guard a symbol is read from when only one is in the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Side {
+    Start,
+    Stop,
+}
+
+/// Fill in the samples of `line` that lie outside the frame, given that
+/// `inside` (`first..end`) are those within it.
+///
+/// What is beyond the frame is taken to continue its border pixel: the quiet zone goes
+/// on. But a symbol may be cropped to its very edge, the frame ending on a guard's
+/// bar with no quiet zone at all — and a bar that never begins has no edge to be found
+/// by. So where the border is dark (nearer the line's darkest sample than its
+/// lightest), what lies beyond it is taken to be as light as the line gets.
+fn beyond_frame(line: &mut [f32], first: usize, end: usize) {
+    if first >= end {
+        return;
+    }
+    let (lo, hi) = line[first..end]
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
+    let fill = |border: f32| if border < (lo + hi) / 2.0 { hi } else { border };
+    let (left, right) = (fill(line[first]), fill(line[end - 1]));
+    line[..first].fill(left);
+    line[end..].fill(right);
+}
+
 /// The two guard columns of a symbol, as found by the grey-level reader.
 struct Guards {
     /// Ends of the start pattern's outer (left) edge.
@@ -955,14 +998,16 @@ const MIN_GREY_ANCHORS: usize = 5;
 ///
 /// `inward` is `+1` for the start guard (the symbol lies to its right) and `-1` for the
 /// stop guard; `bar` is how far inside the edge, in modules, the centre of the guard's
-/// wide bar lies.
+/// wide bar lies, and `space` the centre of its three-module space — the light level
+/// to judge the bar against where the frame ends at the guard and shows no quiet zone.
 fn fit_guard(
     frame: &GrayFrame<'_>,
     anchors: &[(Point, f32)],
     inward: f32,
     bar: f32,
+    space: f32,
     rng: &mut Prng,
-) -> Option<(Point, Point, f32)> {
+) -> Option<Guard> {
     if anchors.len() < MIN_GREY_ANCHORS {
         return None;
     }
@@ -1007,11 +1052,13 @@ fn fit_guard(
         ) as f32
     };
     let quiet_at = |y: f32| {
-        sample_bilinear(
-            frame,
-            f64::from(x_at(y) - inward * 1.5 * unit),
-            f64::from(y),
-        ) as f32
+        let outside = x_at(y) - inward * 1.5 * unit;
+        let x = if outside < 0.0 || outside > (frame.width() - 1) as f32 {
+            x_at(y) + inward * space * unit
+        } else {
+            outside
+        };
+        sample_bilinear(frame, f64::from(x), f64::from(y)) as f32
     };
     let dark = median(&core.iter().map(|&y| bar_at(y)).collect::<Vec<_>>());
     let light = median(&core.iter().map(|&y| quiet_at(y)).collect::<Vec<_>>());
@@ -1040,20 +1087,23 @@ fn fit_guard(
     };
     let top = walk(core[0], -1.0);
     let bottom = walk(core[core.len() - 1], 1.0);
-    Some((
-        Point::new(x_at(top), top),
-        Point::new(x_at(bottom), bottom),
+    Some(Guard {
+        top: Point::new(x_at(top), top),
+        bottom: Point::new(x_at(bottom), bottom),
         unit,
-    ))
+    })
 }
 
-/// Find the start and stop guards on the grey-level image.
-fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> Option<Guards> {
+/// Find the start and the stop guard on the grey-level image, each on its own.
+fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> (Option<Guard>, Option<Guard>) {
     let (w, h) = (frame.width(), frame.height());
     if w < 40 || h < 9 {
-        return None;
+        return (None, None);
     }
-    let mut profile = vec![0f32; w];
+    // The profile has a few samples of margin either side of the image row, for a
+    // guard that ends at the frame's border (see `beyond_frame`).
+    const PAD: usize = 4;
+    let mut profile = vec![0f32; w + 2 * PAD];
     let mut near = [0u32; 256];
     let mut far = [0u32; 256];
     let mut edges: Vec<Edge> = Vec::new();
@@ -1076,9 +1126,10 @@ fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> Option<Guards
         // a quarter of the row is on the symbol.
         near.fill(0);
         far.fill(0);
-        for (x, p) in profile.iter_mut().enumerate() {
+        for (x, p) in profile[PAD..PAD + w].iter_mut().enumerate() {
             *p = (u16::from(r1[x]) + u16::from(r2[x]) + u16::from(r3[x])) as f32 / 3.0;
         }
+        beyond_frame(&mut profile, PAD, PAD + w);
         for x in (0..w).step_by(2) {
             let centre = 2 * i32::from(r2[x]);
             let tight = i32::from(r1[x]) - centre + i32::from(r3[x]);
@@ -1105,7 +1156,7 @@ fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> Option<Guards
                 if let Some(unit) =
                     match_ratios_f(&widths[..START_RATIOS.len()], &START_RATIOS, 0.6)
                 {
-                    starts.push((Point::new(edges[i].pos, y as f32), unit));
+                    starts.push((Point::new(edges[i].pos - PAD as f32, y as f32), unit));
                 }
             }
             if i + STOP_RATIOS.len() < edges.len() {
@@ -1113,7 +1164,7 @@ fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> Option<Guards
                     *wd = edges[i + k + 1].pos - edges[i + k].pos;
                 }
                 if let Some(unit) = match_ratios_f(&widths, &STOP_RATIOS, 0.6) {
-                    let end = edges[i + STOP_RATIOS.len()].pos;
+                    let end = edges[i + STOP_RATIOS.len()].pos - PAD as f32;
                     stops.push((Point::new(end, y as f32), unit));
                 }
             }
@@ -1122,9 +1173,16 @@ fn find_guards(frame: &GrayFrame<'_>, noise: Noise, range: f32) -> Option<Guards
     let mut rng = Prng::new(0x9E37_79B9);
     // The start pattern's 8-module bar is centred 4 modules inside the left edge, the
     // stop pattern's 7-module bar 14.5 modules inside the right one.
-    let (tl, bl, unit_l) = fit_guard(frame, &starts, 1.0, 4.0, &mut rng)?;
-    let (tr, br, unit_r) = fit_guard(frame, &stops, -1.0, 14.5, &mut rng)?;
+    // (Their three-module spaces: 15.5 modules inside the left edge, 7.5 the right.)
+    let start = fit_guard(frame, &starts, 1.0, 4.0, 15.5, &mut rng);
+    let stop = fit_guard(frame, &stops, -1.0, 14.5, 7.5, &mut rng);
+    (start, stop)
+}
 
+/// The start and stop guards as one symbol's, if they can be.
+fn pair_guards(start: &Guard, stop: &Guard) -> Option<Guards> {
+    let (tl, bl, unit_l) = (start.top, start.bottom, start.unit);
+    let (tr, br, unit_r) = (stop.top, stop.bottom, stop.unit);
     // The pair must describe one plausible symbol: start left of stop, comparable
     // heights and pitches, and a width that holds at least one data column.
     let (hl, hr) = (tl.distance(bl), tr.distance(br));
@@ -1418,6 +1476,18 @@ fn vote(cell: &mut Vec<(u16, f32)>, value: u16, weight: f32) {
 /// Least vote weight for a symbol parameter read from the row indicators.
 const MIN_INDICATOR_WEIGHT: f32 = 1.5;
 
+/// Check codewords a correction that fills in unread characters must leave unused.
+///
+/// Filling in `f` erasures and correcting `e` errors consumes `f + 2e` of the `k`
+/// check codewords, and a grid of unrelated values then still passes with a
+/// probability of about `C(n, e) / 929^(k − f − e)`: all the erasures do is take `f`
+/// check codewords out of the test. With `f + 2e + 3 <= k` that is at most
+/// `C(n, e) / 929^(e + 3)`, below `929^-3` — one in 800 million — for any block
+/// length `n` and any `e`. That is stricter than the rule for errors alone has ever
+/// been (level 0 accepts a clean block on two check codewords, `929^-2`), so reading
+/// around unread characters adds no way for a misread grid to pass.
+const ERASURE_MARGIN: usize = 3;
+
 /// A symbol's codewords recovered by the scan-line reader, Reed–Solomon corrected.
 struct Codewords {
     rows: usize,
@@ -1453,28 +1523,49 @@ impl Grid {
     /// Error-correct one reading of the grid (`None` = unread character).
     ///
     /// The level and size come from the row indicators, so the block must decode at
-    /// exactly that level and its length descriptor must match. An unread character
-    /// counts as an error. Weak levels keep a margin for *detection*: with 2 or 4 check
-    /// codewords a full-capacity correction of a badly misread grid would too often
-    /// land on a wrong codeword.
+    /// exactly that level and its length descriptor must match. What is accepted
+    /// beyond that is deliberately less than Reed–Solomon can correct, because every
+    /// check codeword a correction consumes is one fewer to tell a damaged symbol
+    /// from a misread grid that was never one:
+    ///
+    /// - Unread characters are erasures — their positions are known, so each costs one
+    ///   check codeword where a misread one costs two — and a correction that fills
+    ///   any in must leave [`ERASURE_MARGIN`] check codewords unused.
+    /// - Failing that, an unread character is treated like a misread one, under the
+    ///   rule for errors alone: any number the level corrects, except that the weak
+    ///   levels keep a margin — with 2 or 4 check codewords a full-capacity correction
+    ///   of a badly misread grid would too often land on a wrong codeword.
     fn correct(&self, reading: &[Option<u16>]) -> Option<Codewords> {
         let k = 2usize << self.ec_level;
-        let budget = match k {
-            2 => 0,
-            4 => 1,
-            _ => k / 2,
-        };
         let values: Vec<u32> = reading.iter().map(|v| u32::from(v.unwrap_or(0))).collect();
-        if reading.iter().filter(|v| v.is_none()).count() > budget {
-            return None;
-        }
-        let corrected = super::ec::decode(&values, k)?;
-        let changed = reading
-            .iter()
-            .zip(&corrected)
-            .filter(|(read, fixed)| read.map(u32::from) != Some(**fixed))
-            .count();
-        if changed > budget || corrected[0] as usize != values.len() - k {
+        let unread: Vec<usize> = (0..reading.len())
+            .filter(|&i| reading[i].is_none())
+            .collect();
+        let filled = if unread.is_empty() || unread.len() + ERASURE_MARGIN > k {
+            None
+        } else {
+            super::ec::decode_with_erasures(&values, k, &unread)
+                .filter(|(_, errors)| unread.len() + 2 * errors + ERASURE_MARGIN <= k)
+                .map(|(corrected, _)| corrected)
+        };
+        let corrected = filled.or_else(|| {
+            let budget = match k {
+                2 => 0,
+                4 => 1,
+                _ => k / 2,
+            };
+            if unread.len() > budget {
+                return None;
+            }
+            let corrected = super::ec::decode(&values, k)?;
+            let changed = reading
+                .iter()
+                .zip(&corrected)
+                .filter(|(read, fixed)| read.map(u32::from) != Some(**fixed))
+                .count();
+            (changed <= budget).then_some(corrected)
+        })?;
+        if corrected[0] as usize != values.len() - k {
             return None;
         }
         Some(Codewords {
@@ -1489,6 +1580,16 @@ impl Grid {
     fn voted(&self) -> Vec<Option<u16>> {
         self.votes.iter().map(|c| winner(c).map(|w| w.0)).collect()
     }
+}
+
+/// The one row within reach of row coordinate `at` (row `r` spans `r..r+1`) whose
+/// cluster is the one a character was read in.
+fn row_near(at: f32, cluster: u8) -> Option<usize> {
+    let base = at.floor() as i64;
+    (base - 1..=base + 1)
+        .find(|r| r.rem_euclid(3) == i64::from(cluster))
+        .filter(|r| (0..90).contains(r) && (*r as f32 + 0.5 - at).abs() <= 1.0)
+        .map(|r| r as usize)
 }
 
 /// Place every scan line's readings in the codeword grid and vote, cross-checking the
@@ -1537,15 +1638,9 @@ fn assemble(lines: &[Vec<Option<Cw>>]) -> Option<Grid> {
         let at = slope * i as f32 + offset + 0.5;
         for (c, cw) in line.iter().enumerate() {
             let Some(cw) = cw else { continue };
-            // The one row within reach whose cluster matches the reading.
-            let base = at.floor() as i64;
-            let Some(row) = (base - 1..=base + 1)
-                .find(|r| r.rem_euclid(3) == i64::from(cw.cluster))
-                .filter(|r| (0..90).contains(r) && (*r as f32 + 0.5 - at).abs() <= 1.0)
-            else {
+            let Some(row) = row_near(at, cw.cluster) else {
                 continue;
             };
-            let row = row as usize;
             if c == 0 || c == cells - 1 {
                 if cw.value >= 900 || row_of(cw) != row {
                     continue;
@@ -1625,20 +1720,30 @@ const MAX_SCAN_LINES: usize = 1200;
 const LINE_MARGIN: f32 = 4.0;
 
 /// The grey-level scan-line reader: locate the guards, read along the rows, vote.
+///
+/// A symbol with both guards in the frame is read between them. Failing that, each
+/// guard that was found is tried as the one end of a symbol the frame cuts short.
 fn scan_lines(frame: &GrayFrame<'_>) -> Option<Symbol> {
     let (noise, range) = frame_stats(frame);
     if range < 12.0 {
         return None;
     }
-    let g = find_guards(frame, noise, range)?;
-    let mut sym = read_between_guards(frame, noise, range, &g)?;
-    // The guards' outer edges are the symbol's outline.
-    sym.location.get_or_insert_with(|| Location {
-        outline: Quad::new([g.tl, g.tr, g.br, g.bl]),
-        rotation: Some((g.tr.y - g.tl.y).atan2(g.tr.x - g.tl.x)),
-        module_size: Some((g.unit_l + g.unit_r) / 2.0),
-    });
-    Some(sym)
+    let (start, stop) = find_guards(frame, noise, range);
+    if let (Some(start), Some(stop)) = (&start, &stop)
+        && let Some(g) = pair_guards(start, stop)
+        && let Some(mut sym) = read_between_guards(frame, noise, range, &g)
+    {
+        // The guards' outer edges are the symbol's outline.
+        sym.location.get_or_insert_with(|| Location {
+            outline: Quad::new([g.tl, g.tr, g.br, g.bl]),
+            rotation: Some((g.tr.y - g.tl.y).atan2(g.tr.x - g.tl.x)),
+            module_size: Some((g.unit_l + g.unit_r) / 2.0),
+        });
+        return Some(sym);
+    }
+    [(start, Side::Start), (stop, Side::Stop)]
+        .into_iter()
+        .find_map(|(guard, side)| read_from_guard(frame, noise, range, &guard?, side))
 }
 
 /// Read the symbol whose guards are `g`: scan lines along the rows, voted per codeword.
@@ -1692,6 +1797,7 @@ fn read_between_guards(
     }
 
     let mut raw = vec![0f32; n * samples];
+    let (frame_w, frame_h) = ((frame.width() - 1) as f32, (frame.height() - 1) as f32);
     // Per line: positions of the outer edges and the left pitch, in samples.
     let mut layout = Vec::with_capacity(n);
     for i in 0..n {
@@ -1699,10 +1805,19 @@ fn read_between_guards(
         let total = len + LINE_MARGIN * (ul + ur);
         let step = total / (samples - 1) as f32;
         let (x0, y0) = (l.x - LINE_MARGIN * ul * d.0, l.y - LINE_MARGIN * ul * d.1);
-        for (s, v) in raw[i * samples..(i + 1) * samples].iter_mut().enumerate() {
+        let line = &mut raw[i * samples..(i + 1) * samples];
+        // The samples within the frame: `first..end`.
+        let (mut first, mut end) = (samples, 0);
+        for (s, v) in line.iter_mut().enumerate() {
             let at = s as f32 * step;
-            *v = sample_bilinear(frame, f64::from(x0 + at * d.0), f64::from(y0 + at * d.1)) as f32;
+            let (x, y) = (x0 + at * d.0, y0 + at * d.1);
+            if x >= 0.0 && y >= 0.0 && x <= frame_w && y <= frame_h {
+                first = first.min(s);
+                end = s + 1;
+                *v = sample_bilinear(frame, f64::from(x), f64::from(y)) as f32;
+            }
         }
+        beyond_frame(line, first, end);
         layout.push(LineSpan {
             x_l: LINE_MARGIN * ul / step,
             x_r: (LINE_MARGIN * ul + len) / step,
@@ -1711,33 +1826,12 @@ fn read_between_guards(
         });
     }
 
-    // Noise where it matters — on the symbol itself — from the second differences
-    // across neighbouring lines (the pattern is constant down a row, so only the row
-    // boundaries, a minority of the lines, disturb the median).
-    let mut near = [0u32; 256];
-    let mut far = [0u32; 256];
-    let mut count = 0u32;
-    for i in (2..n.saturating_sub(2)).step_by(2) {
-        let line = |k: usize| &raw[k * samples..(k + 1) * samples];
-        let (l0, l1, l2, l3, l4) = (line(i - 2), line(i - 1), line(i), line(i + 1), line(i + 2));
-        for s in (0..samples).step_by(2) {
-            near[((l1[s] - 2.0 * l2[s] + l3[s]).abs() as usize).min(255)] += 1;
-            far[((l0[s] - 2.0 * l2[s] + l4[s]).abs() as usize).min(255)] += 1;
-            count += 1;
-        }
-    }
-    // (Half a level is added back for the truncation to whole levels.)
-    let noise = noise.max(Noise::from_quantiles(
-        quantile(&near, count, 0.5) + 0.5,
-        quantile(&far, count, 0.5) + 0.5,
-        HALF_NORMAL_MEDIAN,
-    ));
-
     let stack = LineStack {
         raw,
         lines: n,
         samples,
     };
+    let noise = noise.max(stack.noise());
 
     let table = build_e_table();
     let hyst = hysteresis(noise.averaged(2 * half + 1), range);
@@ -1764,6 +1858,286 @@ fn read_between_guards(
         .ok()
 }
 
+// -----------------------------------------------------------------------------------
+// One guard (symbols cut short by the frame)
+// -----------------------------------------------------------------------------------
+//
+// A frame may hold only one end of a symbol: the other guard, and with it some of the
+// columns, cropped away or never in view. Everything needed to place the rest is next
+// to the guard that remains — its row indicators give the row of every scan line and,
+// between the three clusters, the symbol's rows, columns and error-correction level.
+// So the scan lines are laid at right angles to that guard and read from it as far as
+// the frame goes; the characters count columns from the guard, and the columns the
+// frame does not hold are erasures for Reed–Solomon to fill in, within the margin of
+// `Grid::correct`.
+
+/// Read one scan line leftwards from the stop pattern, whose outer edge is at `x_r`:
+/// the right row indicator, then the data columns from the last to the first — as far
+/// as `x_min`, where the line begins. The counterpart of [`read_line`], without a
+/// second guard to say how the pitch changes along the row.
+fn read_line_back(
+    edges: &[Edge],
+    x_r: f32,
+    unit: f32,
+    x_min: f32,
+    table: &[(u32, u16)],
+) -> Vec<Option<Cw>> {
+    let mut cells = Vec::new();
+    // The stop pattern is 18 modules wide and, like every character, begins with a bar.
+    let Some(first) = nearest_bar_start(edges, x_r - 18.0 * unit, 2.0 * unit) else {
+        return cells;
+    };
+    let mut unit = unit;
+    let mut pos = edges[first].pos;
+    let mut idx = Some(first);
+    while pos - 17.0 * unit >= x_min && cells.len() <= MAX_ROW_CELLS {
+        let expected = 17.0 * unit;
+        let target = pos - expected;
+        let prev = nearest_bar_start(edges, target, 1.5 * unit);
+        let mut cell = None;
+        if let (Some(i), Some(j)) = (prev, idx)
+            && j == i + 8
+        {
+            let width = edges[j].pos - edges[i].pos;
+            if (width - expected).abs() <= 1.5 * unit {
+                cell = decode_cell(&edges[i..=j], 0.0, table);
+                unit = 0.5 * unit + 0.5 * width / 17.0;
+            }
+        }
+        cells.push(cell);
+        match prev {
+            Some(i) => {
+                pos = edges[i].pos;
+                idx = Some(i);
+            }
+            None => {
+                pos = target;
+                idx = None;
+            }
+        }
+    }
+    cells
+}
+
+/// [`assemble`] for scan lines read from one guard: `lines[i]` holds the row indicator
+/// next to that guard and then the data characters in order of distance from it.
+///
+/// The one indicator column has to supply what two normally do, so each symbol
+/// parameter needs twice the vote; columns the lines do not reach stay without votes.
+fn assemble_from_guard(lines: &[Vec<Option<Cw>>], side: Side) -> Option<Grid> {
+    let row_of = |cw: &Cw| 3 * (cw.value as usize / 30) + cw.cluster as usize;
+    let indicator =
+        |line: &Vec<Option<Cw>>| line.first().copied().flatten().filter(|cw| cw.value < 900);
+    let mut samples: Vec<(f32, f32)> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, line)| Some((i as f32, row_of(&indicator(line)?) as f32)))
+        .collect();
+    let (slope, offset) = fit_rows(&mut samples)?;
+    if slope.is_nan() || slope <= 0.0 {
+        return None;
+    }
+    let row_at = |i: usize, cluster: u8| row_near(slope * i as f32 + offset + 0.5, cluster);
+
+    // Left indicators cycle rows/level/columns over the clusters; right ones are one
+    // step behind.
+    let shift = if side == Side::Start { 0 } else { 2 };
+    let mut fields: [Vec<(u16, f32)>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(cw) = indicator(line)
+            && row_at(i, cw.cluster) == Some(row_of(&cw))
+        {
+            vote(
+                &mut fields[(cw.cluster as usize + shift) % 3],
+                cw.value % 30,
+                cw.weight,
+            );
+        }
+    }
+    let field = |f: usize| -> Option<usize> {
+        winner(&fields[f])
+            .filter(|w| w.1 >= 2.0 * MIN_INDICATOR_WEIGHT)
+            .map(|w| w.0 as usize)
+    };
+    let (row_thirds, level_rows, columns) = (field(0)?, field(1)?, field(2)?);
+    let rows = 3 * row_thirds + level_rows % 3 + 1;
+    let (cols, ec_level) = (columns + 1, level_rows / 3);
+    let k = 2usize << ec_level;
+    let total = rows * cols;
+    if !(3..=90).contains(&rows) || ec_level > 8 || total <= k || total > 928 {
+        return None;
+    }
+    // The guard cannot be taller than the symbol it announces.
+    let last = slope * (lines.len() - 1) as f32 + offset + 0.5;
+    if offset + 0.5 < -1.5 || last > rows as f32 + 1.5 {
+        return None;
+    }
+
+    let mut votes: Vec<Vec<(u16, f32)>> = vec![Vec::new(); total];
+    for (i, line) in lines.iter().enumerate() {
+        for (c, cw) in line.iter().enumerate().skip(1).take(cols) {
+            let Some(cw) = cw else { continue };
+            let col = if side == Side::Start { c - 1 } else { cols - c };
+            if let Some(row) = row_at(i, cw.cluster).filter(|&r| r < rows) {
+                vote(&mut votes[row * cols + col], cw.value, cw.weight);
+            }
+        }
+    }
+    Some(Grid {
+        rows,
+        cols,
+        ec_level,
+        slope,
+        offset,
+        votes,
+    })
+}
+
+/// Read a symbol of which only `guard` is in the frame (see the section comment).
+fn read_from_guard(
+    frame: &GrayFrame<'_>,
+    noise: Noise,
+    range: f32,
+    guard: &Guard,
+    side: Side,
+) -> Option<Symbol> {
+    let height = guard.top.distance(guard.bottom);
+    if height < 2.0 {
+        return None;
+    }
+    // Down the guard, and at right angles to it into the symbol.
+    let down = (
+        (guard.bottom.x - guard.top.x) / height,
+        (guard.bottom.y - guard.top.y) / height,
+    );
+    let inward = match side {
+        Side::Start => (down.1, -down.0),
+        Side::Stop => (-down.1, down.0),
+    };
+    // Module pitch across the guard, from the pitch along image rows.
+    let pitch = guard.unit * down.1.abs();
+    if pitch < 1.0 {
+        return None;
+    }
+    let n = ((height.ceil() as usize) + 1).clamp(2, MAX_SCAN_LINES);
+    let spacing = height / (n - 1) as f32;
+    let half = ((0.45 * pitch / spacing.max(0.25)).round() as usize).min(3);
+
+    // Each line starts a margin outside the guard and runs a pixel a sample to the
+    // frame's border, or to where the widest symbol would end.
+    let margin = (LINE_MARGIN * pitch).ceil();
+    let (w, h) = ((frame.width() - 1) as f32, (frame.height() - 1) as f32);
+    let origin = |i: usize| {
+        let t = i as f32 / (n - 1) as f32;
+        Point::new(
+            guard.top.x + (guard.bottom.x - guard.top.x) * t - inward.0 * margin,
+            guard.top.y + (guard.bottom.y - guard.top.y) * t - inward.1 * margin,
+        )
+    };
+    let reach = |i: usize| {
+        let o = origin(i);
+        let along = |at: f32, d: f32, max: f32| {
+            if d > 1e-6 {
+                (max - at) / d
+            } else if d < -1e-6 {
+                -at / d
+            } else {
+                f32::MAX
+            }
+        };
+        let limit = margin + (17.0 * MAX_ROW_CELLS as f32 + 40.0) * pitch;
+        along(o.x, inward.0, w)
+            .min(along(o.y, inward.1, h))
+            .clamp(0.0, limit.min(8190.0)) as usize
+    };
+    let reaches: Vec<usize> = (0..n).map(reach).collect();
+    let samples = reaches.iter().max()? + 1;
+    if (samples as f32) < margin + 40.0 * pitch {
+        return None; // not even the guard and its row indicator
+    }
+
+    // Past its reach a line repeats its last sample; before the frame begins — the
+    // guard may stand at its very border — it is filled in by `beyond_frame`. The
+    // lines are stored left to right, so those read from the stop guard are reversed.
+    let mut raw = vec![0f32; n * samples];
+    for (i, line) in raw.chunks_exact_mut(samples).enumerate() {
+        let o = origin(i);
+        let mut first = samples;
+        for (s, v) in line.iter_mut().enumerate() {
+            let at = s.min(reaches[i]) as f32;
+            let (x, y) = (o.x + at * inward.0, o.y + at * inward.1);
+            if x >= 0.0 && y >= 0.0 && x <= w && y <= h {
+                first = first.min(s);
+            }
+            *v = sample_bilinear(frame, f64::from(x), f64::from(y)) as f32;
+        }
+        beyond_frame(line, first, samples);
+        if side == Side::Stop {
+            line.reverse();
+        }
+    }
+    let stack = LineStack {
+        raw,
+        lines: n,
+        samples,
+    };
+    let noise = noise.max(stack.noise());
+
+    let table = build_e_table();
+    let hyst = hysteresis(noise.averaged(2 * half + 1), range);
+    let mut profile = vec![0f32; samples];
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut lines: Vec<Vec<Option<Cw>>> = Vec::with_capacity(n);
+    for (i, &reach) in reaches.iter().enumerate() {
+        let (lo, hi) = (i.saturating_sub(half), (i + half).min(n - 1));
+        stack.average(lo, hi, &mut profile);
+        find_edges(&profile, hyst, &mut edges);
+        lines.push(match side {
+            Side::Start => {
+                // `read_line` stops a character and half a stop pattern short of the
+                // far edge it is given; here that is wherever no whole character is left.
+                let span = LineSpan {
+                    x_l: margin,
+                    x_r: reach as f32 + 9.5 * pitch,
+                    unit_l: pitch,
+                    unit_r: pitch,
+                };
+                read_line(&edges, &span, &table, None)
+            }
+            Side::Stop => read_line_back(
+                &edges,
+                (samples - 1) as f32 - margin,
+                pitch,
+                (samples - 1 - reach) as f32,
+                &table,
+            ),
+        });
+    }
+
+    let grid = assemble_from_guard(&lines, side)?;
+    let codewords = grid.correct(&grid.voted())?;
+    let mut sym = Pdf417Decoder::new()
+        .decode_matrix(&render_codewords(&codewords))
+        .ok()?;
+    // The outline is the part of the symbol the lines cover.
+    let width = ((17 * grid.cols + 69) as f32 * pitch).min(samples as f32 - margin);
+    let far = |p: Point| Point::new(p.x + inward.0 * width, p.y + inward.1 * width);
+    let (near_top, near_bottom) = (guard.top, guard.bottom);
+    let outline = match side {
+        Side::Start => [near_top, far(near_top), far(near_bottom), near_bottom],
+        Side::Stop => [far(near_top), near_top, near_bottom, far(near_bottom)],
+    };
+    sym.location.get_or_insert_with(|| Location {
+        outline: Quad::new(outline),
+        rotation: Some(match side {
+            Side::Start => inward.1.atan2(inward.0),
+            Side::Stop => (-inward.1).atan2(-inward.0),
+        }),
+        module_size: Some(pitch),
+    });
+    Some(sym)
+}
+
 /// The scan lines of a symbol: `lines × samples` luminance values, row-major.
 struct LineStack {
     raw: Vec<f32>,
@@ -1772,6 +2146,32 @@ struct LineStack {
 }
 
 impl LineStack {
+    /// Noise where it matters — on the symbol itself — from the second differences
+    /// across neighbouring lines (the pattern is constant down a row, so only the row
+    /// boundaries, a minority of the lines, disturb the median).
+    fn noise(&self) -> Noise {
+        let (n, samples) = (self.lines, self.samples);
+        let mut near = [0u32; 256];
+        let mut far = [0u32; 256];
+        let mut count = 0u32;
+        for i in (2..n.saturating_sub(2)).step_by(2) {
+            let line = |k: usize| &self.raw[k * samples..(k + 1) * samples];
+            let (l0, l1, l2, l3, l4) =
+                (line(i - 2), line(i - 1), line(i), line(i + 1), line(i + 2));
+            for s in (0..samples).step_by(2) {
+                near[((l1[s] - 2.0 * l2[s] + l3[s]).abs() as usize).min(255)] += 1;
+                far[((l0[s] - 2.0 * l2[s] + l4[s]).abs() as usize).min(255)] += 1;
+                count += 1;
+            }
+        }
+        // (Half a level is added back for the truncation to whole levels.)
+        Noise::from_quantiles(
+            quantile(&near, count, 0.5) + 0.5,
+            quantile(&far, count, 0.5) + 0.5,
+            HALF_NORMAL_MEDIAN,
+        )
+    }
+
     /// Mean of lines `lo..=hi`, sample by sample, into `out`.
     fn average(&self, lo: usize, hi: usize, out: &mut [f32]) {
         out.fill(0.0);
@@ -2283,6 +2683,55 @@ mod tests {
     }
 
     #[test]
+    fn unread_characters_are_filled_in_within_a_margin() {
+        // Level 2 has eight check codewords. Reed–Solomon could fill in eight
+        // erasures, but then nothing would be left to check the result against.
+        let data = [12u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        let mut block = data.to_vec();
+        block.extend(crate::codes::pdf417::ec::encode(&data, 8));
+        let grid = |ec_level: usize| Grid {
+            rows: 5,
+            cols: 4,
+            ec_level,
+            slope: 1.0,
+            offset: 0.0,
+            votes: Vec::new(),
+        };
+        let clean: Vec<Option<u16>> = block.iter().map(|&v| Some(v as u16)).collect();
+        let damaged = |unread: &[usize], misread: &[usize]| {
+            let mut reading = clean.clone();
+            for &i in unread {
+                reading[i] = None;
+            }
+            for &i in misread {
+                reading[i] = Some((block[i] as u16 + 1) % 929);
+            }
+            grid(2).correct(&reading).map(|cw| cw.values)
+        };
+        // Five erasures leave the margin of three; one error costs two more.
+        assert_eq!(damaged(&[1, 5, 9, 13, 17], &[]), Some(block.clone()));
+        assert_eq!(damaged(&[1, 5, 9], &[14]), Some(block.clone()));
+        assert_eq!(damaged(&[0, 19], &[14]), Some(block.clone()));
+        assert_eq!(damaged(&[1, 5, 9, 13, 17, 19], &[]), None);
+        assert_eq!(damaged(&[1, 5, 9, 13], &[14]), None);
+        // Without erasures the level's own capacity still applies, as it does when a
+        // lone unread character is no better placed than a misread one.
+        assert_eq!(damaged(&[], &[2, 6, 10, 14]), Some(block.clone()));
+        assert_eq!(damaged(&[3], &[6, 10, 14]), Some(block.clone()));
+        assert_eq!(damaged(&[3], &[2, 6, 10, 14]), None);
+
+        // Level 1 (four check codewords) fills in one unread character, not two.
+        let data = [16u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        let mut block = data.to_vec();
+        block.extend(crate::codes::pdf417::ec::encode(&data, 4));
+        let mut reading: Vec<Option<u16>> = block.iter().map(|&v| Some(v as u16)).collect();
+        reading[7] = None;
+        assert_eq!(grid(1).correct(&reading).expect("one").values, block);
+        reading[11] = None;
+        assert!(grid(1).correct(&reading).is_none());
+    }
+
+    #[test]
     fn a_wide_bar_of_uneven_ink_keeps_its_edge() {
         // The start pattern's bar as a photograph shows it (ZXing's pdf417-2/01): the
         // ink is a few levels lighter along most of the bar than at its darkest spot.
@@ -2303,6 +2752,100 @@ mod tests {
             !edges[1].dark && (edges[1].pos - 40.7).abs() < 0.7,
             "{edges:?}"
         );
+    }
+
+    #[test]
+    fn lines_read_back_from_the_stop_pattern() {
+        // One row of a symbol, as ideal edges: start, left indicator, three data
+        // characters, right indicator, stop. Reading back from the stop pattern gives
+        // the right indicator and then the data, last column first.
+        let table = build_e_table();
+        let values = [(1usize, 33usize), (1, 500), (1, 77), (1, 901), (1, 32)];
+        let unit = 3.0f32;
+        let mut edges: Vec<Edge> = Vec::new();
+        let mut x = 20.0f32;
+        let mut push = |pattern: u32, bits: usize, edges: &mut Vec<Edge>| {
+            let mut prev = false;
+            for bit in (0..bits).rev() {
+                let dark = (pattern >> bit) & 1 != 0;
+                if dark != prev {
+                    edges.push(Edge { pos: x, dark });
+                    prev = dark;
+                }
+                x += unit;
+            }
+            if prev {
+                edges.push(Edge {
+                    pos: x,
+                    dark: false,
+                });
+            }
+        };
+        push(START_PATTERN, 17, &mut edges);
+        for &(cluster, value) in &values {
+            push(CODEWORD_PATTERNS[cluster][value], 17, &mut edges);
+        }
+        push(STOP_PATTERN, 18, &mut edges);
+        let x_r = edges.last().unwrap().pos;
+        let read = |x_min: f32| -> Vec<Option<(u8, u16)>> {
+            read_line_back(&edges, x_r, unit * 1.04, x_min, &table)
+                .iter()
+                .map(|c| c.map(|c| (c.cluster, c.value)))
+                .collect()
+        };
+        let want: Vec<Option<(u8, u16)>> = values
+            .iter()
+            .rev()
+            .map(|&(c, v)| Some((c as u8, v as u16)))
+            .collect();
+        // With the whole row in view, what lies beyond the left indicator is the start
+        // pattern: no character.
+        let all = read(0.0);
+        assert_eq!(all[..5], want[..]);
+        assert!(all[5..].iter().all(|c| c.is_none()), "{all:?}");
+        // Cut inside the first data column: only whole characters are read.
+        let cut = 20.0 + unit * (17.0 * 2.0 + 5.0);
+        assert_eq!(read(cut), want[..3]);
+    }
+
+    #[test]
+    fn guards_flush_with_the_frame_are_found() {
+        // A crop to the symbol's very edge: the frame ends on the guards' outer bars,
+        // with no quiet zone beside them for their first edge to stand against.
+        use crate::codes::pdf417::{EcLevel, Pdf417Encoder};
+        use crate::traits::Encode;
+        let encoder = Pdf417Encoder::new();
+        let symbol = encoder
+            .build_text("FLUSH WITH THE FRAME 0123456789", EcLevel::new(4).unwrap())
+            .unwrap();
+        let encoding = encoder.encode(&symbol).unwrap();
+        let (scale, quiet) = (3usize, QUIET_ZONE);
+        // (Sharp, as software writes a symbol: blur would leave half an edge.)
+        let full = crate::render::render(&encoding, scale);
+        let crop = |x0: usize, x1: usize| {
+            let mut out = crate::image::GrayImage::filled(x1 - x0, full.height(), 255);
+            for y in 0..full.height() {
+                for x in x0..x1 {
+                    out.set(x - x0, y, full.get(x, y));
+                }
+            }
+            out
+        };
+        let w = full.width();
+        // Both guards at the border; then each alone, the far side cut inside the
+        // row indicator.
+        for (x0, x1) in [
+            (quiet * scale, w - quiet * scale),
+            (quiet * scale, w - (quiet + 18 + 8) * scale),
+            ((quiet + 17 + 8) * scale, w - quiet * scale),
+        ] {
+            let image = crop(x0, x1);
+            let read = scan_lines(&image.as_frame())
+                .unwrap_or_else(|| panic!("columns {x0}..{x1}: not read"));
+            assert_eq!(read.segments, symbol.segments);
+            assert_eq!(read.meta, symbol.meta);
+            assert_eq!(encoder.encode(&read).unwrap(), encoding);
+        }
     }
 
     #[test]

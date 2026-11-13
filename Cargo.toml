@@ -154,3 +154,11 @@ required-features = ["scan", "encode", "all-codes"]
 [[example]]
 name = "linedebug"
 required-features = ["scan", "encode", "all-codes"]
+
+[[example]]
+name = "corpus"
+required-features = ["cli"]
+
+[[example]]
+name = "qrdiff"
+required-features = ["cli"]

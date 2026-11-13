@@ -12,3 +12,4 @@
 
 # Agent worktrees
 .claude/
+/testdata/corpus/
